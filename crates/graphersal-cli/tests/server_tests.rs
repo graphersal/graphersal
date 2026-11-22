@@ -601,6 +601,7 @@ fn info_execute_graph_and_static_files() {
     let port = server.port;
 
     let info = get(port, "/api/info").json();
+    assert_eq!(info["protocol"], "graphersal/1");
     assert_eq!(info["server"], "graphersal-dev");
     assert_eq!(info["dev"], true);
     assert_eq!(info["saveable"], false);

@@ -534,6 +534,12 @@ pub struct Context {
     /// The playground UI profile `GET /api/info` names (`uiProfile`), or `None`: the field is
     /// absent and the UI shows its built-in `full` profile.
     pub(crate) ui_profile: Option<Value>,
+    /// The host's name, `GET /api/info` `server` ([`ContextBuilder::server_name`]); `None`:
+    /// [`crate::DEFAULT_SERVER_NAME`].
+    pub(crate) server_name: Option<String>,
+    /// Whether the host is a development server (`GET /api/info` `dev`,
+    /// [`ContextBuilder::dev`]).
+    pub(crate) dev: bool,
     /// The URL prefix a multi-graph host serves this context under (`/db/acme`, no trailing
     /// `/`; [`ContextBuilder::mount_path`]), or `None`: the server's root.
     pub(crate) mount_path: Option<String>,
@@ -619,6 +625,8 @@ pub struct ContextBuilder {
     filter: Option<Arc<dyn RequestFilter>>,
     memory_tracked: bool,
     ui_profile: Option<Value>,
+    server_name: Option<String>,
+    dev: bool,
     mount_path: Option<String>,
     allow_list: Option<AllowList>,
 }
@@ -802,6 +810,23 @@ impl ContextBuilder {
         self
     }
 
+    /// The host's name, as `GET /api/info` `server` answers it (`"graphersal-server"`, ...);
+    /// default: [`crate::DEFAULT_SERVER_NAME`], the CLI's dev server. It only names the host:
+    /// the playground recognizes a Graphersal host by `protocol` ([`crate::PROTOCOL`]), never
+    /// by this name (EXPERIMENTAL).
+    pub fn server_name(mut self, name: impl Into<String>) -> Self {
+        self.server_name = Some(name.into());
+        self
+    }
+
+    /// Whether the host is a development server, as `GET /api/info` `dev` tells the UI (the
+    /// playground shows its "DEV SERVER" badge then); default: `false`. The CLI's dev server
+    /// sets it (EXPERIMENTAL).
+    pub fn dev(mut self, dev: bool) -> Self {
+        self.dev = dev;
+        self
+    }
+
     /// The URL prefix a host serving several graphs mounts this context under (`/db/acme`),
     /// EXPERIMENTAL. The core does not route by it: the HOST strips the prefix from the request
     /// target when it builds the [`crate::Request`] (`/db/acme/api/info` -> `/api/info`, `/db/acme/`
@@ -857,6 +882,8 @@ impl ContextBuilder {
             filter: self.filter,
             memory_tracked: self.memory_tracked,
             ui_profile: self.ui_profile,
+            server_name: self.server_name,
+            dev: self.dev,
             mount_path: self.mount_path,
             presets: self.presets,
             read_only: read_only.clone(),
@@ -909,6 +936,8 @@ impl Context {
             filter: None,
             memory_tracked: false,
             ui_profile: None,
+            server_name: None,
+            dev: false,
             mount_path: None,
             allow_list: None,
         }

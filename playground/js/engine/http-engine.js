@@ -1,5 +1,7 @@
-// The engine over HTTP: the DEV server of the CLI (`graphersal --graph <src> --server`, see the
-// book page "Dev Server and MCP"). DEV mode, unstable, local only. It implements the interface of
+// The engine over HTTP: a Graphersal host, recognized by `GET /api/info` `protocol`
+// (`isEngineInfo`): the DEV server of the CLI (`graphersal --graph <src> --server`, see the book
+// page "Dev Server and MCP"; DEV mode, unstable, local only; `info().dev`) or another host built
+// on graphersal-serve. It implements the interface of
 // engine.js with one request per method; the server answers every method with the structure the
 // WebAssembly engine returns (both run the same Rust session code, crate graphersal-session).
 //
@@ -34,22 +36,24 @@ import { Engine } from './engine.js';
 import { newClientId } from '../change-feed.js';
 import { packGraphView } from '../graph-data.js';
 
-/** The `server` value of `GET /api/info` that identifies a Graphersal dev server. */
-export const SERVER_ID = 'graphersal-dev';
+/**
+ * The protocol ids of the playground HTTP API this engine speaks: a Graphersal host names its
+ * protocol in every `GET /api/info` answer (`protocol`, graphersal-serve's `PROTOCOL`). The number
+ * is the API's major version; a breaking API change bumps it.
+ */
+export const PROTOCOLS = Object.freeze(['graphersal/1']);
 
 /**
- * Whether a `GET /api/info` answer comes from a server this engine talks to: a Graphersal dev
- * server (`server` = `SERVER_ID`), or (EXPERIMENTAL) any other host that names itself (`server`:
- * a non-empty text, e.g. `graphersal-server`) and delivers a UI profile (`uiProfile`, not null).
- * A host of the second kind need not pretend to be a dev server; what its profile shows is the
- * profile's business (a profile without the workspace never asks for a graph).
+ * Whether a `GET /api/info` answer comes from a Graphersal host this engine talks to: it names a
+ * protocol of `PROTOCOLS` (`protocol: 'graphersal/1'`), whatever host it is (the CLI's dev server,
+ * a multi-database server, a third-party host built on graphersal-serve). The host's name
+ * (`server`) only names it: it never decides. An answer without `protocol` (a static file server,
+ * an older host) is no engine; the WebAssembly playground is used then.
  * @param {*} info
  */
 export function isEngineInfo(info) {
   if (!info || typeof info !== 'object' || Array.isArray(info)) return false;
-  if (info.server === SERVER_ID) return true;
-  return typeof info.server === 'string' && info.server.trim() !== ''
-    && info.uiProfile !== undefined && info.uiProfile !== null;
+  return typeof info.protocol === 'string' && PROTOCOLS.includes(info.protocol);
 }
 
 /** The playground root (the directory of index.html): the dev server serves it at `/`. */
@@ -168,8 +172,8 @@ export class HttpEngine extends Engine {
   }
 
   /**
-   * The engine of a `probe` answer when it is a Graphersal dev server or another host with a UI
-   * profile (`isEngineInfo`), else null.
+   * The engine of a `probe` answer when it names a Graphersal protocol (`isEngineInfo`), else
+   * null.
    */
   static fromProbe(probe, options = {}) {
     if (!probe || !isEngineInfo(probe.info)) return null;
@@ -177,9 +181,10 @@ export class HttpEngine extends Engine {
   }
 
   /**
-   * Asks the serving origin whether it is a Graphersal dev server (or another host with a UI
-   * profile, `isEngineInfo`). Resolves to an HttpEngine, or null when it is not (a static file server answers 404 or HTML; the WebAssembly playground
-   * is used then).
+   * Asks the serving origin whether it is a Graphersal host (its `GET /api/info` names a
+   * protocol of `PROTOCOLS`, `isEngineInfo`). Resolves to an HttpEngine, or null when it is not
+   * (a static file server answers 404 or HTML, an older host names no protocol; the WebAssembly
+   * playground is used then).
    * @param {{base?: URL|string, fetch?: Function, headers?: Object<string,string>}} [options]
    * @returns {Promise<HttpEngine|null>}
    */
@@ -227,7 +232,8 @@ export class HttpEngine extends Engine {
       version: i.version,
       memoryTracked: !!i.memoryTracked,
       server: true,
-      dev: true,
+      // A development server (`GET /api/info` `dev`, the CLI's dev server): the DEV badge.
+      dev: i.dev === true,
       saveable: !!i.saveable,
       source: i.source || null,
       store: i.store || null,

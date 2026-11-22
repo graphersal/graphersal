@@ -3,7 +3,9 @@
 // Run: node --test playground/tests/*.test.mjs
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { HttpEngine, SERVER_ID, hostHeaders } from '../js/engine/http-engine.js';
+import { HttpEngine, hostHeaders } from '../js/engine/http-engine.js';
+
+const HOST = { protocol: 'graphersal/1', server: 'graphersal-dev' };
 import { createReadyGate } from '../js/ready.js';
 
 const BASE = 'http://127.0.0.1:8080/';
@@ -24,7 +26,7 @@ function fakeFetch(routes) {
   return { fetch, calls };
 }
 
-const INFO = { server: SERVER_ID, version: '0.1.0', memoryTracked: true, saveable: true, source: '/tmp/g.json', dev: true };
+const INFO = { ...HOST, version: '0.1.0', memoryTracked: true, saveable: true, source: '/tmp/g.json', dev: true };
 
 test('detect: a dev server answers /api/info; anything else is the wasm playground', async () => {
   const { fetch } = fakeFetch({ 'GET /api/info': [200, INFO] });
@@ -43,6 +45,19 @@ test('detect: a dev server answers /api/info; anything else is the wasm playgrou
   assert.equal(await HttpEngine.detect({ base: BASE, fetch: other.fetch }), null);
   const down = async () => { throw new TypeError('Failed to fetch'); };
   assert.equal(await HttpEngine.detect({ base: BASE, fetch: down }), null);
+});
+
+test('info().dev follows the host\'s dev field; an info without protocol is no engine', async () => {
+  assert.equal((await new HttpEngine(INFO, { base: BASE, fetch: fakeFetch({}).fetch }).info()).dev, true);
+  const host = { protocol: 'graphersal/1', server: 'graphersal-server', version: '0.1.0' };
+  const other = await HttpEngine.detect({ base: BASE, fetch: fakeFetch({ 'GET /api/info': [200, host] }).fetch });
+  assert.ok(other instanceof HttpEngine, 'any host naming the protocol');
+  assert.equal((await other.info()).dev, false, 'not a dev server: no DEV badge');
+  assert.equal((await other.info()).server, true);
+  const notDev = fakeFetch({ 'GET /api/info': [200, { ...host, dev: 'yes' }] });
+  assert.equal((await (await HttpEngine.detect({ base: BASE, fetch: notDev.fetch })).info()).dev, false, 'only true counts');
+  const old = fakeFetch({ 'GET /api/info': [200, { server: 'graphersal-dev', dev: true }] });
+  assert.equal(await HttpEngine.detect({ base: BASE, fetch: old.fetch }), null, 'the name alone is no engine');
 });
 
 test('execute posts the script and options as JSON and returns the server response', async () => {

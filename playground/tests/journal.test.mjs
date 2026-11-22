@@ -8,7 +8,9 @@ import {
   readJournal, showMoreJournal, journalRows, journalFooter, journalTime, journalIsoTime, fieldsText,
   levelClass, sourceChoices, JOURNAL_LEVELS, JOURNAL_PAGE_ROWS,
 } from '../js/journal.js';
-import { HttpEngine, SERVER_ID } from '../js/engine/http-engine.js';
+import { HttpEngine } from '../js/engine/http-engine.js';
+
+const HOST = { protocol: 'graphersal/1', server: 'graphersal-dev' };
 
 const T0 = Date.UTC(2026, 9, 31, 9, 15, 2, 345) * 1000 + 678; // µs
 
@@ -213,7 +215,7 @@ test('the dev server engine asks GET /api/journal with the request keys as param
     const u = new URL(url);
     calls.push({ method: init.method || 'GET', path: u.pathname, search: u.searchParams });
     const body = u.pathname === '/api/info'
-      ? { server: SERVER_ID, version: '0.5.0', dev: true }
+      ? { ...HOST, version: '0.5.0', dev: true }
       : page;
     return { ok: true, status: 200, text: async () => JSON.stringify(body) };
   };

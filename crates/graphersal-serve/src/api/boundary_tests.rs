@@ -91,7 +91,7 @@ fn the_api_routes_known_endpoints_and_refuses_the_rest() {
     let context = context();
     let info = handle(&context, request(Method::Get, "/api/info", b""));
     assert_eq!(info.status(), 200);
-    assert_eq!(body_json(&info)["server"], crate::SERVER_ID);
+    assert_eq!(body_json(&info)["server"], crate::DEFAULT_SERVER_NAME);
     assert_eq!(body_json(&info)["readOnly"], false);
     assert_eq!(body_json(&info)["mcp"], Value::Null);
     assert_eq!(
@@ -553,8 +553,34 @@ fn the_ui_profile_is_answered_in_the_info_only_when_set() {
             .build();
         let info = body_json(&handle(&context, request(Method::Get, "/api/info", b"")));
         assert_eq!(info["uiProfile"], profile);
-        assert_eq!(info["server"], crate::SERVER_ID);
+        assert_eq!(info["server"], crate::DEFAULT_SERVER_NAME);
     }
+}
+
+#[test]
+fn every_info_names_the_protocol_and_the_host_sets_its_name_and_dev() {
+    // The default: the protocol marker, the default host name, not a development server.
+    let info = body_json(&handle(&context(), request(Method::Get, "/api/info", b"")));
+    assert_eq!(info["protocol"], crate::PROTOCOL);
+    assert_eq!(info["protocol"], "graphersal/1");
+    assert_eq!(info["server"], "graphersal-dev");
+    assert_eq!(info["server"], crate::DEFAULT_SERVER_NAME);
+    assert_eq!(info["dev"], false);
+    // A host names itself and says it is a development server; the protocol stays.
+    let context = Context::builder(session_runner(), check())
+        .server_name("graphersal-server")
+        .dev(true)
+        .build();
+    let info = body_json(&handle(&context, request(Method::Get, "/api/info", b"")));
+    assert_eq!(info["protocol"], crate::PROTOCOL);
+    assert_eq!(info["server"], "graphersal-server");
+    assert_eq!(info["dev"], true);
+    // A mounted context answers the marker as well.
+    let context = Context::builder(session_runner(), check())
+        .mount_path(Some("/db/acme".into()))
+        .build();
+    let info = body_json(&handle(&context, request(Method::Get, "/api/info", b"")));
+    assert_eq!(info["protocol"], crate::PROTOCOL);
 }
 
 /// A queue that refuses every job (the read-only serving mode's pool when full).

@@ -13,6 +13,10 @@
 //!   answers while it loads or stops ([`Server`]);
 //! - the `Host`/`Origin` checks of a listening server ([`HostCheck`]; where it listens is the
 //!   host's decision);
+//! - the protocol marker every `GET /api/info` answers ([`PROTOCOL`], `"graphersal/1"`), by
+//!   which the playground recognizes any Graphersal host; `server` only names the host
+//!   ([`ContextBuilder::server_name`], default [`DEFAULT_SERVER_NAME`]) and `dev` says whether it
+//!   is a development server ([`ContextBuilder::dev`], the playground's DEV badge);
 //! - the playground UI: a UI directory over the copy embedded at build time ([`Ui`], feature
 //!   `ui-assets`), and the UI profile its pages show ([`ContextBuilder::ui_profile`], `GET
 //!   /api/info` `uiProfile`; a host whose profile brings its own files serves them itself
@@ -103,7 +107,7 @@ mod mount_tests;
 #[cfg(test)]
 mod read_only_tests;
 
-pub use api::{SERVER_ID, handle};
+pub use api::{DEFAULT_SERVER_NAME, PROTOCOL, handle};
 pub use context::{
     Busy, BusyReason, Context, ContextBuilder, Hooks, Job, JobQueue, JobTicker, RequestFilter,
     Runner, SCHEDULED_JOBS_REFUSAL, SESSION_STACK_BYTES, ServeError, spawn_session,

@@ -54,7 +54,7 @@ import { graphSpecProblems } from './profile-graph.js';
 export const CAN_GROUPS = Object.freeze({
   // The top bar, left to right.
   topbar: Object.freeze([
-    'devBadge', // the "DEV SERVER · unstable" badge
+    'devBadge', // the "DEV SERVER · unstable" badge (shown only when the host says it is a dev server, `info().dev`)
     'mcp', // the MCP badge and its usage dialog (needs an MCP endpoint)
     'share', // Share link (top bar and the tab menu's "Share as link…")
     'view', // View ▾ (show, hide and collapse panels)

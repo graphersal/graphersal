@@ -13,7 +13,9 @@ import { setStorageNamespace, storage, storageKey, normalizeMountPath } from '..
 import {
   databaseName, rootHref, homeHref, infoAfterChanges, serverReadOnlyReason,
 } from '../js/server-mode.js';
-import { HttpEngine, SERVER_ID, isEngineInfo } from '../js/engine/http-engine.js';
+import { HttpEngine, PROTOCOLS, isEngineInfo } from '../js/engine/http-engine.js';
+
+const DEV_INFO = { protocol: 'graphersal/1', server: 'graphersal-dev' };
 import { editModeState } from '../js/graph/edit-mode.js';
 import { mcpBadgeTitle, mcpEndpointUrl } from '../js/change-feed.js';
 
@@ -172,7 +174,7 @@ test('the HTTP engine passes mountPath, database, home and the raw info on', asy
     return { ok: true, status: 200, text: async () => JSON.stringify(info) };
   };
   const base = 'http://127.0.0.1:8484/db/acme/';
-  const raw = { server: SERVER_ID, version: '1', mountPath: '/db/acme', home: '/', uploadBytes: 4096, mcp: { endpoint: '/db/acme/mcp', readOnly: false, client: null } };
+  const raw = { ...DEV_INFO, version: '1', mountPath: '/db/acme', home: '/', uploadBytes: 4096, mcp: { endpoint: '/db/acme/mcp', readOnly: false, client: null } };
   const engine = await HttpEngine.detect({ base, fetch: fake(raw) });
   const info = await engine.info();
   assert.equal(info.mountPath, '/db/acme');
@@ -186,26 +188,27 @@ test('the HTTP engine passes mountPath, database, home and the raw info on', asy
   assert.equal(mcpEndpointUrl(info.mcp, 'h:1'), 'http://h:1/db/acme/mcp');
   assert.match(mcpBadgeTitle(info.mcp, 'h:1', 'https:'), /https:\/\/h:1\/db\/acme\/mcp/);
 
-  const plain = await (await HttpEngine.detect({ base, fetch: fake({ server: SERVER_ID, version: '1' }) })).info();
+  const plain = await (await HttpEngine.detect({ base, fetch: fake({ ...DEV_INFO, version: '1' }) })).info();
   assert.equal(plain.mountPath, null, 'the dev server announces no mount');
   assert.equal(plain.home, null);
   assert.equal(databaseName(plain), null);
-  assert.deepEqual(plain.host, { server: SERVER_ID, version: '1' });
+  assert.deepEqual(plain.host, { ...DEV_INFO, version: '1' });
 });
 
-test('isEngineInfo: the dev server, or another named host that delivers a UI profile', () => {
-  assert.equal(isEngineInfo({ server: SERVER_ID }), true, 'the dev server as always');
-  assert.equal(isEngineInfo({ server: SERVER_ID, uiProfile: null }), true);
-  assert.equal(isEngineInfo({ server: 'graphersal-server', uiProfile: { name: 'server' } }), true);
-  assert.equal(isEngineInfo({ server: 'graphersal-server', uiProfile: 'demo' }), true);
-  assert.equal(isEngineInfo({ server: 'graphersal-server' }), false, 'no profile: not a host for this page');
-  assert.equal(isEngineInfo({ server: 'graphersal-server', uiProfile: null }), false);
-  assert.equal(isEngineInfo({ server: '  ', uiProfile: 'demo' }), false, 'the host names itself');
-  assert.equal(isEngineInfo({ uiProfile: 'demo' }), false);
-  assert.equal(isEngineInfo({ server: 7, uiProfile: 'demo' }), false);
+test('isEngineInfo: any host that names the protocol, never by its name', () => {
+  assert.deepEqual(PROTOCOLS, ['graphersal/1']);
+  assert.equal(isEngineInfo({ protocol: 'graphersal/1', server: 'graphersal-dev', dev: true }), true, 'the dev server');
+  assert.equal(isEngineInfo({ protocol: 'graphersal/1', server: 'graphersal-server' }), true, 'another host, no profile needed');
+  assert.equal(isEngineInfo({ protocol: 'graphersal/1', server: 'graphersal-server', uiProfile: 'demo' }), true);
+  assert.equal(isEngineInfo({ protocol: 'graphersal/1' }), true, 'the name does not decide');
+  assert.equal(isEngineInfo({ server: 'graphersal-dev' }), false, 'no protocol: an older host, not an engine');
+  assert.equal(isEngineInfo({ server: 'graphersal-server', uiProfile: { name: 'server' } }), false);
+  assert.equal(isEngineInfo({ protocol: 'graphersal/2', server: 'graphersal-dev' }), false, 'a protocol this page does not speak');
+  assert.equal(isEngineInfo({ protocol: 'other/1' }), false);
+  assert.equal(isEngineInfo({ protocol: 1 }), false);
   assert.equal(isEngineInfo([]), false);
   assert.equal(isEngineInfo(null), false);
-  assert.equal(isEngineInfo('graphersal-dev'), false);
+  assert.equal(isEngineInfo('graphersal/1'), false);
 });
 
 /** A mock multi-database server: the root delivers its own UI profile, a mount answers a database. */
@@ -218,11 +221,11 @@ async function mockServer() {
     if (req.url === '/api/info') {
       if (req.headers.authorization !== 'Bearer t') return send(401, { error: 'a token is required' });
       return send(200, {
-        server: 'graphersal-server', version: '0.9.0', uploadBytes: 1024,
+        protocol: 'graphersal/1', server: 'graphersal-server', version: '0.9.0', uploadBytes: 1024,
         uiProfile: { name: 'server', title: 'Server', startTab: 'list', tabs: [{ id: 'list', title: 'List', module: 'list.js' }], files: 'server-ui/' },
       });
     }
-    if (req.url === '/db/acme/api/info') return send(200, { server: SERVER_ID, version: '0.9.0', mountPath: '/db/acme', database: 'acme', home: '/' });
+    if (req.url === '/db/acme/api/info') return send(200, { ...DEV_INFO, server: 'graphersal-server', version: '0.9.0', mountPath: '/db/acme', database: 'acme', home: '/' });
     return send(404, { error: 'not found' });
   });
   await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
@@ -233,7 +236,7 @@ test('a host that is not the dev server delivers its profile; its mounts link ho
   const { server, base } = await mockServer();
   try {
     const root = await HttpEngine.detect({ base, fetch: globalThis.fetch, headers: { Authorization: 'Bearer t' } });
-    assert.ok(root, 'graphersal-server with a uiProfile is an engine host');
+    assert.ok(root, 'graphersal-server names the protocol: an engine host');
     const info = await root.info();
     assert.equal(info.server, true);
     assert.equal(info.uiProfile.name, 'server');
