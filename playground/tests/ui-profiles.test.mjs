@@ -8,7 +8,7 @@ import { fileURLToPath } from 'node:url';
 import {
   BUILTIN_PROFILES, BUILTIN_NAMES, CAN_KEYS, CAN_GROUPS, ProfileError, validateProfile,
   resolveProfile, createUi, profileFromHash, tabRouteFromHash, routeHash, RESERVED_PARAMS,
-  checkApiMode, headerProblems,
+  checkApiMode, headerProblems, stylesProblems, applyProfileStyles, MAX_STYLES,
 } from '../js/ui-profiles.js';
 
 const root = fileURLToPath(new URL('..', import.meta.url));
@@ -257,4 +257,44 @@ test('demo: its header module file exists; the workspace renders the header left
   const theme = ws.indexOf("can('theme')");
   const share = ws.indexOf("can('share')", spacer);
   assert.ok(spacer > 0 && spacer < header && header < share && header < theme, 'spacer < header module < Share < theme');
+});
+
+test('styles: optional style sheets below files, validated, kept only when given', () => {
+  assert.equal(validateProfile(minimal()).styles, undefined, 'absent: no key');
+  const p = validateProfile(minimal({ files: 'server-ui/', styles: ['server-ui.css', 'more/extra.css'] }));
+  assert.deepEqual(p.styles, ['server-ui.css', 'more/extra.css']);
+  assert.ok(Object.isFrozen(p.styles));
+  const ui = createUi(p, { server: true });
+  assert.deepEqual(ui.styleUrls('https://h.test/proxy/'), [
+    'https://h.test/proxy/server-ui/server-ui.css', 'https://h.test/proxy/server-ui/more/extra.css',
+  ]);
+  assert.deepEqual(createUi(validateProfile(minimal()), {}).styleUrls('https://h.test/'), []);
+  assert.deepEqual(stylesProblems(['a.css']), []);
+  for (const bad of [[], 'a.css', Array.from({ length: MAX_STYLES + 1 }, (_, i) => `s${i}.css`)]) {
+    assert.match(stylesProblems(bad).join(), /must be a list of 1 to 8/);
+  }
+  for (const bad of ['/abs.css', '../up.css', 'a/./b.css', 'https://x.test/a.css', '//x.test/a.css', 'a.js', 'a.css?v=1', 'a b.css', 7]) {
+    assert.match(stylesProblems([bad]).join(), /styles\[0\]" must be a relative path of a \.css file/, JSON.stringify(bad));
+  }
+  assert.match(stylesProblems(['a.css', 'a.css']).join(), /named twice/);
+  assert.throws(() => validateProfile(minimal({ styles: ['x.js'] })), (err) => err instanceof ProfileError && err.problems.some((m) => /styles\[0\]/.test(m)));
+});
+
+test('applyProfileStyles adds one link per sheet, once, on a stand-in document', () => {
+  const head = { children: [], appendChild(el) { this.children.push(el); }, querySelectorAll() { return this.children.filter((c) => 'data-profile-style' in c.attrs); } };
+  const doc = {
+    baseURI: 'https://h.test/proxy/',
+    head,
+    createElement: (tag) => ({ tag, attrs: {}, listeners: {}, setAttribute(k, v) { this.attrs[k] = v; }, addEventListener(k, f) { this.listeners[k] = f; } }),
+  };
+  const ui = createUi(validateProfile(minimal({ files: 'ui/', styles: ['a.css'] })), { server: true });
+  assert.deepEqual(applyProfileStyles(ui, doc), ['https://h.test/proxy/ui/a.css']);
+  assert.equal(head.children.length, 1);
+  assert.equal(head.children[0].tag, 'link');
+  assert.equal(head.children[0].rel, 'stylesheet');
+  assert.equal(head.children[0].href, 'https://h.test/proxy/ui/a.css');
+  assert.equal(typeof head.children[0].listeners.error, 'function', 'a failed load only warns');
+  assert.deepEqual(applyProfileStyles(ui, doc), [], 'never twice');
+  assert.equal(head.children.length, 1);
+  assert.deepEqual(applyProfileStyles(createUi(validateProfile(minimal()), {}), doc), []);
 });

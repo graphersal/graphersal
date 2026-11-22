@@ -2186,49 +2186,6 @@ input.ve-null { color: var(--text-muted); }
 .layer-props .was { color: var(--text-muted); text-decoration: line-through; }
 .layer-foot { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-top: 10px; }
 
-/* Server mode (js/server-mode.js): the database badge in the top bar links to the landing view. */
+/* Server mode (js/server-mode.js): the database badge in the top bar links home (`/api/info` `home`). */
 .db-badge a { color: inherit; text-decoration: none; }
 .db-badge a:hover { text-decoration: underline; }
-.landing-table { width: 100%; margin-top: 12px; }
-.landing-table td { vertical-align: top; }
-/* The admin panel of the landing view (components/landing-page.js, model js/admin-api.js). */
-.landing-head { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
-.landing-head h2 { margin: 32px 0 0; }
-.landing-head h2 ~ .btn { margin-top: 32px; }
-.landing-table-wrap { max-width: 100%; overflow-x: auto; }
-.landing-table .landing-sub { margin-top: 2px; font-size: 12px; overflow-wrap: anywhere; }
-.landing-table td.num { text-align: right; white-space: nowrap; }
-.landing-table .admin-actions { white-space: nowrap; text-align: right; }
-.landing-table .admin-actions .btn + .btn { margin-left: 4px; }
-.landing .notice { display: flex; align-items: flex-start; gap: 8px; margin: 12px 0 0; border: 1px solid var(--border); border-radius: 6px; font-size: 13px; }
-.landing .notice .admin-notice-text { flex: 1 1 auto; min-width: 0; }
-.landing .notice .icon-btn { flex: none; color: inherit; }
-.notice.admin-error { background: var(--danger-soft); color: var(--danger); }
-.admin-help { margin: 4px 0 0; color: var(--text); white-space: pre-wrap; overflow-wrap: anywhere; }
-.admin-problems { margin: 10px 0 0; padding-left: 18px; color: var(--danger); font-size: 12.5px; }
-.admin-dialog { width: min(560px, calc(100% - 32px)); }
-.admin-form label { display: flex; flex-direction: column; gap: 4px; margin: 0 0 10px; font-size: 13px; }
-.admin-form label.inline { flex-direction: row; align-items: center; gap: 8px; }
-.admin-form fieldset { margin: 0 0 10px; padding: 6px 10px; border: 1px solid var(--border); border-radius: 6px; }
-.admin-form legend { padding: 0 4px; font-size: 12px; color: var(--text-muted); }
-.admin-form input:not([type]), .admin-form select, .admin-form textarea { width: 100%; box-sizing: border-box; font: inherit; }
-.admin-form textarea { resize: vertical; font-family: var(--font-mono); font-size: 12.5px; }
-.admin-form input.mono { font-family: var(--font-mono); }
-/* Admin panel part 2 (P3): backups, export, import, models (components/admin-*.js). */
-.admin-warn { color: var(--warn); }
-.admin-hint { color: var(--text); }
-.notice.admin-warn-notice { background: var(--warn-soft); color: var(--warn); }
-.admin-dialog-bar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: 0 0 8px; font-size: 12.5px; }
-.admin-inline-form { display: flex; flex-wrap: wrap; align-items: flex-end; gap: 8px; }
-.admin-inline-form label { flex: 1 1 200px; }
-.admin-inline-form .btn { margin-bottom: 10px; }
-.admin-restore { margin-top: 12px; }
-.admin-progress { display: flex; flex-direction: column; gap: 4px; margin: 0 0 10px; font-size: 12.5px; }
-.admin-progress progress { width: 100%; }
-.admin-sub-head { margin: 20px 0 0; font-size: 14px; }
-/* The admin table has up to five row actions: a wider column, and they wrap rather than hide. */
-.landing .start-inner { max-width: 1160px; }
-.landing-table .admin-actions { white-space: normal; min-width: 250px; }
-.landing-table .admin-actions .btn { margin: 2px 0 2px 4px; }
-.landing-table .admin-actions .btn + .btn { margin-left: 4px; }
-.admin-form .store-dialog-buttons a.btn { text-decoration: none; }

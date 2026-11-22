@@ -240,6 +240,7 @@ unless something asks for another one. A profile names:
 | `can` | what the user can reach: `true`, `false`, `"wasm"` (only in the browser playground) or `"server"` (only with the dev server) per key; a key left out is `false` |
 | `cards` | card templates per label for the profile's tabs (may be empty; see [Cards](#cards)) |
 | `graph` | styles of the profile's graph views per label, classes and legend entries (may be empty; see [Graph views](#graph-views)) |
+| `styles` | optional (EXPERIMENTAL): `["<path>.css", ...]`, one to eight style sheets of the profile, relative paths below `files` like the modules; the page links each one once it has the profile, so a host need not change `index.html` |
 | `files` | where the module files are: `""` (next to the page) or a path ending in `/` on the same origin |
 
 The `can` keys: the top bar's `devBadge`, `mcp`, `share`, `view`, `catalog`, `optimize`, `store`,
@@ -257,7 +258,10 @@ server: exactly the page as it was before profiles.
 names no profile opens `full`). The dev server takes it from `graphersal --server --ui-profile
 NAME|FILE` (a built-in name or a JSON file with a profile object) and tells the page through
 `GET /api/info` (`uiProfile`); a host built on the server's core sets it with
-`ContextBuilder::ui_profile`. A profile name the page does not know, or an object that breaks a
+`ContextBuilder::ui_profile`. A host that is not the dev server can deliver a profile too
+(EXPERIMENTAL): the page talks to any server whose `GET /api/info` names itself in `server` (a
+text such as `"graphersal-server"`) and carries a `uiProfile`; without a `uiProfile` only
+`server: "graphersal-dev"` counts. A profile name the page does not know, or an object that breaks a
 rule above, is shown as an error naming every problem, never replaced by another profile. The
 built-in `demo` profile is a small example: a tab of its own that lists the people of the modern
 graph through a saved query as cards (it shows the script that defines the query when the graph
@@ -278,10 +282,20 @@ parameters from the address (`#/play?tab=<id>&key=value`), and `api`, the **prof
 | `toast(kind, text)` | a notification: `info`, `success`, `warn` or `error` |
 | `navigate(tab, params)` | shows another tab of the profile (and puts it into the address) |
 | `theme` | `mode`, `dark` and `token(name)`, the value of a colour token such as `accent` |
-| `info` | the profile's name and title, whether the engine is the dev server, its version and read-only flag |
+| `info` | the profile's name and title, whether the engine is the dev server, its version and read-only flag; `info.host` (EXPERIMENTAL) is the server's `GET /api/info` answer as the host sent it, with fields of the host's own (for example an upload limit), `null` in the browser playground |
 
 A module that cannot be loaded, has no default export or fails while rendering shows an error
 card in its tab; the other tabs keep working.
+
+**A host's home page.** A server that serves the playground for several graphs, each under its
+own prefix such as `/db/<name>/` (`GET /api/info` `mountPath`), shows the graph's name in the top
+bar. When its `GET /api/info` also has `home` (EXPERIMENTAL), the name links there: `home` is a
+path from the server root that starts with `/` (`"/"` is the root itself, `"/admin/"` a page
+below it). The page turns it into a link relative to itself, climbing one level per segment of
+`mountPath`, so `home: "/"` under `/db/acme/` links to `../../`, and a proxy that puts the whole
+server under a prefix of its own keeps working. A `home` that does not start with a single `/`,
+or has `.`/`..` segments, a query or a fragment, gives no link. The home page itself is
+usually the host's own UI profile.
 
 **The top-bar module.** A choice that affects every tab (a project filter, a status text)
 belongs in the top bar, not inside each tab: the profile key `header: {"module": "<path>.js"}`

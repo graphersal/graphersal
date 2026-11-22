@@ -124,3 +124,16 @@ test('card passes checked options to the renderer and refuses bad ones before re
   assert.throws(() => api.card('memory', {}, { actions: [{ id: 'x', text: 'X' }], onAction: 1 }), /"onAction" must be a function/);
   assert.equal(seen.length, 2, 'nothing rendered for bad options');
 });
+
+test('info.host: the host\'s own /api/info fields, frozen; null without a server answer', () => {
+  const host = { server: 'graphersal-server', uploadBytes: 1024, limits: { a: 1 } };
+  const { api } = harness({ engineInfo: { version: '0.1.0', readOnly: false, host } });
+  assert.equal(api.info.host.uploadBytes, 1024);
+  assert.equal(api.info.host.server, 'graphersal-server');
+  assert.ok(Object.isFrozen(api.info.host) && Object.isFrozen(api.info.host.limits), 'a frozen copy');
+  assert.notEqual(api.info.host, host);
+  assert.equal(api.info.version, '0.1.0', 'the existing fields are unchanged');
+  assert.equal(harness().api.info.host, null, 'an engine info without host (the WebAssembly engine)');
+  assert.equal(harness({ engineInfo: undefined }).api.info.host, null);
+  assert.equal(harness({ engineInfo: { host: 'text' } }).api.info.host, null);
+});

@@ -10,12 +10,11 @@ import { Workspace } from './components/workspace.js';
 import { HelpDialog } from './components/help-dialog.js';
 import { SettingsDialog } from './components/settings-dialog.js';
 import { BuildMissing } from './components/build-missing.js';
-import { LandingPage } from './components/landing-page.js';
 
 const PANEL_KEYS = { Digit1: 'editor', Digit2: 'results', Digit3: 'graph', Digit4: 'schema', Digit5: 'profile' };
 
 const App = {
-  components: { StartPage, Workspace, HelpDialog, SettingsDialog, BuildMissing, LandingPage },
+  components: { StartPage, Workspace, HelpDialog, SettingsDialog, BuildMissing },
   setup() {
     const help = ref(null);
     const settings = ref(null);
@@ -78,22 +77,19 @@ const App = {
       }
     }
 
-    // The landing view of a multi-database server has no routes.
-    const onHash = () => (state.landing ? undefined : applyRoute());
-
     onMounted(async () => {
       window.addEventListener('keydown', onKey, true);
-      window.addEventListener('hashchange', onHash);
+      window.addEventListener('hashchange', applyRoute);
       try {
         await init();
-        if (!state.engineMissing && !state.landing) await applyRoute();
+        if (!state.engineMissing) await applyRoute();
       } catch (err) {
         bootError.value = err && err.message ? err.message : String(err);
       }
     });
     onBeforeUnmount(() => {
       window.removeEventListener('keydown', onKey, true);
-      window.removeEventListener('hashchange', onHash);
+      window.removeEventListener('hashchange', applyRoute);
     });
 
     return {
@@ -108,7 +104,6 @@ const App = {
   template: `
     <div v-if="bootError" class="boot"><p>The playground failed to start: {{ bootError }}</p></div>
     <div v-else-if="!state.ready" class="boot"><div class="boot-logo"></div><p>Loading the playground and its engine…</p></div>
-    <landing-page v-else-if="state.landing"></landing-page>
     <build-missing v-else-if="state.engineMissing"></build-missing>
     <div v-else-if="state.profileError" class="boot profile-error" role="alert"><p><b>The page cannot be shown.</b></p><p>{{ state.profileError }}</p></div>
     <start-page v-else-if="state.route === 'start' && !(state.engineInfo && state.engineInfo.server)" @help="openHelp"></start-page>

@@ -89,9 +89,11 @@
 //       follow the theme by themselves.
 //   info
 //       {profile: {name, title}, server: boolean, version: string|null, readOnly: boolean,
-//       engine: Object}: the profile, whether the engine is the dev server (else the
-//       WebAssembly playground), the engine's version and read-only flag, and the engine's whole
-//       `info()` answer (a frozen copy; fields may be added).
+//       engine: Object, host: Object|null}: the profile, whether the engine is the dev server
+//       (else the WebAssembly playground), the engine's version and read-only flag, the
+//       engine's whole `info()` answer (a frozen copy; fields may be added) and (EXPERIMENTAL)
+//       the server's `GET /api/info` answer as the host sent it, with fields of the host's own
+//       such as `uploadBytes` (a frozen copy; null with the WebAssembly engine).
 // Pure: every dependency is injected (`createProfileApi`), so tests/profile-api.test.mjs runs
 // it under Node; components/profile-tab.js wires it to the store and Vue.
 
@@ -153,6 +155,9 @@ export function createProfileApi(deps) {
     version: (deps.engineInfo && deps.engineInfo.version) || null,
     readOnly: !!(deps.engineInfo && deps.engineInfo.readOnly),
     engine: freezeCopy(deps.engineInfo || {}),
+    host: deps.engineInfo && deps.engineInfo.host && typeof deps.engineInfo.host === 'object'
+      ? freezeCopy(deps.engineInfo.host)
+      : null,
   });
   const theme = Object.freeze({
     get mode() {
