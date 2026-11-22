@@ -37,10 +37,15 @@
 //             template format and its checks are js/profile-cards.js (an object, may be empty)
 //   graph     the styles of `api.graph` views per label, classes and legend entries: the
 //             format and its checks are js/profile-graph.js (an object, may be empty)
+//   styles    optional (EXPERIMENTAL): ['<path>.css', ...], 1..8 style sheets of the profile,
+//             relative paths below `files` like the modules, each once; the page adds a
+//             `<link rel="stylesheet">` for each (`applyProfileStyles`, called by store.js)
+//             once the profile is resolved, so a host need not edit index.html for them.
 //   files     the base path of the module files, '' (the page's own directory) or a path
 //             ending in '/' (relative to the page, or absolute on its origin); never another
 //             origin, never '..'.
-// Pure: no DOM, no Vue; tested in tests/ui-profiles.test.mjs.
+// Pure: no Vue, and no DOM except `applyProfileStyles`, which is given the document; tested in
+// tests/ui-profiles.test.mjs.
 
 import { cardsProblems } from './profile-cards.js';
 import { graphSpecProblems } from './profile-graph.js';
@@ -88,7 +93,10 @@ export const BUILTIN_TABS = Object.freeze(['workspace']);
 export const MAX_TABS = 12;
 
 const NAME = /^[a-z][a-z0-9-]{0,39}$/;
-const PROFILE_KEYS = Object.freeze(['name', 'title', 'version', 'startTab', 'can', 'tabs', 'header', 'cards', 'graph', 'files']);
+const PROFILE_KEYS = Object.freeze(['name', 'title', 'version', 'startTab', 'can', 'tabs', 'header', 'styles', 'cards', 'graph', 'files']);
+
+/** The most style sheets a profile may name (`styles`). */
+export const MAX_STYLES = 8;
 const TAB_KEYS = Object.freeze(['id', 'title', 'builtin', 'module']);
 const HEADER_KEYS = Object.freeze(['module']);
 
@@ -232,10 +240,34 @@ export function headerProblems(header) {
 }
 
 /**
+ * The problems of a profile's `styles` key (`['<path>.css', ...]`, 1..MAX_STYLES relative paths
+ * below `files`, each once): an empty list when it is valid.
+ * @param {*} styles
+ * @returns {string[]}
+ */
+export function stylesProblems(styles) {
+  if (!Array.isArray(styles) || styles.length === 0 || styles.length > MAX_STYLES) {
+    return [`"styles" must be a list of 1 to ${MAX_STYLES} style sheet paths ("<path>.css")`];
+  }
+  const problems = [];
+  const seen = new Set();
+  styles.forEach((style, i) => {
+    if (typeof style !== 'string' || !/\.css$/.test(style) || style.startsWith('/') || !isSafePath(style)) {
+      problems.push(`"styles[${i}]" must be a relative path of a .css file below "files" (no "..", no scheme)`);
+    } else if (seen.has(style)) {
+      problems.push(`"styles[${i}]" ${quote(style)} is named twice`);
+    } else {
+      seen.add(style);
+    }
+  });
+  return problems;
+}
+
+/**
  * Checks a profile object and returns its normalized, frozen copy (`cards` and `graph` default
- * to `{}`, `files` to ''; `version` and `header` only when given). Throws a ProfileError naming every problem.
+ * to `{}`, `files` to ''; `version`, `header` and `styles` only when given). Throws a ProfileError naming every problem.
  * @param {*} input
- * @returns {Readonly<{name:string, title:string, version?:string, startTab:string, can:Object, tabs:Array, header?:{module:string}, cards:Object, graph:Object, files:string}>}
+ * @returns {Readonly<{name:string, title:string, version?:string, startTab:string, can:Object, tabs:Array, header?:{module:string}, styles?:string[], cards:Object, graph:Object, files:string}>}
  */
 export function validateProfile(input) {
   const problems = [];
@@ -318,6 +350,7 @@ export function validateProfile(input) {
   }
 
   if (input.header !== undefined) problems.push(...headerProblems(input.header));
+  if (input.styles !== undefined) problems.push(...stylesProblems(input.styles));
   if (input.cards !== undefined) problems.push(...cardsProblems(input.cards));
   if (input.graph !== undefined) problems.push(...graphSpecProblems(input.graph));
   const files = input.files === undefined ? '' : input.files;
@@ -334,6 +367,7 @@ export function validateProfile(input) {
     can,
     tabs,
     ...(input.header === undefined ? {} : { header: { module: input.header.module } }),
+    ...(input.styles === undefined ? {} : { styles: [...input.styles] }),
     cards: JSON.parse(JSON.stringify(input.cards || {})),
     graph: JSON.parse(JSON.stringify(input.graph || {})),
     files,
@@ -497,6 +531,33 @@ export function createUi(profile, { server = false } = {}) {
     moduleUrl(tab, base) {
       return new URL(profile.files + tab.module, base).href;
     },
+    /** The profile's style sheets (`styles`, below `files`), resolved against `base`; [] when it names none. */
+    styleUrls(base) {
+      return (profile.styles || []).map((style) => new URL(profile.files + style, base).href);
+    },
   };
   return Object.freeze(ui);
+}
+
+/**
+ * Adds a `<link rel="stylesheet">` to `doc.head` for each of the profile's style sheets
+ * (`styles`, resolved against the page's address), once per URL; a sheet that
+ * fails to load is a console warning, the page keeps working. Answers the URLs added.
+ * @param {{styleUrls: (base: string) => string[]}} ui
+ * @param {Document} doc  The page's document (tests pass a stand-in).
+ */
+export function applyProfileStyles(ui, doc) {
+  const added = [];
+  for (const href of ui.styleUrls(doc.baseURI)) {
+    const present = [...doc.head.querySelectorAll('link[data-profile-style]')].some((l) => l.href === href);
+    if (present) continue;
+    const link = doc.createElement('link');
+    link.rel = 'stylesheet';
+    link.href = href;
+    link.setAttribute('data-profile-style', '');
+    link.addEventListener('error', () => typeof console !== 'undefined' && console.warn(`The UI profile's style sheet ${href} could not be loaded`));
+    doc.head.appendChild(link);
+    added.push(href);
+  }
+  return added;
 }

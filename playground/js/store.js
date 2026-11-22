@@ -30,7 +30,9 @@ import {
 import { mapPosition } from './editor/run-selection.js';
 import { keysBySchema } from './editor/gql-complete.js';
 import { normalizeSizeBy } from './graph/size-by.js';
-import { BUILTIN_PROFILES, checkApiMode, createUi, resolveProfile, requestedProfile } from './ui-profiles.js';
+import {
+  BUILTIN_PROFILES, checkApiMode, createUi, resolveProfile, requestedProfile, applyProfileStyles,
+} from './ui-profiles.js';
 
 const HISTORY_MAX = 100;
 
@@ -86,9 +88,6 @@ export const state = reactive({
   // The header's version (js/build-info.js `versionLabel`): {text, title}, or null.
   versionLabel: null,
   engineMissing: false, // the WebAssembly build is not there: the page explains how to build it
-  // The root of a multi-database server (js/server-mode.js `isLanding`): `{info, headers}` of its
-  // `/api/info`; the page shows the landing view (components/landing-page.js), no engine. Else null.
-  landing: null,
   route: 'start',
   graph: null,
   graphVersion: 0,
@@ -219,7 +218,10 @@ function applyProfile() {
     state.ui = markRaw(createUi(profile, { server }));
     state.profileTab = profile.startTab;
     state.profileError = null;
-    if (typeof document !== 'undefined') document.title = profile.title;
+    if (typeof document !== 'undefined') {
+      document.title = profile.title;
+      applyProfileStyles(state.ui, document);
+    }
   } catch (err) {
     state.profileError = err && err.message ? err.message : String(err);
   }
@@ -233,9 +235,8 @@ export async function init() {
   }
   applyTheme();
   try {
-    const { engine, missing, landing } = await getEngine();
+    const { engine, missing } = await getEngine();
     state.engineMissing = missing;
-    if (landing) state.landing = markRaw(landing);
     if (engine) {
       state.engine = markRaw(engine);
       state.engineInfo = await engine.info();

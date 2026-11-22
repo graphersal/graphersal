@@ -37,6 +37,21 @@ import { packGraphView } from '../graph-data.js';
 /** The `server` value of `GET /api/info` that identifies a Graphersal dev server. */
 export const SERVER_ID = 'graphersal-dev';
 
+/**
+ * Whether a `GET /api/info` answer comes from a server this engine talks to: a Graphersal dev
+ * server (`server` = `SERVER_ID`), or (EXPERIMENTAL) any other host that names itself (`server`:
+ * a non-empty text, e.g. `graphersal-server`) and delivers a UI profile (`uiProfile`, not null).
+ * A host of the second kind need not pretend to be a dev server; what its profile shows is the
+ * profile's business (a profile without the workspace never asks for a graph).
+ * @param {*} info
+ */
+export function isEngineInfo(info) {
+  if (!info || typeof info !== 'object' || Array.isArray(info)) return false;
+  if (info.server === SERVER_ID) return true;
+  return typeof info.server === 'string' && info.server.trim() !== ''
+    && info.uiProfile !== undefined && info.uiProfile !== null;
+}
+
 /** The playground root (the directory of index.html): the dev server serves it at `/`. */
 const DEFAULT_BASE = new URL('../../', import.meta.url);
 
@@ -130,8 +145,7 @@ export class HttpEngine extends Engine {
   /**
    * Fetches `GET api/info` of the serving origin once: `{info, fetch, headers}` (`info` the
    * parsed JSON object, whatever server sent it), or null when there is no JSON answer (a static
-   * file server answers 404 or HTML). `detect` builds the engine from it; js/engine/index.js also
-   * looks for the landing view of a multi-database server (js/server-mode.js `isLanding`).
+   * file server answers 404 or HTML). `fromProbe` builds the engine from it.
    * @param {{base?: URL|string, fetch?: Function, headers?: Object<string,string>}} [options]
    * @returns {Promise<{info: Object, fetch: Function, headers: Object<string,string>}|null>}
    */
@@ -154,17 +168,17 @@ export class HttpEngine extends Engine {
   }
 
   /**
-   * The engine of a `probe` answer when it is a Graphersal dev server (`server` = `SERVER_ID`),
-   * else null.
+   * The engine of a `probe` answer when it is a Graphersal dev server or another host with a UI
+   * profile (`isEngineInfo`), else null.
    */
   static fromProbe(probe, options = {}) {
-    if (!probe || probe.info.server !== SERVER_ID) return null;
+    if (!probe || !isEngineInfo(probe.info)) return null;
     return new HttpEngine(probe.info, { ...options, fetch: probe.fetch, headers: probe.headers });
   }
 
   /**
-   * Asks the serving origin whether it is a Graphersal dev server. Resolves to an HttpEngine,
-   * or null when it is not (a static file server answers 404 or HTML; the WebAssembly playground
+   * Asks the serving origin whether it is a Graphersal dev server (or another host with a UI
+   * profile, `isEngineInfo`). Resolves to an HttpEngine, or null when it is not (a static file server answers 404 or HTML; the WebAssembly playground
    * is used then).
    * @param {{base?: URL|string, fetch?: Function, headers?: Object<string,string>}} [options]
    * @returns {Promise<HttpEngine|null>}
@@ -245,8 +259,12 @@ export class HttpEngine extends Engine {
       mountPath: typeof i.mountPath === 'string' && i.mountPath ? i.mountPath : null,
       // The database name that server gives (optional; js/server-mode.js `databaseName`).
       database: typeof i.database === 'string' && i.database ? i.database : null,
-      // The server announces its admin API (the landing view at its root; js/server-mode.js).
-      admin: i.admin === true,
+      // The host's home page (EXPERIMENTAL): a path from the server root, e.g. `/`; the header's
+      // database badge links there (js/server-mode.js `homeHref`), or null.
+      home: typeof i.home === 'string' && i.home ? i.home : null,
+      // The whole `/api/info` answer as the host sent it (EXPERIMENTAL; a copy): fields of the
+      // host's own (e.g. `uploadBytes`) for a UI profile's modules (`api.info.host`).
+      host: JSON.parse(JSON.stringify(i)),
     };
   }
 

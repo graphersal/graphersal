@@ -1,7 +1,7 @@
 // Node tests of server mode (js/server-mode.js, js/util.js storage namespace, the HTTP engine's
-// probe and the /reset page with mounts): the playground served by a multi-database server under
-// `/db/<name>/`, with a landing view at its root. A mock server (node:http on port 0) and fake
-// fetches stand in for the server.
+// probe, its host-neutral detection and the /reset page with mounts): the playground served by a
+// multi-database server under `/db/<name>/`, whose own root page is a UI profile of that host.
+// A mock server (node:http on port 0) and fake fetches stand in for the server.
 // Run: node --test playground/tests/*.test.mjs
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -11,10 +11,9 @@ import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { setStorageNamespace, storage, storageKey, normalizeMountPath } from '../js/util.js';
 import {
-  isLanding, databaseName, rootHref, databaseHref, databaseRows, fetchDatabases, anyLoading,
-  infoAfterChanges, serverReadOnlyReason, DATABASE_STATES,
+  databaseName, rootHref, homeHref, infoAfterChanges, serverReadOnlyReason,
 } from '../js/server-mode.js';
-import { HttpEngine, SERVER_ID } from '../js/engine/http-engine.js';
+import { HttpEngine, SERVER_ID, isEngineInfo } from '../js/engine/http-engine.js';
 import { editModeState } from '../js/graph/edit-mode.js';
 import { mcpBadgeTitle, mcpEndpointUrl } from '../js/change-feed.js';
 
@@ -135,16 +134,7 @@ test('/reset clears the keys of every mount and keeps every history', () => {
   assert.equal(page.elements.continue.href, 'http://localhost:8484/db/acme/#/play', 'back to the mount it was opened from');
 });
 
-// ------------------------------------------------------------------ /api/info: landing, header
-
-test('the landing view needs admin: true at the root; the dev server is never a landing', () => {
-  assert.equal(isLanding({ server: 'graphersal-server', admin: true }), true);
-  assert.equal(isLanding({ server: 'graphersal-server', admin: true, mountPath: '' }), true);
-  assert.equal(isLanding({ server: SERVER_ID, admin: true, mountPath: '/db/acme' }), false, 'a database page');
-  assert.equal(isLanding({ server: SERVER_ID }), false, 'admin absent: inert');
-  assert.equal(isLanding({ server: SERVER_ID, admin: 'yes' }), false);
-  assert.equal(isLanding(null), false);
-});
+// ------------------------------------------------------------------ /api/info: header, home, host
 
 test('the header name: the database field, else the mount path; none at the root', () => {
   assert.equal(databaseName({ mountPath: '/db/acme' }), 'acme');
@@ -157,104 +147,104 @@ test('the header name: the database field, else the mount path; none at the root
   assert.equal(rootHref('/db/acme'), '../../');
   assert.equal(rootHref('/acme'), '../');
   assert.equal(rootHref(null), '');
-  assert.equal(databaseHref('a b/c'), 'db/a%20b%2Fc/');
 });
 
-test('the HTTP engine passes mountPath, database and admin on; probe sees a landing', async () => {
+test('homeHref: home is a path from the server root, linked relative to the mount', () => {
+  assert.equal(homeHref({ mountPath: '/db/acme', home: '/' }), '../../');
+  assert.equal(homeHref({ mountPath: '/db/acme/', home: '/admin/' }), '../../admin/');
+  assert.equal(homeHref({ mountPath: '/acme', home: '/ui/index.html' }), '../ui/index.html');
+  assert.equal(homeHref({ home: '/' }), './', 'at the root: the page itself');
+  assert.equal(homeHref({ home: '/admin/' }), 'admin/');
+  // A proxy prefix in front of the server: the relative link keeps it.
+  const page = 'https://example.test/proxy/db/acme/';
+  assert.equal(new URL(homeHref({ mountPath: '/db/acme', home: '/' }), page).href, 'https://example.test/proxy/');
+  assert.equal(new URL(homeHref({ mountPath: '/db/acme', home: '/admin/' }), page).href, 'https://example.test/proxy/admin/');
+  for (const home of [undefined, null, '', 'admin/', '//evil.test/', 'https://evil.test/', '/a/../b', '/./', '/a?b', '/a#b', '/a b', '/a\\b', 42, true]) {
+    assert.equal(homeHref({ mountPath: '/db/acme', home }), null, `ignored: ${JSON.stringify(home)}`);
+  }
+  assert.equal(homeHref(null), null);
+  assert.equal(homeHref({ mountPath: '/db/acme', admin: true }), null, 'admin is no home link any more');
+});
+
+test('the HTTP engine passes mountPath, database, home and the raw info on', async () => {
   const fake = (info) => async (url) => {
     assert.equal(new URL(url).pathname, '/db/acme/api/info');
     return { ok: true, status: 200, text: async () => JSON.stringify(info) };
   };
   const base = 'http://127.0.0.1:8484/db/acme/';
-  const engine = await HttpEngine.detect({
-    base, fetch: fake({ server: SERVER_ID, version: '1', mountPath: '/db/acme', mcp: { endpoint: '/db/acme/mcp', readOnly: false, client: null } }),
-  });
+  const raw = { server: SERVER_ID, version: '1', mountPath: '/db/acme', home: '/', uploadBytes: 4096, mcp: { endpoint: '/db/acme/mcp', readOnly: false, client: null } };
+  const engine = await HttpEngine.detect({ base, fetch: fake(raw) });
   const info = await engine.info();
   assert.equal(info.mountPath, '/db/acme');
   assert.equal(info.database, null);
-  assert.equal(info.admin, false);
+  assert.equal(info.home, '/');
+  assert.equal(info.admin, undefined, 'the admin field is gone');
+  assert.deepEqual(info.host, raw, 'the whole answer as the host sent it');
+  assert.notEqual(info.host, engine.serverInfo, 'a copy');
+  assert.equal(homeHref(info), '../../');
   assert.equal(databaseName(info), 'acme');
   assert.equal(mcpEndpointUrl(info.mcp, 'h:1'), 'http://h:1/db/acme/mcp');
   assert.match(mcpBadgeTitle(info.mcp, 'h:1', 'https:'), /https:\/\/h:1\/db\/acme\/mcp/);
 
   const plain = await (await HttpEngine.detect({ base, fetch: fake({ server: SERVER_ID, version: '1' }) })).info();
   assert.equal(plain.mountPath, null, 'the dev server announces no mount');
+  assert.equal(plain.home, null);
   assert.equal(databaseName(plain), null);
-
-  const probe = await HttpEngine.probe({ base, fetch: fake({ server: 'graphersal-server', admin: true }) });
-  assert.equal(isLanding(probe.info), true);
-  assert.equal(HttpEngine.fromProbe(probe), null, 'a landing is not a dev server');
+  assert.deepEqual(plain.host, { server: SERVER_ID, version: '1' });
 });
 
-// ------------------------------------------------------------------ the database list
-
-const DATABASES = {
-  databases: [
-    { name: 'zeta', state: 'failed', kind: 'plain', readOnly: false, description: '', reason: 'bad file' },
-    { name: 'acme', state: 'loaded', kind: 'plain', readOnly: false, description: 'CRM' },
-    { name: 'base', state: 'unloaded', kind: 'base', readOnly: true, description: 'shared base' },
-    { name: 'live', state: 'loaded', kind: 'plain', readOnly: false, description: '', aliasOf: 'acme' },
-    { name: 'docs', state: 'needs-model', kind: 'plain', readOnly: false, description: '' },
-    { name: 'next', state: 'loading', kind: 'layer', readOnly: false, description: '' },
-    { name: 'future', state: 'hibernating', kind: 'plain' },
-    { state: 'loaded' },
-    'nonsense',
-  ],
-};
-
-test('databaseRows: sorted rows with state words, links and tones; malformed entries counted', () => {
-  const { rows, skipped } = databaseRows(DATABASES);
-  assert.equal(skipped, 2);
-  assert.deepEqual(rows.map((r) => r.name), ['acme', 'base', 'docs', 'future', 'live', 'next', 'zeta']);
-  const by = Object.fromEntries(rows.map((r) => [r.name, r]));
-  assert.equal(by.acme.href, 'db/acme/');
-  assert.equal(by.acme.stateText, DATABASE_STATES.loaded);
-  assert.equal(by.acme.tone, 'ok');
-  assert.equal(by.base.readOnly, true);
-  assert.equal(by.docs.stateText, 'needs a model');
-  assert.equal(by.zeta.tone, 'danger');
-  assert.equal(by.zeta.reason, 'bad file');
-  assert.equal(by.live.aliasOf, 'acme');
-  assert.equal(by.acme.aliasOf, null);
-  assert.equal(by.future.stateText, 'hibernating', 'a state of a newer server is shown as it is');
-  assert.equal(anyLoading(rows), true);
-  assert.equal(anyLoading(rows.filter((r) => r.state !== 'loading')), false);
-  assert.throws(() => databaseRows({}), /no database list/);
+test('isEngineInfo: the dev server, or another named host that delivers a UI profile', () => {
+  assert.equal(isEngineInfo({ server: SERVER_ID }), true, 'the dev server as always');
+  assert.equal(isEngineInfo({ server: SERVER_ID, uiProfile: null }), true);
+  assert.equal(isEngineInfo({ server: 'graphersal-server', uiProfile: { name: 'server' } }), true);
+  assert.equal(isEngineInfo({ server: 'graphersal-server', uiProfile: 'demo' }), true);
+  assert.equal(isEngineInfo({ server: 'graphersal-server' }), false, 'no profile: not a host for this page');
+  assert.equal(isEngineInfo({ server: 'graphersal-server', uiProfile: null }), false);
+  assert.equal(isEngineInfo({ server: '  ', uiProfile: 'demo' }), false, 'the host names itself');
+  assert.equal(isEngineInfo({ uiProfile: 'demo' }), false);
+  assert.equal(isEngineInfo({ server: 7, uiProfile: 'demo' }), false);
+  assert.equal(isEngineInfo([]), false);
+  assert.equal(isEngineInfo(null), false);
+  assert.equal(isEngineInfo('graphersal-dev'), false);
 });
 
-/** A mock multi-database server: the root answers `admin`, a mount answers a database. */
+/** A mock multi-database server: the root delivers its own UI profile, a mount answers a database. */
 async function mockServer() {
   const server = http.createServer((req, res) => {
     const send = (status, body) => {
       res.writeHead(status, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify(body));
     };
-    if (req.url === '/api/info') return send(200, { server: 'graphersal-server', version: '0.9.0', admin: true });
-    if (req.url === '/api/admin/databases') {
+    if (req.url === '/api/info') {
       if (req.headers.authorization !== 'Bearer t') return send(401, { error: 'a token is required' });
-      return send(200, DATABASES);
+      return send(200, {
+        server: 'graphersal-server', version: '0.9.0', uploadBytes: 1024,
+        uiProfile: { name: 'server', title: 'Server', startTab: 'list', tabs: [{ id: 'list', title: 'List', module: 'list.js' }], files: 'server-ui/' },
+      });
     }
-    if (req.url === '/db/acme/api/info') return send(200, { server: SERVER_ID, version: '0.9.0', mountPath: '/db/acme', database: 'acme' });
+    if (req.url === '/db/acme/api/info') return send(200, { server: SERVER_ID, version: '0.9.0', mountPath: '/db/acme', database: 'acme', home: '/' });
     return send(404, { error: 'not found' });
   });
   await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
   return { server, base: `http://127.0.0.1:${server.address().port}/` };
 }
 
-test('the landing view reads the list from a mock server with the host headers', async () => {
+test('a host that is not the dev server delivers its profile; its mounts link home', async () => {
   const { server, base } = await mockServer();
   try {
-    const probe = await HttpEngine.probe({ base, fetch: globalThis.fetch, headers: { Authorization: 'Bearer t' } });
-    assert.equal(isLanding(probe.info), true);
-    const { rows } = await fetchDatabases({ base, fetch: globalThis.fetch, headers: probe.headers });
-    assert.equal(rows.length, 7);
-    assert.equal(new URL(rows[0].href, base).href, `${base}db/acme/`);
-    await assert.rejects(fetchDatabases({ base, fetch: globalThis.fetch }), /a token is required/);
+    const root = await HttpEngine.detect({ base, fetch: globalThis.fetch, headers: { Authorization: 'Bearer t' } });
+    assert.ok(root, 'graphersal-server with a uiProfile is an engine host');
+    const info = await root.info();
+    assert.equal(info.server, true);
+    assert.equal(info.uiProfile.name, 'server');
+    assert.equal(info.host.server, 'graphersal-server');
+    assert.equal(info.host.uploadBytes, 1024, 'a field of the host\'s own reaches the profile');
+    assert.equal(await HttpEngine.detect({ base, fetch: globalThis.fetch, headers: {} }), null, 'refused: no engine');
 
     const db = await HttpEngine.detect({ base: `${base}db/acme/`, fetch: globalThis.fetch, headers: {} });
-    const info = await db.info();
-    assert.equal(isLanding(info), false);
-    assert.equal(databaseName(info), 'acme');
+    const dbInfo = await db.info();
+    assert.equal(databaseName(dbInfo), 'acme');
+    assert.equal(new URL(homeHref(dbInfo), `${base}db/acme/`).href, base);
   } finally {
     server.close();
   }
