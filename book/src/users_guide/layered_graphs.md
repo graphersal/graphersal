@@ -378,4 +378,6 @@ code written for layers already run.
 - **Not in GQL yet.** GQL queries run on a layer like on any graph, but GQL has no function
   for an element's origin or the diff yet. Use the DSL for those.
 - **No playground view of the difference yet.** The playground shows a layer like any graph;
-  styling added, modified and removed elements is planned.
+  styling added, modified and removed elements is planned. The data for it is served already:
+  the dev server's graph info, drawings and `POST /api/layer/diff` carry the layer's counts,
+  each element's origin and the diff ([dev server API](../persistence/dev_server.md)).

@@ -494,6 +494,10 @@ pub struct Node {
     pub labels: Vec<String>,
     /// The stored properties, in order.
     pub properties: PropertyMap,
+    /// Where the vertex comes from when the graph is a layer (`"base"`, `"added"`,
+    /// `"modified"`: [`graphersal::storage::LayerOrigin`]); absent on any other graph.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub origin: Option<&'static str>,
 }
 
 /// An edge as the playground draws it.
@@ -509,6 +513,10 @@ pub struct Edge {
     pub target: String,
     /// The stored properties, in order.
     pub properties: PropertyMap,
+    /// Where the edge comes from when the graph is a layer (as [`Node::origin`]); absent on
+    /// any other graph.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub origin: Option<&'static str>,
 }
 
 /// Vertices and edges to draw as columns (`GraphView` in engine.js): what the Graph panel needs to
@@ -520,7 +528,9 @@ pub struct Edge {
 /// `j` is `edgeIds[j]` from vertex `edgeSource[j]` to vertex `edgeTarget[j]` (indices into the
 /// vertex columns) with label `labels[edgeLabel[j]]`. Every edge's endpoints are in the vertex
 /// columns. `truncated` says that the graph (or the result) has more than is drawn; `totalNodes` /
-/// `totalEdges` count what there is.
+/// `totalEdges` count what there is. On a layered graph (`capabilities().layered`, decided once
+/// per build) `vertexOrigin[i]` / `edgeOrigin[j]` say where each element comes from (`"base"`,
+/// `"added"`, `"modified"`); absent on any other graph, which pays nothing for them.
 #[derive(Debug, Clone, Default, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CompactGraph {
@@ -564,6 +574,13 @@ pub struct CompactGraph {
     /// Asked for: per vertex, its outgoing edges in the whole graph.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub vertex_out_degree: Option<Vec<u32>>,
+    /// On a layered graph: per vertex, its origin ([`graphersal::storage::LayerOrigin`] name;
+    /// `null` for a vertex the layer no longer has). Absent on any other graph.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub vertex_origin: Option<Vec<Option<&'static str>>>,
+    /// On a layered graph: per edge, its origin. Absent on any other graph.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub edge_origin: Option<Vec<Option<&'static str>>>,
 }
 
 impl CompactGraph {
@@ -585,6 +602,10 @@ impl CompactGraph {
             edge_label: Vec::with_capacity(edges.len()),
             ..CompactGraph::default()
         };
+        // Decided once: a graph without layers gets no origin columns and no per-element call.
+        let layered = g.capabilities()?.layered;
+        let mut vertex_origin = Vec::new();
+        let mut edge_origin = Vec::new();
         let mut labels = LabelTable::default();
         let mut position = HashMap::with_capacity(vertices.len());
         for v in vertices {
@@ -601,6 +622,9 @@ impl CompactGraph {
                     .and_then(|p| p.get("name"))
                     .and_then(caption_text),
             );
+            if layered {
+                vertex_origin.push(g.vertex_layer(*v)?.map(|o| o.as_str()));
+            }
         }
         for e in edges {
             let Some((s, t)) = g.edge_endpoints(*e)? else {
@@ -615,8 +639,15 @@ impl CompactGraph {
             view.edge_target.push(*t);
             view.edge_label
                 .push(labels.index(g.edge_label(*e)?.unwrap_or_default()));
+            if layered {
+                edge_origin.push(g.edge_layer(*e)?.map(|o| o.as_str()));
+            }
         }
         view.labels = labels.names;
+        if layered {
+            view.vertex_origin = Some(vertex_origin);
+            view.edge_origin = Some(edge_origin);
+        }
         Ok(view)
     }
 }
@@ -739,6 +770,11 @@ pub fn node_of<S: GraphStorage>(g: &S, v: S::VertexId) -> Result<Node, GraphErro
         label: labels.first().cloned().unwrap_or_default(),
         labels,
         properties: inspected_properties(g.vertex_properties(v)?),
+        origin: if g.capabilities()?.layered {
+            g.vertex_layer(v)?.map(|o| o.as_str())
+        } else {
+            None
+        },
     })
 }
 
@@ -764,6 +800,11 @@ pub fn edge_of<S: GraphStorage>(g: &S, e: S::EdgeId) -> Result<Edge, GraphError>
         source,
         target,
         properties: inspected_properties(g.edge_properties(e)?),
+        origin: if g.capabilities()?.layered {
+            g.edge_layer(e)?.map(|o| o.as_str())
+        } else {
+            None
+        },
     })
 }
 

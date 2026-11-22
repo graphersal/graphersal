@@ -16,7 +16,9 @@ use crate::graph::change::{ChangeSet, CommitMetadata};
 use crate::graph::clock::CommitClock;
 use crate::graph::definition::{Definition, DefinitionKind, MAX_DEFINITIONS};
 use crate::graph::hooks::{CommitHook, Mark, RollbackReason};
-use crate::graph::layer_diff::{LayerDiff, LayerDiffRequest, LayerOrigin};
+use crate::graph::layer_diff::{
+    LayerCounts, LayerDiff, LayerDiffRequest, LayerOrigin, LayerSummary,
+};
 use crate::graph::schema::defaults::CreateContext;
 use crate::graph::schema::{ElementKind, GraphSchema, PropertySchema};
 use crate::graph::storage::{StorageIdentity, UnitMark};
@@ -329,6 +331,22 @@ impl GraphStorage for LayeredGraph {
 
     fn layer_diff(&self, request: &LayerDiffRequest) -> Result<LayerDiff, GraphError> {
         self.diff(request)
+    }
+
+    /// The base's name and identity, the delta's counters (O(1)) and the cached footprints:
+    /// the layer's own (a walk of the delta only when it changed since) and the frozen base's
+    /// (walked once, then cached).
+    fn layer_summary(&self) -> Result<Option<LayerSummary>, GraphError> {
+        let [added, modified, removed] = self.delta.change_counts();
+        let counts = |(vertices, edges): (u64, u64)| LayerCounts::new(vertices, edges);
+        Ok(Some(
+            LayerSummary::new(self.base_name(), Some(self.base_ref()))
+                .with_counts(counts(added), counts(modified), counts(removed))
+                .with_bytes(
+                    self.layer_footprint_bytes(),
+                    crate::graph::memory::footprint_bytes(&self.base),
+                ),
+        ))
     }
 
     /// The layer's own statistics: the base's at creation, kept exact by every write.

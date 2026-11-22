@@ -862,3 +862,32 @@ fn the_journal_of_the_store_in_memory_pages_by_cursor() {
     assert!(p.journal(r#"{"level": "loud"}"#).is_err());
     assert!(p.journal("not json").is_err());
 }
+
+/// The layer demo in the browser build: start, write, diff, origins, drop.
+#[wasm_bindgen_test]
+fn a_layer_starts_and_drops_in_the_browser_build() {
+    let mut p = modern();
+    let started = json(&p.start_layer());
+    assert_eq!(started["ok"], true, "{started}");
+    assert_eq!(
+        started["info"]["layer"]["added"]["vertices"], 0,
+        "{started}"
+    );
+    let run = json(
+        &p.execute(r#"g.v(1).property("age", 30).iterate()"#, "{}")
+            .unwrap(),
+    );
+    assert_eq!(run["ok"], true, "{run}");
+    let info = json(&p.info().unwrap());
+    assert_eq!(info["layer"]["modified"]["vertices"], 1, "{info}");
+    let diff = json(&p.layer_diff(r#"{"kinds": "vertex"}"#).unwrap());
+    assert_eq!(
+        diff["diff"]["modified"][0]["properties"]["age"]["base"], 29,
+        "{diff}"
+    );
+    let element = json(&p.element("vertex", "1").unwrap());
+    assert_eq!(element["origin"], "modified", "{element}");
+    let dropped = json(&p.drop_layer());
+    assert_eq!(dropped["ok"], true, "{dropped}");
+    assert!(dropped["info"].get("layer").is_none(), "{dropped}");
+}

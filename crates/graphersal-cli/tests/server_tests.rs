@@ -8971,3 +8971,50 @@ fn save_of_an_in_memory_layer_says_it_is_a_layer() {
     drop(server);
     assert_eq!(std::fs::read(&file).unwrap(), bytes);
 }
+
+/// The dev server over `--layer` (stage 3.5): `GET /api/graph` carries `layer` (base name,
+/// counts), the drawing carries the origin columns, and `POST /api/layer/diff` answers the
+/// layer's changes; a server without `--layer` answers no `layer` and an empty diff.
+#[test]
+fn a_layer_server_answers_its_layer_info_origins_and_diff() {
+    let ui = ui_dir("layer-diff");
+    let server = start(&[
+        "--graph",
+        "modern",
+        "--layer",
+        "--ui-dir",
+        ui.to_str().unwrap(),
+    ]);
+    let info = get(server.port, "/api/graph").json();
+    assert_eq!(info["layer"]["added"]["vertices"], 0, "{info}");
+    let wrote = execute(
+        server.port,
+        r#"g.add_v("person").property(T.id, "ada").iterate(); g.v(1).property("age", 30).iterate()"#,
+    );
+    assert_eq!(wrote["ok"], true, "{wrote}");
+    let info = get(server.port, "/api/graph").json();
+    assert_eq!(info["layer"]["added"]["vertices"], 1, "{info}");
+    assert_eq!(info["layer"]["modified"]["vertices"], 1, "{info}");
+    let view = post(server.port, "/api/graph-view", r#"{"maxNodes": 100}"#).json();
+    let origins: Vec<(Value, Value)> = view["vertexIds"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .cloned()
+        .zip(view["vertexOrigin"].as_array().unwrap().iter().cloned())
+        .collect();
+    assert!(origins.contains(&("ada".into(), "added".into())), "{view}");
+    assert!(origins.contains(&("1".into(), "modified".into())), "{view}");
+    let diff = post(server.port, "/api/layer/diff", r#"{"kinds": "vertex"}"#);
+    assert_eq!(diff.status, 200, "{}", diff.body);
+    let diff = diff.json();
+    assert_eq!(diff["ok"], true, "{diff}");
+    assert_eq!(diff["diff"]["added"][0]["id"], "ada", "{diff}");
+    assert_eq!(diff["diff"]["modified"][0]["id"], "1", "{diff}");
+    drop(server);
+
+    let plain = start(&["--graph", "modern", "--ui-dir", ui.to_str().unwrap()]);
+    assert!(get(plain.port, "/api/graph").json().get("layer").is_none());
+    let diff = post(plain.port, "/api/layer/diff", "{}").json();
+    assert_eq!(diff["diff"]["added"], serde_json::json!([]), "{diff}");
+}

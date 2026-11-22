@@ -9,9 +9,9 @@ use graphersal::TraversalGraph;
 use graphersal::storage::{
     ChangeSet, CommitHook, CommitMetadata, CompactString, CompressionStats, Definition,
     DefinitionKind, ElementKind, ExecutionPolicy, GraphError, GraphStatistics, GraphStorage,
-    JsonPath, LayerDiff, LayerDiffRequest, LayerOrigin, Mark, MemoryStats, PropertyIndexInfo,
-    PropertyIndexRange, PropertyIndexTransform, PropertyMap, RollbackReason, StorageCapabilities,
-    UniqueIndexDuplicates, UnitChanges, UnitMark,
+    JsonPath, LayerDiff, LayerDiffRequest, LayerOrigin, LayerSummary, Mark, MemoryStats,
+    PropertyIndexInfo, PropertyIndexRange, PropertyIndexTransform, PropertyMap, RollbackReason,
+    StorageCapabilities, UniqueIndexDuplicates, UnitChanges, UnitMark,
 };
 use graphersal_storage_tests::conformance;
 
@@ -258,6 +258,10 @@ impl<G: GraphStorage> GraphStorage for NoSchema<G> {
 
     fn layer_diff(&self, request: &LayerDiffRequest) -> Result<LayerDiff, GraphError> {
         self.0.layer_diff(request)
+    }
+
+    fn layer_summary(&self) -> Result<Option<LayerSummary>, GraphError> {
+        self.0.layer_summary()
     }
 
     fn memory_footprint_bytes(&self) -> Result<Option<u64>, GraphError> {

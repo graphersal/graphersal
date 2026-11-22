@@ -259,6 +259,10 @@ pub struct LayeredGraph {
     /// first use like `TraversalGraph`'s; not the base's. Boxed: see the note on the struct.
     #[cfg_attr(not(feature = "persist"), allow(dead_code))]
     graph_id: Box<std::sync::OnceLock<u128>>,
+    /// The display name of the base ([`LayerBase::name`] for a layer made over a
+    /// [`LayerBase`], else `"base"`): what [`GraphStorage::layer_summary`] shows; the engine
+    /// never reads it.
+    base_name: Box<str>,
 }
 
 impl LayeredGraph {
@@ -300,6 +304,7 @@ impl LayeredGraph {
             units: Box::new(UnitLog::after(base.undo.last_committed_at)),
             footprint: Box::default(),
             graph_id: Box::default(),
+            base_name: base::DEFAULT_NAME.into(),
             base,
         }
     }
