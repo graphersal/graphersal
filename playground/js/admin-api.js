@@ -53,9 +53,10 @@ const seg = (name) => encodeURIComponent(String(name));
  * root. Actions: list, get, create(body), delete, clone(newName), load, unload,
  * readOnly(value), autoLoad(value), aliases, setAlias(alias, target), removeAlias(alias),
  * backup(name), backups(name), restore(name, backup, newName?) (no `name` field when restoring
- * over the database itself), importPath({path, name, base?, format?, description?}), models,
- * addModel({path?, repo?, license?}), removeModel(repo or blob hash). The two transfers that are
- * not JSON requests are `exportPath` (a download) and `uploadImport` (the file as the body).
+ * over the database itself), importPath({path, name, base?, format?, description?, role?}), models,
+ * addModel({path?, repo?, license?}), removeModel(repo or blob hash), promote(name) (no body;
+ * one way: a base is frozen forever). The two transfers that are not JSON requests are
+ * `exportPath` (a download) and `uploadImport` (the file as the body).
  */
 export const adminRequest = Object.freeze({
   list: () => ({ method: 'GET', path: 'api/admin/databases' }),
@@ -81,6 +82,7 @@ export const adminRequest = Object.freeze({
   models: () => ({ method: 'GET', path: 'api/admin/models' }),
   addModel: (body) => ({ method: 'POST', path: 'api/admin/models', body }),
   removeModel: (id) => ({ method: 'DELETE', path: `api/admin/models/${modelSegs(id)}` }),
+  promote: (name) => ({ method: 'POST', path: `api/admin/databases/${seg(name)}/promote` }),
 });
 
 /** A model's repository (`owner/name`: its slash stays part of the path) or blob hash as path segments. */
@@ -255,6 +257,8 @@ export function confirmText(action, subject, extra = '') {
       return `Restore "${subject}" from the backup ${extra}? Its current directory moves to the server's trash/ directory and the backup takes its place.`;
     case 'removeModel':
       return `Remove the model "${subject}" from the server's models/ directory? Its blob files are deleted.`;
+    case 'promote':
+      return `Promote "${subject}" to a base? ${BASE_IS_FROZEN}`;
     default:
       return null;
   }
@@ -284,7 +288,7 @@ export function outcomeText(action, subject, answer = {}) {
     }
     case 'import': {
       const imp = answer.import && typeof answer.import === 'object' ? answer.import : {};
-      const what = [imp.format, answer.kind].filter(Boolean).join(', ');
+      const what = [imp.format, answer.kind, answer.role === 'base' ? 'base' : ''].filter(Boolean).join(', ');
       const state = answer.state === 'needs-model' ? `needs a model${answer.model ? ` (${answer.model})` : ''}` : answer.state || 'unloaded';
       return `Imported "${answer.name || subject}"${what ? ` (${what})` : ''}: ${state}.`;
     }
@@ -294,6 +298,7 @@ export function outcomeText(action, subject, answer = {}) {
       return `Added ${added} model blob${added === 1 ? '' : 's'}${resolved.length ? `; ready to load: ${resolved.join(', ')}` : ''}.`;
     }
     case 'removeModel': return `Removed the model "${answer.model || subject}"${typeof answer.bytes === 'number' ? ` (${bytesText(answer.bytes)} freed)` : ''}.`;
+    case 'promote': return `"${answer.name || subject}" is now a base (read-only, frozen); create layers over it with "New database…".`;
     default: return '';
   }
 }
@@ -433,8 +438,10 @@ export const IMPORT_FORMATS = Object.freeze(['', 'snapshot', 'store', 'graphson'
  * The import request from the import form, or the problems: `{upload: {path, size}}` (the file
  * as the body of `POST api/admin/import?<query>`), `{request}` (the JSON path form) or
  * `{problems: [text]}`. Form: `{source: 'upload'|'path', file ({size}), path, name, base,
- * format, description}`; `limit` = `uploadLimit(info)`. Only documented parameters are sent,
- * and only when set.
+ * format, description, role: 'normal'|'base'}`; `limit` = `uploadLimit(info)`. Only documented
+ * parameters are sent, and only when set: `role` only as `base` (the server's default is
+ * `normal`), and then without `base` (a base is made only from a plain source, for which the
+ * server refuses `base`; a layer source or a missing model is the server's refusal, shown as sent).
  */
 export function importRequest(form, limit = null) {
   const f = form || {};
@@ -443,8 +450,9 @@ export function importRequest(form, limit = null) {
   const np = nameProblem(name, 'name for the new database');
   if (np) problems.push(np);
   const fields = { name };
+  const asBase = f.role === 'base';
   const base = typeof f.base === 'string' ? f.base.trim() : '';
-  if (base) fields.base = base;
+  if (base && !asBase) fields.base = base;
   const format = typeof f.format === 'string' ? f.format : '';
   if (format) {
     if (!IMPORT_FORMATS.includes(format)) problems.push(`Unknown format "${format}".`);
@@ -452,6 +460,7 @@ export function importRequest(form, limit = null) {
   }
   const description = typeof f.description === 'string' ? f.description.trim() : '';
   if (description) fields.description = description;
+  if (asBase) fields.role = 'base';
   if (f.source === 'path') {
     const path = typeof f.path === 'string' ? f.path.trim() : '';
     if (!path) problems.push("Enter the source's path on the server.");
@@ -638,4 +647,29 @@ export function suggestName(fileName) {
   n = n.replace(/(\.layer)?\.(gsnap|gstore|graphson|jsonl|json|graphml|xml)$/, '');
   n = n.replace(/[^a-z0-9._-]+/g, '-').replace(/^[^a-z0-9]+/, '').slice(0, 63).replace(/[._-]+$/, '');
   return NAME_RULE.test(n) ? n : '';
+}
+
+
+// ------------------------------------------------------------------ bases with data (P4)
+
+/** What promotion means, said in every confirmation of it (one way: no route turns a base back). */
+export const BASE_IS_FROZEN = 'A base is frozen forever: it cannot be written or turned back; layers are built over it.';
+
+/**
+ * Whether a row may be promoted to a base (`POST .../promote`): `{enabled, title}`. Only an
+ * UNLOADED plain normal database whose config is readable; every other row is disabled with the
+ * reason (the server refuses the same cases with `409` and a help, shown verbatim when reached).
+ */
+export function promoteAction(row, { busy = false } = {}) {
+  const off = (title) => ({ enabled: false, title });
+  if (row.aliasOf) return off(`An alias of ${row.aliasOf}: use that database's row`);
+  if (busy) return off('Wait until the running action ends');
+  if (row.state === 'failed' || !row.kind) return off('A failed database cannot be promoted');
+  if (row.kind === 'layer') return off('A layer cannot become a base: export it with "materialize" and import the file as a base');
+  if (row.role === 'base') return off('Already a base');
+  if (row.state === 'loaded') return off('Unload it first: only an unloaded database can be promoted');
+  if (row.state === 'loading') return off('Loading…: unload it once loaded, then promote it');
+  if (row.state === 'needs-model') return off('Add its model first: a base cannot get a model later');
+  if (row.state !== 'unloaded') return off(`Only an unloaded database can be promoted (it is ${row.state})`);
+  return { enabled: true, title: `Turn it into a base. ${BASE_IS_FROZEN}` };
 }

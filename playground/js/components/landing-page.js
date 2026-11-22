@@ -9,14 +9,16 @@
 // sub-components: backups and restore (admin-backups.js), export download (admin-export.js),
 // import by upload or server path (admin-import.js) and the models section (admin-models.js).
 // A `needs-model` row carries the hint to add its model; a base held by loaded layers reads
-// "in pool"; a database holding copied model blobs shows the server's link warning.
+// "in pool"; a database holding copied model blobs shows the server's link warning. "Promote to
+// base…" (P4) turns an unloaded plain database into a base after a one-way confirmation
+// (`promoteAction` gives the reason it is disabled on every other row).
 
 import { ref, reactive, computed, nextTick, onMounted, onBeforeUnmount } from 'vue';
 import { state } from '../store.js';
 import { fetchDatabases, anyLoading, databaseRows, LANDING_POLL_MS } from '../server-mode.js';
 import {
   createAdmin, createBody, nameProblem, rowActions, confirmText, outcomeText, loadAndWatch,
-  baseNames, realRows, bytesText, transferActions, needsModelHint, poolText,
+  baseNames, realRows, bytesText, transferActions, needsModelHint, poolText, promoteAction,
 } from '../admin-api.js';
 import { AdminBackups } from './admin-backups.js';
 import { AdminExport } from './admin-export.js';
@@ -125,6 +127,11 @@ export const LandingPage = {
       if (!window.confirm(confirmText('unload', row.name))) return;
       run(row.name, 'unload', () => admin.unload(row.name));
     }
+    function promoteDb(row) {
+      if (!window.confirm(confirmText('promote', row.name))) return;
+      run(row.name, 'promote', () => admin.promote(row.name));
+    }
+    const promo = (row) => promoteAction(row, { busy: !!busy[row.name] });
     function deleteDb(row) {
       if (!window.confirm(confirmText('delete', row.name))) return;
       run(row.name, 'delete', () => admin.delete(row.name));
@@ -220,7 +227,7 @@ export const LandingPage = {
       openImport: () => importDlg.value && importDlg.value.open(),
       rows, aliases, problems, skipped, error, loading, loaded, load, busy, notice, dlg, dialog,
       acts, bases, databaseNames, showSize, showMemory, bytesText,
-      loadDb, unloadDb, deleteDb, setFlag, openCreate, openClone, openAlias, closeDialog, submitDialog, removeAlias,
+      loadDb, unloadDb, deleteDb, promoteDb, promo, setFlag, openCreate, openClone, openAlias, closeDialog, submitDialog, removeAlias,
       version: typeof info.version === 'string' ? info.version : '',
       href: (row) => new URL(row.href, ROOT).href,
       kindText: (row) => [row.kind, row.role === 'base' ? 'base' : ''].filter(Boolean).join(' · '),
@@ -293,6 +300,7 @@ export const LandingPage = {
                 <button type="button" class="btn small" :disabled="!acts(row).clone.enabled" :title="acts(row).clone.title" @click="openClone(row)">Clone…</button>
                 <button type="button" class="btn small" :disabled="!more(row).backups.enabled" :title="more(row).backups.title" @click="openBackups(row.name)">Backups…</button>
                 <button type="button" class="btn small" :disabled="!more(row).export.enabled" :title="more(row).export.title" @click="openExport(row)">Export…</button>
+                <button type="button" class="btn small" :disabled="!promo(row).enabled" :title="promo(row).title" @click="promoteDb(row)">{{ busy[row.name] === 'promote' ? 'Promoting…' : 'Promote to base…' }}</button>
                 <button type="button" class="btn small danger" :disabled="!acts(row).delete.enabled" :title="acts(row).delete.title" @click="deleteDb(row)">Delete…</button>
               </template>
             </td>
