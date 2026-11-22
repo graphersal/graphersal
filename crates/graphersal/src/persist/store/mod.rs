@@ -761,6 +761,12 @@ impl Store {
     /// read. Each filled blob is recorded in the copy's system journal (`blob.repaired`, `how`
     /// = `restored`). The report says what was copied and what was filled.
     ///
+    /// With [`ConvertOptions::with_skip_missing_blobs`] a blob missing from `from` (and from
+    /// the fill source) does not fail the conversion: the copy is made without it, verified
+    /// for everything else, and [`ConvertReport::blobs_missing`] names it. Its model is then
+    /// [`ModelState::Missing`] in the copy ([`Store::models_dir`]); fill it later with
+    /// [`Store::restore_blobs_from`].
+    ///
     /// ```
     /// use graphersal::persist::{BlobSource, ConvertOptions, MemDir, Store, StoreOptions};
     ///
@@ -822,7 +828,9 @@ impl Store {
             };
             if let Some(source) = options.fill_from {
                 let filled = blob_restore::restore_into(&to, &file, source)?;
-                if let Some(name) = filled.not_found.first() {
+                if let Some(name) = filled.not_found.first()
+                    && !options.skip_missing_blobs
+                {
                     return Err(PersistError::store(
                         "convert the store",
                         StoreFailure::BlobUnavailable,
@@ -854,7 +862,21 @@ impl Store {
                 report.blobs_filled = filled.restored;
                 report.bytes_filled = filled.bytes_restored;
             }
-            let verified = maintenance::verify_as(&to, None, maintenance::VerifyAs::Either)?;
+            let mut verified = maintenance::verify_as(&to, None, maintenance::VerifyAs::Either)?;
+            if options.skip_missing_blobs {
+                // Only the absent blobs are tolerated (format spec 4.6: a lost blob is not
+                // damage); a damaged one, and every other problem, still fails the copy.
+                let missing: std::collections::BTreeSet<String> = verified
+                    .blob_faults
+                    .iter()
+                    .filter(|(_, fault)| *fault == blobs::BlobFault::Missing)
+                    .map(|(blob, _)| blobs::blob_name(blob))
+                    .collect();
+                verified
+                    .problems
+                    .retain(|problem| !missing.contains(&problem.path));
+                report.blobs_missing = missing.into_iter().collect();
+            }
             if !verified.is_ok() {
                 return Err(PersistError::store(
                     "convert the store",
