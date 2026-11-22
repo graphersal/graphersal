@@ -1,11 +1,12 @@
 // The ONE place that creates the engine. Everything else calls `getEngine()` and talks to the
 // interface documented in engine.js.
 //
-// Mode detection: when the page is served by the CLI's dev server (`graphersal --server`), its
-// `GET /api/info` answers as a Graphersal dev server and the HTTP engine is used (no WebAssembly
-// download, no graph choice); so it is for another host whose `/api/info` names itself and
-// delivers a UI profile (js/engine/http-engine.js `isEngineInfo`). Otherwise (GitHub Pages,
-// `python3 -m http.server`) it is the WebAssembly playground as always.
+// Mode detection: when the page is served by a Graphersal host (the CLI's dev server
+// `graphersal --server`, or any other host built on graphersal-serve), its `GET /api/info` names
+// the protocol (`protocol: 'graphersal/1'`, js/engine/http-engine.js `isEngineInfo`) and the
+// HTTP engine is used (no WebAssembly download, no graph choice). Otherwise (GitHub Pages,
+// `python3 -m http.server`, an older host without `protocol`) it is the WebAssembly playground
+// as always.
 
 import { WasmEngine } from './wasm-engine.js';
 import { HttpEngine } from './http-engine.js';

@@ -259,9 +259,12 @@ names no profile opens `full`). The dev server takes it from `graphersal --serve
 NAME|FILE` (a built-in name or a JSON file with a profile object) and tells the page through
 `GET /api/info` (`uiProfile`); a host built on the server's core sets it with
 `ContextBuilder::ui_profile`. A host that is not the dev server can deliver a profile too
-(EXPERIMENTAL): the page talks to any server whose `GET /api/info` names itself in `server` (a
-text such as `"graphersal-server"`) and carries a `uiProfile`; without a `uiProfile` only
-`server: "graphersal-dev"` counts. A profile name the page does not know, or an object that breaks a
+(EXPERIMENTAL): the page talks to any Graphersal host, recognized by `"protocol": "graphersal/1"`
+in its `GET /api/info` (every host built on the server's core answers it); `server` only names
+the host (`ContextBuilder::server_name`, for example `"graphersal-server"`), and an answer
+without `protocol` (a static file server, an older host) leaves the page in the browser
+playground. The DEV SERVER badge shows only when the host says it is a development server
+(`"dev": true`, `ContextBuilder::dev`; the dev server does). A profile name the page does not know, or an object that breaks a
 rule above, is shown as an error naming every problem, never replaced by another profile. The
 built-in `demo` profile is a small example: a tab of its own that lists the people of the modern
 graph through a saved query as cards (it shows the script that defines the query when the graph

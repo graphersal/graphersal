@@ -376,7 +376,7 @@ fn extra_routes_answer_the_endpoints_the_core_does_not_know() {
     // The core's endpoints stay the core's; the rest is the core's 404.
     assert_eq!(
         body_json(&server.handle(get("/api/info")))["server"],
-        crate::SERVER_ID
+        crate::DEFAULT_SERVER_NAME
     );
     let unknown = server.handle(get("/api/goodbye"));
     assert_eq!(unknown.status(), 404);

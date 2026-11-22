@@ -11,7 +11,9 @@ import {
   createChat, serializeChat, mergeEvents, parseCommand, pairToolCalls, toolCallQuery, ChatController,
   RESTARTED_NOTICE, MAX_SAVED_ITEMS, groupTurns, turnSummary,
 } from '../js/ai-chat.js';
-import { HttpEngine, SERVER_ID } from '../js/engine/http-engine.js';
+import { HttpEngine } from '../js/engine/http-engine.js';
+
+const HOST = { protocol: 'graphersal/1', server: 'graphersal-dev' };
 import { WasmEngine } from '../js/engine/wasm-engine.js';
 import { AI_CHAT_UNAVAILABLE } from '../js/engine/engine.js';
 
@@ -581,9 +583,9 @@ test('the HTTP engine: ai info, the conversation endpoints and the status of a r
     return { ok: true, status: 200, text: async () => JSON.stringify(body) };
   };
   const ai = { provider: 'anthropic', model: 'm', readOnly: false, sendsDataTo: 'api.anthropic.com', maxToolCallsPerTurn: 20 };
-  const engine = new HttpEngine({ server: SERVER_ID, version: '0.1.0', ai }, { base: 'http://127.0.0.1:8080/', fetch, clientId: 'tab-1' });
+  const engine = new HttpEngine({ ...HOST, version: '0.1.0', ai }, { base: 'http://127.0.0.1:8080/', fetch, clientId: 'tab-1' });
   assert.deepEqual((await engine.info()).ai, ai);
-  assert.equal((await new HttpEngine({ server: SERVER_ID }, { base: 'http://127.0.0.1:8080/', fetch }).info()).ai, null);
+  assert.equal((await new HttpEngine({ ...HOST }, { base: 'http://127.0.0.1:8080/', fetch }).info()).ai, null);
   assert.deepEqual(await engine.aiCreateConversation(), { id: 'abc' });
   await engine.aiSend('abc', 'hello "x"');
   await engine.aiEvents('abc', 7);

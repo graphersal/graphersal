@@ -659,6 +659,9 @@ pub fn run(cli: &Cli) -> i32 {
         .context_builder_with(runner, plan.host_check(port))
         // This binary installs the counting allocator (`alloc-tracking`).
         .memory_tracked(true)
+        // The dev server: `GET /api/info` `dev` (the playground's DEV badge); its host name is
+        // the core's default, `graphersal-dev`.
+        .dev(true)
         .runs(runs)
         .ui(ui)
         .source(source)

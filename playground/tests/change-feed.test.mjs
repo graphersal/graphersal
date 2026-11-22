@@ -4,7 +4,9 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readChanges, createPoller, newClientId, mcpBadgeTitle } from '../js/change-feed.js';
-import { HttpEngine, SERVER_ID } from '../js/engine/http-engine.js';
+import { HttpEngine } from '../js/engine/http-engine.js';
+
+const HOST = { protocol: 'graphersal/1', server: 'graphersal-dev' };
 
 const feed = (version, commitSeq, recent) => ({ version, commitSeq, recent });
 
@@ -88,7 +90,7 @@ test('the HTTP engine names its page on every request and reads the change feed'
     calls.push({ path: new URL(url).pathname, init });
     return { ok: true, status: 200, text: async () => JSON.stringify({ version: 2, commitSeq: 5, recent: [], view: null, mcp: null }) };
   };
-  const info = { server: SERVER_ID, version: '0.1.0', mcp: { endpoint: '/mcp', readOnly: false, client: null } };
+  const info = { ...HOST, version: '0.1.0', mcp: { endpoint: '/mcp', readOnly: false, client: null } };
   const engine = new HttpEngine(info, { base: 'http://127.0.0.1:8080/', fetch, clientId: 'tab-x' });
   assert.equal((await engine.info()).mcp.endpoint, '/mcp');
   const answer = await engine.changes();
@@ -98,5 +100,5 @@ test('the HTTP engine names its page on every request and reads the change feed'
   await engine.execute('1', {});
   assert.equal(calls[1].init.headers['X-Graphersal-Client'], 'tab-x');
   assert.match(new HttpEngine(info, { fetch }).clientId, /^tab-/);
-  assert.equal((await new HttpEngine({ server: SERVER_ID }, { fetch }).info()).mcp, null);
+  assert.equal((await new HttpEngine({ ...HOST }, { fetch }).info()).mcp, null);
 });

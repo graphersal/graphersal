@@ -9,8 +9,9 @@
 
 `graphersal --server` serves the [Web Playground](../users_guide/web_playground.md) UI over
 HTTP, with the CLI process itself as the engine instead of the WebAssembly worker. It is the same single-page app:
-the page asks the serving origin `GET /api/info` at start, and when a Graphersal dev server
-answers, every engine call goes to it over HTTP. Served from GitHub Pages or any static file
+the page asks the serving origin `GET /api/info` at start, and when a Graphersal host answers
+(its answer names the protocol, `"protocol": "graphersal/1"`), every engine call goes to it over
+HTTP. Served from GitHub Pages or any static file
 server, the page stays the WebAssembly playground.
 
 ## Start it
@@ -287,7 +288,8 @@ Store](store_models.md)).
 
 ## What the UI does in this mode
 
-- A red **DEV SERVER · unstable** badge in the top bar. There is no start page and no graph choice:
+- A red **DEV SERVER · unstable** badge in the top bar (the server says `"dev": true` in `GET
+  /api/info`). There is no start page and no graph choice:
   the server serves the one graph it was started with. To use another graph, restart the server.
 - Queries, results, profiles, the graph drawing, the schema views and the schema editor work as
   in the WebAssembly playground: both run the same session code (the internal crate
@@ -1139,7 +1141,7 @@ workspace (which reads the whole graph) is shown as an error.
 
 | Endpoint | Engine method |
 |---|---|
-| `GET /api/info` | `info()` (`server: "graphersal-dev"`, `version`, `saveable`, `source`, `presets`: the limits in force, `mcp`: `{endpoint, readOnly, client}` or null, `ai`: `{provider, model, readOnly, sendsDataTo, maxToolCallsPerTurn}` or null (never the key; `sendsDataTo` is the provider's host, null for one on this machine), `damageFound`: `{text, frozen, foundBy, policy, problems}` or null, `embedders`: `[{name, model, dimension, default}]`, the built-in `hash-ngram/1` and every model of the database) |
+| `GET /api/info` | `info()` (`protocol: "graphersal/1"`: the protocol id of this API, by which the page recognizes a Graphersal host; a breaking change of the API bumps the number; `server: "graphersal-dev"`: only the host's name; `dev: true`: a development server, the page shows its DEV SERVER badge; `version`, `saveable`, `source`, `presets`: the limits in force, `mcp`: `{endpoint, readOnly, client}` or null, `ai`: `{provider, model, readOnly, sendsDataTo, maxToolCallsPerTurn}` or null (never the key; `sendsDataTo` is the provider's host, null for one on this machine), `damageFound`: `{text, frozen, foundBy, policy, problems}` or null, `embedders`: `[{name, model, dimension, default}]`, the built-in `hash-ngram/1` and every model of the database) |
 | `GET /api/changes` | `changes()`: the change feed `{version, commitSeq, recent: [{version, by, commitSeq, detail?}], view, mcp, damageFound, readOnly}` (`readOnly` as in `GET /api/info`: it changes while the server runs when its host turns read-only on or off); `by` is the page's `X-Graphersal-Client` header (every request of the page sends it), `mcp`, or `ai` (an AI Chat conversation, its id in `detail`) |
 | `POST /mcp` | the MCP endpoint (with `--mcp`, [above](#mcp-an-ai-agent-on-the-same-graph)) |
 | `POST /api/ai/conversations` | with `--ai` (EXPERIMENTAL): a new AI Chat conversation `{id}` (random, 128 bits) owned by the page's `X-Graphersal-Client` (required); every other client gets `403` for it, an unknown id is `404`, and without `--ai` every `/api/ai/*` is `404` |

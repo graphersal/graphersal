@@ -46,8 +46,18 @@ mod allow_list_tests;
 #[cfg(test)]
 mod boundary_tests;
 
-/// The `server` value of `GET /api/info` the UI recognizes.
-pub const SERVER_ID: &str = "graphersal-dev";
+/// The protocol id of this playground HTTP API, `GET /api/info` `protocol` in every answer of
+/// every host built on this crate: the playground takes a server as its engine when its info
+/// names this protocol (never by the host's name, `server`). A host that serves the API
+/// itself (without this crate) answers the same marker. The number is the API's major version:
+/// a breaking change of the API (a removed or renamed endpoint or field, a changed meaning)
+/// bumps it, and the playground then accepts only the versions it speaks; additions do not.
+pub const PROTOCOL: &str = "graphersal/1";
+
+/// The host name `GET /api/info` `server` answers when the host sets none
+/// ([`crate::ContextBuilder::server_name`]): the CLI's dev server. It only names the host:
+/// nothing recognizes a server by it.
+pub const DEFAULT_SERVER_NAME: &str = "graphersal-dev";
 
 /// The `X-Graphersal-Client` id of a request: up to 64 letters, digits, `-` and `_`.
 fn client_id(request: &Request) -> String {
@@ -784,9 +794,13 @@ fn info(context: &Context) -> Value {
 /// The fields of `GET /api/info` every server answers, plus the host's ([`crate::Hooks`]).
 fn info_fields(context: &Context) -> Value {
     let mut info = json!({
-        "server": SERVER_ID,
+        // The protocol marker the playground recognizes a Graphersal host by.
+        "protocol": PROTOCOL,
+        // The host's name (`ContextBuilder::server_name`); nothing recognizes a host by it.
+        "server": context.server_name.as_deref().unwrap_or(DEFAULT_SERVER_NAME),
         "name": "server",
-        "dev": true,
+        // A development server (`ContextBuilder::dev`): the UI shows its DEV badge.
+        "dev": context.dev,
         "unstable": true,
         // The OpenAPI description of this API (EXPERIMENTAL).
         "openapi": "/openapi.json",

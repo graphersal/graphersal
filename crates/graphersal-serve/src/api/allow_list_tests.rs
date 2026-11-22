@@ -206,7 +206,7 @@ fn allow_list_mode_answers_info_changes_and_query_and_refuses_every_other_api_ro
     assert_eq!(info.status(), 200);
     let info = body_json(&info);
     assert_eq!(info["apiMode"], "allow-list");
-    assert_eq!(info["server"], crate::SERVER_ID);
+    assert_eq!(info["server"], crate::DEFAULT_SERVER_NAME);
     assert_eq!(info["mcp"], Value::Null);
     let changes = handle(&context, request(Method::Get, "/api/changes", b""));
     assert_eq!(changes.status(), 200);

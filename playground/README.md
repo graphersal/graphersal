@@ -15,7 +15,7 @@ from any static file server, GitHub Pages, or a `play.<domain>` host.
 | Mode | Served by | Engine | Detected by |
 |---|---|---|---|
 | **WebAssembly** (default) | any static file server | `js/engine/wasm-engine.js`: the wasm build in a Web Worker | `GET api/info` does not answer as a dev server |
-| **Dev server** (DEV, unstable, local only) | `graphersal --graph <src> --server [--port N] [--ui-dir DIR]` | `js/engine/http-engine.js`: HTTP calls to that process | `GET api/info` answers `{"server": "graphersal-dev", ...}` |
+| **Dev server** (DEV, unstable, local only) | `graphersal --graph <src> --server [--port N] [--ui-dir DIR]` | `js/engine/http-engine.js`: HTTP calls to that process | `GET api/info` answers `{"protocol": "graphersal/1", "server": "graphersal-dev", "dev": true, ...}` (any host naming the protocol is used; `server` only names it) |
 
 `js/engine/index.js` asks `api/info` (relative to the page) once at start and picks the engine;
 the rest of the UI is the same code. Both engines run the same Rust session logic

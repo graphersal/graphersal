@@ -365,7 +365,7 @@ export const Workspace = {
       <span v-if="state.versionLabel" class="version-label hide-narrow" :title="state.versionLabel.title">{{ state.versionLabel.text }}</span>
       <span v-if="database" class="badge accent db-badge" :title="'Database ' + database + ' (served under ' + state.engineInfo.mountPath + ')'"><a v-if="databaseHome" :href="databaseHome" title="The home page of this server">{{ database }}</a><template v-else>{{ database }}</template></span>
       <span v-if="database && serverReadOnly" class="badge warn ro-badge" :title="'Read-only: ' + serverReadOnly + '; every write is refused'">read-only</span>
-      <span v-if="can('devBadge')" class="badge danger dev-badge"
+      <span v-if="can('devBadge') && state.engineInfo.dev" class="badge danger dev-badge"
             :title="'Connected to the dev server (graphersal --server) on ' + location.host + ': DEV mode, unstable, local only, not for production. ' + (state.engineInfo.store ? 'Queries run in that process on the graph of the Store directory ' + state.engineInfo.store + ': every commit is persisted and survives a restart.' : 'Queries run in that process on its in-memory graph' + (state.engineInfo.source ? ' (from ' + state.engineInfo.source + ')' : '') + '; nothing is saved unless you save it.')">DEV SERVER · unstable</span>
       <button v-if="can('mcp') && state.engineInfo.mcp" type="button" class="badge accent mcp-badge" @click="openMcpStats"
             :title="mcpBadgeTitle(state.engineInfo.mcp, location.host, location.protocol) + '. Click: MCP usage statistics.'">MCP<template v-if="state.engineInfo.mcp.readOnly"> · read-only</template></button>
