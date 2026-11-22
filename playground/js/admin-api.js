@@ -51,7 +51,11 @@ const seg = (name) => encodeURIComponent(String(name));
 /**
  * The request of one admin action: `{method, path, body?}` with `path` relative to the server
  * root. Actions: list, get, create(body), delete, clone(newName), load, unload,
- * readOnly(value), autoLoad(value), aliases, setAlias(alias, target), removeAlias(alias).
+ * readOnly(value), autoLoad(value), aliases, setAlias(alias, target), removeAlias(alias),
+ * backup(name), backups(name), restore(name, backup, newName?) (no `name` field when restoring
+ * over the database itself), importPath({path, name, base?, format?, description?}), models,
+ * addModel({path?, repo?, license?}), removeModel(repo or blob hash). The two transfers that are
+ * not JSON requests are `exportPath` (a download) and `uploadImport` (the file as the body).
  */
 export const adminRequest = Object.freeze({
   list: () => ({ method: 'GET', path: 'api/admin/databases' }),
@@ -66,7 +70,23 @@ export const adminRequest = Object.freeze({
   aliases: () => ({ method: 'GET', path: 'api/admin/aliases' }),
   setAlias: (alias, target) => ({ method: 'PUT', path: `api/admin/aliases/${seg(alias)}`, body: { target } }),
   removeAlias: (alias) => ({ method: 'DELETE', path: `api/admin/aliases/${seg(alias)}` }),
+  backup: (name) => ({ method: 'POST', path: `api/admin/databases/${seg(name)}/backup` }),
+  backups: (name) => ({ method: 'GET', path: `api/admin/databases/${seg(name)}/backups` }),
+  restore: (name, backup, newName) => ({
+    method: 'POST',
+    path: `api/admin/databases/${seg(name)}/restore`,
+    body: newName && newName !== name ? { backup, name: newName } : { backup },
+  }),
+  importPath: (body) => ({ method: 'POST', path: 'api/admin/import', body }),
+  models: () => ({ method: 'GET', path: 'api/admin/models' }),
+  addModel: (body) => ({ method: 'POST', path: 'api/admin/models', body }),
+  removeModel: (id) => ({ method: 'DELETE', path: `api/admin/models/${modelSegs(id)}` }),
 });
+
+/** A model's repository (`owner/name`: its slash stays part of the path) or blob hash as path segments. */
+function modelSegs(id) {
+  return String(id).split('/').map(seg).join('/');
+}
 
 /**
  * Sends one request (`adminRequest.*`) and resolves to the parsed answer; rejects with an
@@ -231,6 +251,10 @@ export function confirmText(action, subject, extra = '') {
       return `Remove the alias "${subject}"? Links to db/${subject}/ stop working.`;
     case 'flipAlias':
       return `Point the alias "${subject}" to "${extra}"? Its pages serve the other database from now on.`;
+    case 'restoreOver':
+      return `Restore "${subject}" from the backup ${extra}? Its current directory moves to the server's trash/ directory and the backup takes its place.`;
+    case 'removeModel':
+      return `Remove the model "${subject}" from the server's models/ directory? Its blob files are deleted.`;
     default:
       return null;
   }
@@ -252,6 +276,24 @@ export function outcomeText(action, subject, answer = {}) {
     case 'autoLoad': return answer.autoLoad ? `"${subject}" loads when the server starts.` : `"${subject}" no longer loads at start.`;
     case 'setAlias': return `The alias "${answer.alias || subject}" names "${answer.target}".`;
     case 'removeAlias': return `Removed the alias "${subject}".`;
+    case 'backup': return `Backed up "${subject}" as ${answer.backup || 'a new backup'}${typeof answer.bytes === 'number' ? ` (${bytesText(answer.bytes)})` : ''}.`;
+    case 'restore': {
+      const from = answer.restoredFrom && answer.restoredFrom.backup ? ` from ${answer.restoredFrom.database || ''}/${answer.restoredFrom.backup}` : '';
+      const was = answer.replaced ? `; the replaced directory moved to ${answer.trash || "the server's trash/ directory"}` : '';
+      return `Restored "${answer.name || subject}"${from} (${answer.state || 'unloaded'})${was}.`;
+    }
+    case 'import': {
+      const imp = answer.import && typeof answer.import === 'object' ? answer.import : {};
+      const what = [imp.format, answer.kind].filter(Boolean).join(', ');
+      const state = answer.state === 'needs-model' ? `needs a model${answer.model ? ` (${answer.model})` : ''}` : answer.state || 'unloaded';
+      return `Imported "${answer.name || subject}"${what ? ` (${what})` : ''}: ${state}.`;
+    }
+    case 'addModel': {
+      const added = Array.isArray(answer.added) ? answer.added.length : 0;
+      const resolved = Array.isArray(answer.resolved) ? answer.resolved : [];
+      return `Added ${added} model blob${added === 1 ? '' : 's'}${resolved.length ? `; ready to load: ${resolved.join(', ')}` : ''}.`;
+    }
+    case 'removeModel': return `Removed the model "${answer.model || subject}"${typeof answer.bytes === 'number' ? ` (${bytesText(answer.bytes)} freed)` : ''}.`;
     default: return '';
   }
 }
@@ -292,4 +334,308 @@ export function bytesText(n) {
     i++;
   }
   return `${v < 10 ? v.toFixed(1) : Math.round(v)} ${units[i]}`;
+}
+
+
+// ------------------------------------------------------------------ backups, export, import, models (P3)
+
+/**
+ * The extra row actions of the transfers, each `{enabled, title}`: backup, backups (the list,
+ * with restore), export. Kept apart from `rowActions` (its set is the P2 contract). A failed
+ * database whose config cannot be read offers only its backups; a failed one cannot be backed up
+ * or exported.
+ */
+export function transferActions(row, { busy = false } = {}) {
+  const off = (title) => ({ enabled: false, title });
+  const on = (title) => ({ enabled: true, title });
+  if (row.aliasOf) {
+    const why = `An alias of ${row.aliasOf}: use that database's row`;
+    return { backup: off(why), backups: off(why), export: off(why) };
+  }
+  if (busy) {
+    const why = 'Wait until the running action ends';
+    return { backup: off(why), backups: off(why), export: off(why) };
+  }
+  const failed = row.state === 'failed' || !row.kind;
+  return {
+    backup: failed ? off('A failed database cannot be backed up') : on("Write a verified ZIP backup into the server's backups/ directory"),
+    backups: on('List its backups and restore one'),
+    export: failed ? off('A failed database cannot be exported') : on('Download a packed snapshot (.gsnap)'),
+  };
+}
+
+/** The backups of a `GET .../backups` answer as rows, oldest first (as sent); malformed ones skipped. */
+export function backupRows(answer) {
+  const list = answer && Array.isArray(answer.backups) ? answer.backups : [];
+  return list
+    .filter((b) => b && typeof b === 'object' && typeof b.backup === 'string' && b.backup)
+    .map((b) => ({
+      backup: b.backup,
+      database: typeof b.database === 'string' ? b.database : '',
+      file: typeof b.file === 'string' ? b.file : '',
+      bytes: typeof b.bytes === 'number' && Number.isFinite(b.bytes) && b.bytes >= 0 ? b.bytes : null,
+      created: typeof b.created === 'string' ? b.created : '',
+      kind: typeof b.kind === 'string' ? b.kind : '',
+      role: typeof b.role === 'string' ? b.role : '',
+      base: typeof b.base === 'string' ? b.base : '',
+      layerBase: typeof b.layerBase === 'string' ? b.layerBase : '',
+    }));
+}
+
+/**
+ * Whether a backup of `name` may be restored over the database itself: `{enabled, title}`. The
+ * database must be unloaded (or no longer exist: the backup becomes a new database of that
+ * name). `row` is the database's listing row, or null when it does not exist.
+ */
+export function restoreOverAction(row) {
+  if (!row) return { enabled: true, title: 'The database no longer exists: the backup becomes a new database of this name' };
+  if (row.state === 'loaded' || row.state === 'loading') return { enabled: false, title: 'Unload it first (or restore into a new name)' };
+  return { enabled: true, title: "Replace it; its current directory moves to the server's trash/ directory" };
+}
+
+/**
+ * The export download: `{path, fileName}` with `path` relative to the server root
+ * (`api/admin/databases/<name>/export?models=true|false[&materialize=true]`) and the file name the
+ * server sends in its Content-Disposition (`<name>.gsnap`, `<name>.layer.gsnap` for a layer
+ * snapshot). `materialize` is sent only for a layer (a standalone full snapshot instead of the
+ * layer's changes); a layer snapshot never carries models.
+ */
+export function exportPath(name, { models = true, materialize = false, layer = false } = {}) {
+  const query = [`models=${models ? 'true' : 'false'}`];
+  if (layer && materialize) query.push('materialize=true');
+  const layerFile = layer && !materialize;
+  return {
+    path: `api/admin/databases/${seg(name)}/export?${query.join('&')}`,
+    fileName: `${name}${layerFile ? '.layer' : ''}.gsnap`,
+  };
+}
+
+/** The upload size limit (`uploadBytes` of the root `/api/info`), or null when not announced. */
+export function uploadLimit(info) {
+  const n = info && info.uploadBytes;
+  return typeof n === 'number' && Number.isFinite(n) && n > 0 ? n : null;
+}
+
+/** The problem with uploading `size` bytes under `limit` (null: none announced), or null. */
+export function uploadSizeProblem(size, limit) {
+  if (typeof size !== 'number' || !Number.isFinite(size)) return 'Choose a file.';
+  if (size === 0) return 'The file is empty.';
+  if (limit !== null && limit !== undefined && size > limit) {
+    return `The file has ${bytesText(size)}; the server takes uploads up to ${bytesText(limit)} ([limits] upload_bytes in server.toml). Import it from a path on the server instead.`;
+  }
+  return null;
+}
+
+/** The formats an import names (`format`); '' = detected from the content. */
+export const IMPORT_FORMATS = Object.freeze(['', 'snapshot', 'store', 'graphson', 'graphml']);
+
+/**
+ * The import request from the import form, or the problems: `{upload: {path, size}}` (the file
+ * as the body of `POST api/admin/import?<query>`), `{request}` (the JSON path form) or
+ * `{problems: [text]}`. Form: `{source: 'upload'|'path', file ({size}), path, name, base,
+ * format, description}`; `limit` = `uploadLimit(info)`. Only documented parameters are sent,
+ * and only when set.
+ */
+export function importRequest(form, limit = null) {
+  const f = form || {};
+  const problems = [];
+  const name = typeof f.name === 'string' ? f.name.trim().toLowerCase() : '';
+  const np = nameProblem(name, 'name for the new database');
+  if (np) problems.push(np);
+  const fields = { name };
+  const base = typeof f.base === 'string' ? f.base.trim() : '';
+  if (base) fields.base = base;
+  const format = typeof f.format === 'string' ? f.format : '';
+  if (format) {
+    if (!IMPORT_FORMATS.includes(format)) problems.push(`Unknown format "${format}".`);
+    else fields.format = format;
+  }
+  const description = typeof f.description === 'string' ? f.description.trim() : '';
+  if (description) fields.description = description;
+  if (f.source === 'path') {
+    const path = typeof f.path === 'string' ? f.path.trim() : '';
+    if (!path) problems.push("Enter the source's path on the server.");
+    else if (!isAbsolutePath(path)) problems.push('The path must be absolute (it is read on the server).');
+    if (problems.length) return { problems };
+    return { request: adminRequest.importPath({ path, ...fields }) };
+  }
+  const size = f.file && typeof f.file.size === 'number' ? f.file.size : NaN;
+  const sp = uploadSizeProblem(size, limit);
+  if (sp) problems.push(sp);
+  if (problems.length) return { problems };
+  const query = Object.entries(fields).map(([k, v]) => `${k}=${encodeURIComponent(v)}`).join('&');
+  return { upload: { path: `api/admin/import?${query}`, size } };
+}
+
+/** Whether a server path is absolute (unix `/...`, Windows `C:\...`, `C:/...` or `\\server\...`). */
+export function isAbsolutePath(path) {
+  return /^\//.test(path) || /^[A-Za-z]:[\\/]/.test(path) || /^\\\\/.test(path);
+}
+
+/** The text of an upload's progress: `12 MB of 40 MB (30 %)`, or the bytes sent when the total is unknown. */
+export function progressText(loaded, total) {
+  if (typeof total === 'number' && total > 0) {
+    const pct = Math.min(100, Math.floor((loaded / total) * 100));
+    return `${bytesText(loaded)} of ${bytesText(total)} (${pct} %)`;
+  }
+  return `${bytesText(loaded) || '0 B'} sent`;
+}
+
+/**
+ * Uploads `file` (a Blob/File, or anything `XMLHttpRequest.send` takes) to `upload.path`
+ * (`importRequest`'s `upload`) as the raw body with `Content-Type: application/octet-stream`
+ * and the host headers, through `XMLHttpRequest` (the only browser API with upload progress).
+ * Answers `{promise, abort}`: `promise` resolves to the parsed answer (the import entry) and
+ * rejects with an AdminError: the server's `{error, help}`; a `413` without `help` gets the
+ * limit's advice; a connection the server closed (it answers an upload declared far above its
+ * limit without reading it) names the limit; `abort()` rejects with `aborted: true`.
+ * `onProgress(loaded, total)` follows `xhr.upload.onprogress`; `onSent()` fires when the body is
+ * sent (the import then runs within the request). `XHR` is injectable (tests).
+ * @param {{base: URL|string, headers?: Object<string,string>, XHR?: Function, limit?: number|null}} options
+ */
+export function uploadImport({ base, headers = {}, XHR = globalThis.XMLHttpRequest, limit = null }, upload, file, { onProgress = () => {}, onSent = () => {} } = {}) {
+  let xhr = null;
+  const promise = new Promise((resolve, reject) => {
+    if (typeof XHR !== 'function') {
+      reject(new AdminError('This browser cannot upload files (no XMLHttpRequest).'));
+      return;
+    }
+    xhr = new XHR();
+    xhr.open('POST', String(new URL(upload.path, base)));
+    for (const [k, v] of Object.entries(headers)) xhr.setRequestHeader(k, v);
+    xhr.setRequestHeader('Accept', 'application/json');
+    xhr.setRequestHeader('Content-Type', 'application/octet-stream');
+    if (xhr.upload) {
+      xhr.upload.onprogress = (e) => onProgress(e.loaded, e.lengthComputable ? e.total : upload.size);
+      xhr.upload.onload = () => onSent();
+    }
+    xhr.onload = () => {
+      const text = typeof xhr.responseText === 'string' ? xhr.responseText : '';
+      if (xhr.status >= 200 && xhr.status < 300) {
+        try {
+          resolve(text ? JSON.parse(text) : {});
+        } catch (e) {
+          reject(new AdminError(`The server sent no JSON (HTTP ${xhr.status})`, { status: xhr.status }));
+        }
+        return;
+      }
+      const err = parseAdminError(xhr.status, text);
+      if (xhr.status === 413 && !err.help) {
+        err.help = limit ? `The server takes uploads up to ${bytesText(limit)}; import a larger file from a path on the server.` : 'Import a larger file from a path on the server.';
+      }
+      reject(err);
+    };
+    xhr.onerror = () => {
+      const tooBig = limit && upload.size > limit;
+      reject(new AdminError(
+        tooBig
+          ? `The server closed the connection: the file is larger than its upload limit (${bytesText(limit)}).`
+          : 'The upload failed: the connection was closed before the server answered.',
+        { help: tooBig ? 'Import it from a path on the server instead.' : '' },
+      ));
+    };
+    xhr.onabort = () => {
+      const err = new AdminError('The upload was cancelled.');
+      err.aborted = true;
+      reject(err);
+    };
+    xhr.send(file);
+  });
+  return {
+    promise,
+    abort: () => {
+      if (xhr) xhr.abort();
+    },
+  };
+}
+
+/** The model rows of `GET api/admin/models` (`models`), malformed ones skipped. */
+export function modelRows(answer) {
+  const list = answer && Array.isArray(answer.models) ? answer.models : [];
+  const strings = (v) => (Array.isArray(v) ? v.filter((x) => typeof x === 'string' && x) : []);
+  return list
+    .filter((m) => m && typeof m === 'object' && typeof m.blob === 'string' && m.blob)
+    .map((m) => ({
+      repo: typeof m.repo === 'string' && m.repo ? m.repo : null,
+      identity: typeof m.identity === 'string' ? m.identity : '',
+      license: typeof m.license === 'string' ? m.license : '',
+      blob: m.blob,
+      bytes: typeof m.bytes === 'number' && Number.isFinite(m.bytes) && m.bytes >= 0 ? m.bytes : null,
+      users: strings(m.users),
+      waiting: strings(m.waiting),
+      copied: m.copied === true,
+      copiedIn: strings(m.copiedIn),
+      linkWarning: typeof m.linkWarning === 'string' ? m.linkWarning : '',
+      links: typeof m.links === 'number' ? m.links : null,
+      // What `DELETE models/<id>` takes: the repository, else the blob hash.
+      id: typeof m.repo === 'string' && m.repo ? m.repo : m.blob,
+    }));
+}
+
+/** The `needs-model` databases of `GET api/admin/models` (`missing`) as `[{database, model}]`. */
+export function missingRows(answer) {
+  const list = answer && Array.isArray(answer.missing) ? answer.missing : [];
+  return list
+    .filter((m) => m && typeof m.database === 'string' && m.database && typeof m.model === 'string' && m.model)
+    .map((m) => ({ database: m.database, model: m.model }));
+}
+
+/** Whether a model row may be removed: `{enabled, title}` (the server checks the catalog too). */
+export function removeModelAction(model) {
+  if (model.users.length) return { enabled: false, title: `Used by ${model.users.join(', ')}: delete those databases first` };
+  if (model.waiting.length) return { enabled: false, title: `Waited for by ${model.waiting.join(', ')}` };
+  return { enabled: true, title: "Delete its blob from the server's models/ directory" };
+}
+
+/**
+ * The add-model body from the form, or the problems: `{body}` | `{problems}`. Form `{source:
+ * 'path'|'repo', path, repo, license}`: a path (absolute, on the server: a Model2Vec model
+ * directory or a `.gsnap` carrying model blobs; `repo`/`license` name a directory's model when it
+ * does not), or a repository alone (a model `models/` already holds).
+ */
+export function addModelBody(form) {
+  const f = form || {};
+  const repo = typeof f.repo === 'string' ? f.repo.trim() : '';
+  const license = typeof f.license === 'string' ? f.license.trim() : '';
+  if (f.source === 'repo') {
+    if (!repo) return { problems: ['Enter the repository (owner/name).'] };
+    return { body: { repo } };
+  }
+  const path = typeof f.path === 'string' ? f.path.trim() : '';
+  if (!path) return { problems: ['Enter the path of a model directory or .gsnap on the server.'] };
+  if (!isAbsolutePath(path)) return { problems: ['The path must be absolute (it is read on the server).'] };
+  const body = { path };
+  if (repo) body.repo = repo;
+  if (license) body.license = license;
+  return { body };
+}
+
+/** The hint of a `needs-model` row: how to get it loadable (empty for other states). */
+export function needsModelHint(row) {
+  if (!row || row.state !== 'needs-model') return '';
+  const model = row.model ? `"${row.model}"` : 'its model';
+  return `Add ${model} under Models (from a model directory or .gsnap on the server; when models/ already holds it: "Give to waiting"); the database then becomes unloaded and can be loaded.`;
+}
+
+/**
+ * The state text of a listing row with the pool: an unloaded base held in the shared pool by
+ * its loaded layers reads `in pool (layers: a, b)`; otherwise the row's `stateText`.
+ */
+export function poolText(row) {
+  if (!row || !row.pooled) return row ? row.stateText : '';
+  if (row.state === 'loaded') return row.stateText;
+  return row.pooledBy && row.pooledBy.length ? `in pool (layers: ${row.pooledBy.join(', ')})` : 'in pool';
+}
+
+/**
+ * A database name suggested from an upload's file name: the extensions of the import sources
+ * dropped (`acme.layer.gsnap` -> `acme`), lower case, every other character `-`; '' when nothing
+ * usable is left. Only a suggestion: the form checks it with `nameProblem`.
+ */
+export function suggestName(fileName) {
+  let n = typeof fileName === 'string' ? fileName : '';
+  n = n.replace(/^.*[\\/]/, '').toLowerCase();
+  n = n.replace(/(\.layer)?\.(gsnap|gstore|graphson|jsonl|json|graphml|xml)$/, '');
+  n = n.replace(/[^a-z0-9._-]+/g, '-').replace(/^[^a-z0-9]+/, '').slice(0, 63).replace(/[._-]+$/, '');
+  return NAME_RULE.test(n) ? n : '';
 }
