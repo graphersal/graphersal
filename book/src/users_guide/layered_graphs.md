@@ -12,10 +12,10 @@ with the project's own repositories. Most of a project graph is the product itse
 costs about what the project adds or changes, not a copy of the product. Several layers can
 share one base in the same process.
 
-> **EXPERIMENTAL in 0.6.x.** From Rust a layer can be saved as a layer snapshot and read back
+> **EXPERIMENTAL in 0.7.x.** From Rust a layer can be saved as a layer snapshot and read back
 > over its base, or kept in a layer Store (`Store::create_layer` / `Store::open_layer`); the
-> CLI, the dev server and Python keep layers in memory only for now (see
-> [Limitations](#limitations)). How the storage works inside, its capabilities and memory
+> CLI and the dev server keep a layer in a layer store with `--layer-store`, `--layer` and
+> Python keep it in memory (see [Limitations](#limitations)). How the storage works inside, its capabilities and memory
 > figures are on the developer page [Layered Graphs](../for_developers/layered_graphs.md).
 > A server that serves many customers' layers over shared product versions, one MCP endpoint
 > per name, is described in [Serving Layers](../for_developers/serving_layers.md).

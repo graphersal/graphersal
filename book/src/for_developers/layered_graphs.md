@@ -6,9 +6,9 @@ changes or removes. From outside a layer is an ordinary storage (`GraphStorage`)
 traversal API, the Rhai DSL, GQL, saved queries and the session all run on it the same way they
 run on a `TraversalGraph`. The base never changes: each layer stores only its own difference.
 
-> **EXPERIMENTAL in 0.6.x**, like the `GraphStorage` trait. A layer can be saved as a layer
-> snapshot or kept in a layer Store; copies of a layer Store and a few catalog kinds are not
-> supported yet (see [Limitations](#limitations)).
+> **EXPERIMENTAL in 0.7.x**, like the `GraphStorage` trait. A layer can be saved as a layer
+> snapshot or kept in a layer Store; a damaged layer Store is not repaired, and a few catalog
+> kinds are not supported on a layer yet (see [Limitations](#limitations)).
 
 What a layer is for and how queries see it (`layer()`, `has_layer()`, `g.layer_diff()`, the
 CLI's `--layer` and `--layer-store`, the `store` commands' `--base`, Python) is on the user page [Layers](../users_guide/layered_graphs.md). This

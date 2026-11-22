@@ -20,15 +20,15 @@ Python package and the web playground are released with the same number:
 | `graphersal` (Python) | wheels (abi3, Python 3.10+) | the PyO3 binding from `bindings/py-graphersal` |
 | web playground | static files | runs `graphersal-wasm` (not published; its JS API is internal to the playground) |
 
-## Stability in 0.6.x
+## Stability in 0.7.x
 
-The same rules hold for every minor line before 1.0 (they held for 0.1.x to 0.5.x as well); a
-minor release (0.5 to 0.6) may break them, and its release notes list every break with the upgrade step
-([Release Notes 0.6.0](../release_notes/release_notes_0.6.0.md)).
+The same rules hold for every minor line before 1.0 (they held for 0.1.x to 0.6.x as well); a
+minor release (0.6 to 0.7) may break them, and its release notes list every break with the upgrade step
+([Release Notes 0.7.0](../release_notes/release_notes_0.7.0.md)).
 
-- Stable within 0.6.x (additive changes only): the public API of `graphersal` outside the items marked
+- Stable within 0.7.x (additive changes only): the public API of `graphersal` outside the items marked
   EXPERIMENTAL, the DSL and the schema format.
-- EXPERIMENTAL (may change in any 0.6.x release): the `GraphStorage` trait and its associated types,
+- EXPERIMENTAL (may change in any 0.7.x release): the `GraphStorage` trait and its associated types,
   `PersistentStorage`, `AnyGraph`, `StoreDir`, and `graphersal-storage-tests`; pin the exact version.
 - Internal: `graphersal-session`, the wasm crate's JS API, the dev server's HTTP API and its MCP tools
   (`--server` is a development tool, bound to the loopback interface unless `--host` or a container
