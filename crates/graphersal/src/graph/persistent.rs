@@ -195,6 +195,7 @@ pub trait PersistentStorage: GraphStorage + Send + Sync + 'static {
     ///
     /// **EXPERIMENTAL**, like the trait. Default: `Ok(None)`, a storage that is not a layer (an
     /// encoder then writes every element).
+    #[allow(clippy::type_complexity)] // the parts borrow the storage and name its handle types
     fn layer_parts(
         &self,
     ) -> Result<Option<LayerParts<'_, Self::VertexId, Self::EdgeId>>, GraphError> {

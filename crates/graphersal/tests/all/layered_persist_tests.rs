@@ -119,7 +119,10 @@ pub(crate) fn unit(
 }
 
 /// The units of the history, in order; each one exercises a delta kind (its comment).
-pub(crate) fn history() -> Vec<Box<dyn Fn(&mut LayeredGraph) -> Result<(), GraphError>>> {
+/// One unit of the history.
+pub(crate) type Step = Box<dyn Fn(&mut LayeredGraph) -> Result<(), GraphError>>;
+
+pub(crate) fn history() -> Vec<Step> {
     vec![
         // Added vertices (an auto id, explicit ids, a doc whose `emb` the rule derives), an
         // added edge, cross edges (added -> base, base -> added, a base self-loop, base -> base).
@@ -1010,7 +1013,7 @@ mod snapshot {
                 expected: e,
                 given: g,
                 ..
-            } => assert_eq!((*e, *g), (expected, given)),
+            } => assert_eq!((**e, **g), (expected, given)),
             other => panic!("expected a base mismatch, got {other:?}"),
         }
         assert_eq!(

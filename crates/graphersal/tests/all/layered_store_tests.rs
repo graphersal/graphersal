@@ -273,7 +273,9 @@ fn every_cut_of_the_last_record_recovers_the_layer_before_it() {
     let before = state(&oracle(&base, all - 1));
     // Every byte near both ends of the record, and a stride through its middle.
     let cuts: Vec<usize> = (complete..full)
-        .filter(|cut| *cut < complete + 80 || *cut + 80 > full || (cut - complete) % 37 == 0)
+        .filter(|cut| {
+            *cut < complete + 80 || *cut + 80 > full || (cut - complete).is_multiple_of(37)
+        })
         .collect();
     for cut in cuts {
         let attempt = crashed.deep_copy();
@@ -415,8 +417,8 @@ fn another_base_is_refused_naming_both() {
     else {
         panic!("expected LayerBaseMismatch, got {err:?}");
     };
-    assert_eq!(expected, base.base_ref().unwrap());
-    assert_eq!(given, other.base_ref().unwrap());
+    assert_eq!(&**expected, base.base_ref().unwrap());
+    assert_eq!(&**given, other.base_ref().unwrap());
     let text = err.to_string();
     assert!(
         text.contains(&base.base_ref().unwrap().to_string()),
@@ -1093,8 +1095,7 @@ fn the_damage_report_of_a_layer_store_lists_the_damage_of_its_files() {
     let wal = dir
         .file_names()
         .into_iter()
-        .filter(|n| n.starts_with("wal/"))
-        .last()
+        .rfind(|n| n.starts_with("wal/"))
         .unwrap();
     let mut bytes = dir.file(&wal).unwrap();
     let at = 64 + (bytes.len() - 64) / 2;
@@ -1517,7 +1518,7 @@ fn the_base_ref_is_a_creation_parameter_carried_by_every_copy_path() {
                 .unwrap()
                 .layer_base()
                 .unwrap(),
-            identity.unwrap(),
+            *base.base_ref().unwrap(),
             "{what}"
         );
     }

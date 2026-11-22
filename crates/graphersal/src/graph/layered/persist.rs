@@ -63,7 +63,7 @@ impl PersistentStorage for LayeredGraph {
     }
 
     fn set_graph_id(&mut self, graph_id: u128) -> Result<(), GraphError> {
-        self.graph_id = Box::new(std::sync::OnceLock::from(graph_id));
+        *self.graph_id = std::sync::OnceLock::from(graph_id);
         Ok(())
     }
 
