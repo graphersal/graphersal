@@ -34,7 +34,8 @@ fn off() -> HttpError {
 }
 
 /// `{readOnly, endpoint, client: {name, version} | null}` for `GET /api/info` and
-/// `/api/changes`, or null without `--mcp`.
+/// `/api/changes`, or null without `--mcp` (`endpoint`: `/mcp`, or `<mount>/mcp` under the
+/// host's [`crate::ContextBuilder::mount_path`]).
 pub(crate) fn status(context: &Context) -> Value {
     // In allow-list mode `/mcp` is refused: no endpoint to show.
     if context.allow_list.is_some() {
@@ -68,6 +69,10 @@ mod enabled {
         };
         let mut status = mcp.status();
         status["readOnly"] = json!(profile.read_only() || context.runtime_read_only_on());
+        // Under a host's URL prefix the endpoint is `<mount>/mcp` (ContextBuilder::mount_path).
+        if let Some(mount) = &context.mount_path {
+            status["endpoint"] = json!(format!("{mount}/mcp"));
+        }
         status
     }
 

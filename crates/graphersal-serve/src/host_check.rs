@@ -129,6 +129,7 @@ pub struct HostCheck {
     allowed: Vec<String>,
     port: u16,
     url: String,
+    hint: Option<String>,
 }
 
 impl HostCheck {
@@ -141,6 +142,7 @@ impl HostCheck {
             allowed: Vec::new(),
             port,
             url: url.to_string(),
+            hint: None,
         }
     }
 
@@ -153,6 +155,17 @@ impl HostCheck {
     /// The checks with further allowed host names (lower case, IPv6 in brackets).
     pub fn with_allowed_hosts(mut self, allowed: Vec<String>) -> Self {
         self.allowed = allowed;
+        self
+    }
+
+    /// The checks with the host's own advice in their `403` answers (EXPERIMENTAL), instead of
+    /// the default that names the CLI's flags (`--allowed-host`, `--host`): an unknown `Host`
+    /// answers `unknown Host: <hint>`, a refused `Origin` `cross-origin request from <origin>
+    /// refused (<hint>)`. A host with its own configuration names its own setting, e.g.
+    /// `use http://127.0.0.1:7700/ or add the name to allowed_hosts in server.toml`.
+    /// Default: none, the CLI's texts (the cross-origin answer without advice).
+    pub fn with_hint(mut self, hint: impl Into<String>) -> Self {
+        self.hint = Some(hint.into());
         self
     }
 
@@ -183,16 +196,21 @@ impl HostCheck {
         if let Some(origin) = request.header("Origin")
             && !self.is_own_origin(origin, host)
         {
-            return Err(HttpError(
-                403,
-                format!("cross-origin request from {origin} refused"),
-            ));
+            let message = match &self.hint {
+                None => format!("cross-origin request from {origin} refused"),
+                Some(hint) => format!("cross-origin request from {origin} refused ({hint})"),
+            };
+            return Err(HttpError(403, message));
         }
         Ok(())
     }
 
-    /// The message of the `403` to a request whose `Host` is not this server.
+    /// The message of the `403` to a request whose `Host` is not this server (the host's
+    /// [`Self::with_hint`], else the CLI's advice).
     pub(crate) fn unknown_host_message(&self) -> String {
+        if let Some(hint) = &self.hint {
+            return format!("unknown Host: {hint}");
+        }
         match self.exposure {
             Exposure::Loopback => format!(
                 "unknown Host: use {} (a public name behind a reverse proxy: start \
