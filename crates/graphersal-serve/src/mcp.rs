@@ -160,6 +160,7 @@ mod enabled {
                 | ServeError::Lifecycle(_)
                 | ServeError::Session(_)
                 | ServeError::NoMcp(_)
+                | ServeError::Open(_)
                 | ServeError::Failed(_) => McpError::Unavailable(err.to_string()),
             })
         }

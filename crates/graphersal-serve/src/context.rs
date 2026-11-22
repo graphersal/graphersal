@@ -87,6 +87,10 @@ pub enum ServeError {
     /// The session method of [`Context::call_fallible`] failed with this diagnostic. An HTTP
     /// answer is a `422`.
     Failed(String),
+    /// A database could not be opened ([`crate::open_store`], [`crate::open_layer_store`],
+    /// [`crate::layer_base_of_store`]): why, the diagnostic and the engine's error behind it.
+    /// An HTTP answer is a `500`.
+    Open(crate::open::OpenError),
 }
 
 impl fmt::Display for ServeError {
@@ -94,6 +98,7 @@ impl fmt::Display for ServeError {
         match self {
             Self::Setup(source) => fmt::Display::fmt(source, f),
             Self::Busy(busy) => f.write_str(busy.message()),
+            Self::Open(err) => fmt::Display::fmt(err, f),
             Self::Thread(message)
             | Self::Ui(message)
             | Self::Lifecycle(message)
@@ -108,6 +113,7 @@ impl std::error::Error for ServeError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::Setup(source) => Some(source.as_ref()),
+            Self::Open(err) => Some(err),
             Self::Thread(_)
             | Self::Ui(_)
             | Self::Lifecycle(_)
@@ -132,7 +138,8 @@ impl From<ServeError> for HttpError {
             | ServeError::Ui(_)
             | ServeError::Lifecycle(_)
             | ServeError::Session(_)
-            | ServeError::NoMcp(_) => 500,
+            | ServeError::NoMcp(_)
+            | ServeError::Open(_) => 500,
         };
         HttpError(status, err.to_string())
     }
