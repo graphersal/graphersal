@@ -158,6 +158,11 @@ fn route(context: &Arc<Context>, request: &mut Request) -> Result<Response, Http
                 .map(|queue| queue.scheduled_jobs_refusal())
                 .unwrap_or_default(),
         )),
+        // Read-only at run time: the scheduled jobs' changes are no commit the gate sees.
+        (
+            Method::Post,
+            "jobs/define" | "jobs/drop" | "jobs/enable" | "jobs/schedule" | "jobs/run",
+        ) if context.runtime_read_only_on() => Err(context.read_only_refusal()),
         (Method::Get, "graph") => value(context.call_fallible(|s| s.info())?),
         (Method::Post, "query") => run_saved_query(context, request),
         (Method::Post, "execute") => {
@@ -570,7 +575,7 @@ fn route(context: &Arc<Context>, request: &mut Request) -> Result<Response, Http
             value(saved)
         }
         (Method::Post, "save") => {
-            if context.read_only {
+            if context.is_read_only() {
                 return Err(HttpError(
                     409,
                     "the graph is served read-only: nothing is saved".into(),
@@ -723,7 +728,7 @@ fn run_saved_query(context: &Arc<Context>, request: &mut Request) -> Result<Resp
         .map_err(|err| HttpError::bad_request(err.to_string()))?;
     let allow_list = context.allow_list.clone();
     let authorizer = match &allow_list {
-        Some(allow) => authorizer_for(context.read_only, Some(&allow.policy)),
+        Some(allow) => authorizer_for(context.fixed_read_only(), Some(&allow.policy)),
         None => playground_authorizer(),
     };
     let cancel = CancelToken::new();
@@ -815,8 +820,9 @@ fn info_fields(context: &Context) -> Value {
         "view": store::current_view(context),
         // The limits every query runs under (from the command line).
         "presets": context.presets,
-        // --read-only (or a Store this process may not write): every write is refused.
-        "readOnly": context.read_only,
+        // --read-only (or a Store this process may not write), or the runtime read-only toggle
+        // on (ContextBuilder::runtime_read_only): every write is refused.
+        "readOnly": context.is_read_only(),
         // The MCP endpoint (`--mcp`): `{readOnly, endpoint, client}`, or null.
         "mcp": mcp::status(context),
     });
@@ -829,6 +835,12 @@ fn info_fields(context: &Context) -> Value {
     // answer of a host that sets none is unchanged.
     if let Some(profile) = &context.ui_profile {
         info["uiProfile"] = profile.clone();
+    }
+    // The URL prefix the host serves this context under (`ContextBuilder::mount_path`); absent
+    // at the root, so the answer of a host that mounts nothing is unchanged.
+    if let Some(mount) = &context.mount_path {
+        info["mountPath"] = json!(mount);
+        info["openapi"] = json!(format!("{mount}/openapi.json"));
     }
     context.hooks.add_info(context, &mut info);
     info
@@ -845,6 +857,8 @@ fn changes(context: &Context) -> Value {
         .unwrap_or_else(|_| json!({}));
     answer["view"] = store::current_view(context);
     answer["mcp"] = mcp::status(context);
+    // Read-only now (it changes at run time: ContextBuilder::runtime_read_only).
+    answer["readOnly"] = json!(context.is_read_only());
     // Damage found while the store is open: the banner appears without a reload.
     answer["damageFound"] = match context.store.as_ref() {
         None => Value::Null,

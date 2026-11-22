@@ -4,7 +4,7 @@
 //! `McpRequest`/`McpResponse`, these types carry only what the API reads and answers.
 
 use std::fmt;
-use std::io::Read;
+use std::io::{ErrorKind, Read, Write};
 
 use serde_json::Value;
 
@@ -192,6 +192,55 @@ impl<'a> Request<'a> {
             ));
         }
         String::from_utf8(bytes).map_err(|_| HttpError::bad_request("the body is not UTF-8"))
+    }
+
+    /// Streams the body into `out` (an upload: a snapshot, a GraphSON file) and answers how
+    /// many bytes it copied, never holding more than one small buffer of it in memory; `max`
+    /// is the host's limit, independent of [`MAX_BODY_BYTES`] (which bounds only
+    /// [`Self::text_body`]/[`Self::json_body`]). EXPERIMENTAL.
+    ///
+    /// Answers `413 the body is larger than <max> bytes` when the declared `Content-Length`
+    /// exceeds `max` (before reading anything) or when the body read passes `max` (an
+    /// undeclared or wrongly declared length: nothing beyond `max` is written to `out`); `400`
+    /// when the body cannot be read, `500` when `out` refuses a write. After an error `out` may
+    /// hold a part of the body: the host discards it (a temporary file it removes).
+    ///
+    /// A refused request leaves the rest of its body unread. The host's listener must then
+    /// drain it or close the connection before it reuses the connection; with an HTTP library
+    /// that reads (or allocates) the remaining declared length when a request is dropped, a
+    /// host refuses a huge declared body before it builds the [`Request`]. The CLI's
+    /// `tiny_http` adapter, for example, never answers a request that declares more than four
+    /// times [`MAX_BODY_BYTES`] (`MAX_DECLARED_BODY_BYTES`, 64 MiB) and leaks its connection,
+    /// so its dev server accepts no upload beyond that.
+    pub fn copy_body_to(&mut self, out: &mut dyn Write, max: u64) -> Result<u64, HttpError> {
+        let too_large = || HttpError(413, format!("the body is larger than {max} bytes"));
+        if self
+            .body_length
+            .is_some_and(|len| u64::try_from(len).map_or(true, |len| len > max))
+        {
+            return Err(too_large());
+        }
+        let mut buffer = vec![0u8; 64 * 1024];
+        let mut copied: u64 = 0;
+        loop {
+            let read = match self.body.read(&mut buffer) {
+                Ok(0) => return Ok(copied),
+                Ok(read) => read,
+                Err(err) if err.kind() == ErrorKind::Interrupted => continue,
+                Err(err) => {
+                    return Err(HttpError::bad_request(format!(
+                        "cannot read the body: {err}"
+                    )));
+                }
+            };
+            let total = copied.saturating_add(read as u64);
+            if total > max {
+                return Err(too_large());
+            }
+            out.write_all(&buffer[..read])
+                .map_err(|err| HttpError(500, format!("cannot store the body: {err}")))?;
+            copied = total;
+        }
     }
 
     /// [`Self::text_body`] parsed as a JSON object.

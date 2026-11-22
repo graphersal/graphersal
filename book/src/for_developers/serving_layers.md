@@ -52,6 +52,7 @@ excerpts on this page come from it.
 | `ContextBuilder::mcp_session_route(Some(..))` | `graphersal-serve`, feature `mcp` | Sets the route tag of the sessions this context starts. |
 | `ContextBuilder::shared_mcp` / `mcp_profile` | `graphersal-serve`, feature `mcp` | One MCP endpoint for every context, with a profile per context. |
 | `GraphResolver`, `Server::ready_with` | `graphersal-serve` | The extension point that picks the context of each request. |
+| `GraphDirectory`, `Mcp::handle_directory` | `graphersal-mcp` | One MCP endpoint over all graphs: the agent lists them, selects one per session and may switch (see below). EXPERIMENTAL. |
 
 ### Base identity
 
@@ -263,7 +264,39 @@ by the host, or retiring only at night. The test
 `a_retired_version_drops_its_context_layer_and_finally_its_base` checks the reference policy:
 the context, the layer and finally the base are released.
 
-## Security notes
+## One endpoint over all graphs (directory mode)
+
+Instead of one MCP URL per graph (`/mcp/acme`), a host may offer a single endpoint that an
+agent's harness configures once. The host implements `graphersal_mcp::GraphDirectory` over its
+catalog:
+
+- `list()`: the graphs and aliases an agent may name, each a `GraphEntry` with its kind
+  (plain, layer, base), state (unloaded, loading, loaded, needs-model, failed with a reason),
+  read-only flag and description.
+- `resolve(name)`: the route of a name, an alias resolved now (`acme` -> `acme@2026.3`).
+- `host(route)`: the context serving that route (a `graphersal-serve` `Context` is a
+  `graphersal_mcp::Host`) and its MCP profile, or an error whose text the agent reads, such as
+  `database 'acme@2026.3' is not loaded; ask an operator to load it`.
+
+The host's listener passes every request to its endpoint path to
+`mcp.handle_directory(&catalog, request)`. Inside an MCP session the agent calls
+`list_graphs`, selects a graph with `use_graph {name}` and may switch later; every data tool
+takes an optional `graph` argument that names another graph for one call. Each call runs on
+that graph's context under that context's profile, so its read-only flag and access policy
+apply. Saved queries are not tools of their own here: the agent runs them with
+`run_saved_query` (and `graph`).
+
+- **The selection is pinned.** `use_graph` stores the resolved route in the MCP session, so an
+  alias flip does not move an open session: the same rule as the route tag above.
+- **A new session starts empty.** After a reconnect, or when the endpoint forgot the session
+  (the table keeps `MAX_SESSIONS`, 64, unless `Mcp::with_max_sessions` says otherwise; the
+  client then gets `404` and initializes again), calls that name no graph fail with a message
+  that names `list_graphs` and `use_graph`, and the instructions tell the agent to select
+  again.
+- **Table sessions only.** The selection lives in the session table, so a directory endpoint
+  refuses signed session ids (`Mcp::with_session_key`).
+- `Mcp::with_endpoint(path)` sets the path `Mcp::status` shows.
+
 
 - **The route is visible to the client.** It is part of the `Mcp-Session-Id` header, so never
   put a secret, a tenant key or a storage path into it. A versioned name is enough.

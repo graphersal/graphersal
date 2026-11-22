@@ -9,7 +9,7 @@ use std::sync::mpsc::{Sender, channel};
 use graphersal_mcp::{ClientRef, Executor, Host, McpError, PromptCost};
 use serde_json::Value;
 
-use super::{Job, graph_title, session_presets, start_session};
+use super::{Job, graph_kind, graph_title, session_presets, start_session};
 use crate::cli::{Cli, EXIT_OK, EXIT_USAGE_ERROR};
 use crate::out::{Note, print_block, usage_text};
 
@@ -101,15 +101,12 @@ pub fn run(args: &[String]) -> i32 {
     };
     let title = graph_title(&cli.graph);
     let started = start_session(
-        &cli.graph,
-        None,
+        graphersal_serve::ServedSource::graph(opened.graph, title.clone(), graph_kind(&cli.graph)),
         session_presets(&cli),
-        None,
-        Some((opened.graph, title.clone())),
         None,
     );
     let jobs = match started {
-        Ok((jobs, ..)) => jobs,
+        Ok(launched) => launched.jobs,
         Err(message) => {
             errln!("{message}");
             return EXIT_USAGE_ERROR;

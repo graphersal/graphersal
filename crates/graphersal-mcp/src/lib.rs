@@ -68,6 +68,20 @@
 //! process. An identity the host established ([`Connection::with_identity`],
 //! [`McpRequest::with_identity`]) travels with the session jobs ([`ClientRef::identity`]).
 //!
+//! # Directory mode: one endpoint over many graphs
+//!
+//! A host serving several graphs may offer ONE endpoint for all of them:
+//! [`Mcp::handle_directory`] with the host's [`GraphDirectory`] (its registry: the graphs and
+//! aliases with their [`GraphState`], the route an alias resolves to now, the [`Host`] and
+//! [`Profile`] of a graph). The agent calls `list_graphs`, selects a graph with `use_graph`
+//! (stored in the MCP session's table entry; an alias that moves later does not move the
+//! session; a new session starts without a selection) and may switch; every data tool takes an
+//! optional `graph` argument for one call. Each call runs on that graph's host under its
+//! profile, so per-graph read-only flags and policies apply. Saved queries are reached through
+//! `run_saved_query`, never as tools of their own. Directory mode needs the session table
+//! (not [`Mcp::with_session_key`]); [`Mcp::with_max_sessions`] sizes it. The single-graph
+//! [`Mcp::handle`] is unchanged.
+//!
 //! # Protocol
 //!
 //! MCP Streamable HTTP of the initialize-based protocol revisions (`2025-03-26` to
@@ -183,6 +197,7 @@ mod answer;
 mod catalog;
 mod config;
 mod connection;
+mod directory;
 mod host;
 mod profile;
 mod protocol;
@@ -198,6 +213,7 @@ mod tests;
 
 pub use config::{MAX_INSTRUCTIONS_CHARS, MIN_ANSWER_CHARS, McpConfig, McpConfigError};
 pub use connection::{Connection, DEFAULT_PROGRESS_INTERVAL};
+pub use directory::{GraphDirectory, GraphEntry, GraphKind, GraphState};
 pub use host::{ClientRef, Executor, Host, Job, McpError};
 pub use profile::Profile;
 pub use protocol::{
@@ -205,7 +221,8 @@ pub use protocol::{
 };
 pub use resources::gql_reference_text;
 pub use sessions::{
-    MAX_CLIENT_NAMES, MAX_SESSION_ROUTE_BYTES, SessionKey, is_valid_session_route, session_route,
+    MAX_CLIENT_NAMES, MAX_SESSION_ROUTE_BYTES, MAX_SESSIONS, SessionKey, is_valid_session_route,
+    session_route,
 };
 pub use stats::{LATENCY_BUCKETS_MS, MAX_COUNTED_NAMES, McpStats, Refusal};
 pub use stream::serve_lines;

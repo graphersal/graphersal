@@ -1,0 +1,1528 @@
+{
+  "read_only": {
+    "instructions": "Graphersal dev server: an in-memory property graph (Gremlin/TinkerPop model: vertices and edges with labels and properties) that a user works with LIVE in a browser playground at the same time; the browser reloads when you change the graph. Prefer GQL, the ISO graph query language (it also accepts the Cypher spellings, such as CREATE and UNWIND), for reading and writing data: the `gql` tool takes the query text as it is (MATCH ... WHERE ... RETURN, rows as JSON objects, INSERT / CREATE, SET, REMOVE, DELETE and MERGE writes; experimental, see its description). Use `query` for what GQL does not cover: Gremlin (Apache TinkerPop) in Rhai syntax, and scripts with several statements (see its description). Use `get_schema`/`statistics`/`graph_info` to learn the data first, and the schema tools to read or evolve the schema. Before writing a new query, check `list_saved_queries`: saved queries are named, parameterized queries the user stored in the graph, each written in GQL (`language: \"gql\"`) or in Gremlin (Rhai); run one with `run_saved_query` {name, params} instead of writing it again (a GQL query calls one written in GQL as `CALL folder.name(args) YIELD col`). Saved queries marked `writes: true` change data (their `effects` say what); run them only when the user asked for that change. Large text that queries rarely read (CVs, descriptions) can be kept compressed in memory with a compression rule: `list_compressions`, `estimate_compression` (measures the candidate rules on the current data first, changes nothing), `define_compression`, `drop_compression`, `recompress` (reads stay plain); `memory_report` shows where the memory goes per label and property, `workload_statistics` which queries ran and how the properties were used. A query that filters a label on a property (`g.v().has_label(\"person\").has(\"age\", P.gt(30))`) and is slow on a large graph can be served by a property index: `list_indexes`, `create_index` {label, key, element?, type?, transform?}, `drop_index`; results never change, `.profile()` names the index it reads. For a case-insensitive search create it with transform \"to_lower\" and query `has(\"name\", __.to_lower().is(\"alice\"))` (the constant compared as given, so write it in lower case). Resources: graphersal://dsl-reference (every step and function), graphersal://examples (runnable examples), graphersal://saved-queries, graphersal://schema, graphersal://statistics. To create test data, use `Fake(seed)` inside a query (reproducible English names, e-mails, addresses, companies and random numbers; section \"Test data generator\" of graphersal://dsl-reference, group \"Generated test data (Fake)\" of graphersal://examples). Every query is one transaction: a failing query changes nothing. Errors carry a `Help:` line that names the fix. Answers are compact JSON. `query`, `gql` and `run_saved_query` page their results: at most `max_rows` results (default 100) after the first `offset` ones (default 0), `max_items` items of every nested list (default 100), and only whole results within the server's answer limit (`graph_info`: `answerLimitChars`); a trailing note says what was shown and names the next page's `offset`. Bound large answers in the query itself (LIMIT, `values(..)`) or page them. Persistence (checkpoints, history, views of past states) is the user's, in the browser: when the user opens a read-only view of a past state, `graph_info` says so and writes are refused until they go back to the live graph. This server is READ-ONLY for MCP: only reading tools are offered and a query that would write is refused.",
+    "tools": [
+      {
+        "annotations": {
+          "destructiveHint": false,
+          "idempotentHint": true,
+          "openWorldHint": false,
+          "readOnlyHint": true,
+          "title": "Run a query"
+        },
+        "description": "Run a Graphersal script: Gremlin in Rhai syntax (double-quoted strings, `__.` for child traversals, tokens such as P.gt(30), Order.desc, T.label); statements end with `;`, the last value is the result, and a traversal before it runs only with a terminal (.to_list(), .next(), .iterate()). Compact JSON, paged (offset, max_rows, max_items). Prefer the gql tool for plain reads; in a script GQL is g.gql(\"MATCH ...\", #{name: value}) and a saved query g.query(\"name\", #{..}). Every step: resource graphersal://dsl-reference. Example: g.v().has_label(\"person\").values(\"name\")",
+        "inputSchema": {
+          "properties": {
+            "max_items": {
+              "description": "Most items shown of every nested list or map (default 100); a cut list ends with \"… N more\".",
+              "minimum": 1,
+              "type": "integer"
+            },
+            "max_rows": {
+              "description": "Most top-level results returned per page (default 100).",
+              "minimum": 1,
+              "type": "integer"
+            },
+            "offset": {
+              "description": "Paging: skip the first offset top-level results (default 0); a cut answer's note names the next page's offset.",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "profile": {
+              "description": "Also return the per-step metrics of the optimized plan (default false).",
+              "type": "boolean"
+            },
+            "script": {
+              "description": "The Graphersal script (Gremlin in Rhai syntax).",
+              "type": "string"
+            }
+          },
+          "required": [
+            "script"
+          ],
+          "type": "object"
+        },
+        "name": "query",
+        "title": "Run a query"
+      },
+      {
+        "annotations": {
+          "destructiveHint": false,
+          "idempotentHint": true,
+          "openWorldHint": false,
+          "readOnlyHint": true,
+          "title": "Run a GQL query"
+        },
+        "description": "Run a GQL query (ISO graph query language; Cypher spellings accepted): the text as it is, strings in single quotes, $name values from params; one JSON object per row (elements as {id, label, properties}), paged (offset, max_rows). Ids: element_id(n) = 'x', not id(n); labels(n), type(r). Anchor a variable-length pattern -[:T*1..3]-> on a node found by a property (an unanchored one can exceed the memory limit). Every clause and function: resource graphersal://gql-reference. Example: MATCH (p:person)-[:knows]->(f) WHERE f.age > $min RETURN p.name AS who, f.name AS friend ORDER BY who, params {\"min\": 30}",
+        "inputSchema": {
+          "properties": {
+            "max_items": {
+              "description": "Most items shown of every nested list or map (default 100); a cut list ends with \"… N more\".",
+              "minimum": 1,
+              "type": "integer"
+            },
+            "max_rows": {
+              "description": "Most rows returned per page (default 100).",
+              "minimum": 1,
+              "type": "integer"
+            },
+            "offset": {
+              "description": "Paging: skip the first offset rows (default 0); a cut answer's note names the next page's offset.",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "params": {
+              "description": "Parameter name -> value; $name in the query reads the entry name.",
+              "type": "object"
+            },
+            "profile": {
+              "description": "Also return the per-step metrics of the Gremlin plan the query runs as (default false).",
+              "type": "boolean"
+            },
+            "query": {
+              "description": "The GQL query (MATCH ... RETURN ..., or a write such as INSERT ..., SET ... or MERGE ...), as plain text.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "query"
+          ],
+          "type": "object"
+        },
+        "name": "gql",
+        "title": "Run a GQL query"
+      },
+      {
+        "annotations": {
+          "destructiveHint": false,
+          "idempotentHint": true,
+          "openWorldHint": false,
+          "readOnlyHint": true,
+          "title": "Saved queries"
+        },
+        "description": "The saved queries stored in the graph (name, folder, description, parameters, language gql or rhai, writes and effects). Check them before writing a new query.",
+        "inputSchema": {
+          "properties": {
+            "folder": {
+              "description": "Only the queries in this folder and below it (e.g. \"reports\" lists reports and reports/sales).",
+              "type": "string"
+            },
+            "search": {
+              "description": "Only the queries whose name or description contains this text (case-insensitive).",
+              "type": "string"
+            }
+          },
+          "type": "object"
+        },
+        "name": "list_saved_queries",
+        "title": "Saved queries"
+      },
+      {
+        "annotations": {
+          "destructiveHint": false,
+          "idempotentHint": true,
+          "openWorldHint": false,
+          "readOnlyHint": true,
+          "title": "Run a saved query"
+        },
+        "description": "Run a saved query by name with named parameters (checked against their schemas; defaults fill the rest), paged like the gql tool. Run one with writes: true only when the user asked for that change. Example: {\"name\": \"older\", \"params\": {\"min\": 30}}",
+        "inputSchema": {
+          "properties": {
+            "max_items": {
+              "description": "Most items shown of every nested list or map (default 100); a cut list ends with \"… N more\".",
+              "minimum": 1,
+              "type": "integer"
+            },
+            "max_rows": {
+              "description": "Most top-level results returned per page (default 100).",
+              "minimum": 1,
+              "type": "integer"
+            },
+            "name": {
+              "description": "The saved query's name (list_saved_queries).",
+              "type": "string"
+            },
+            "offset": {
+              "description": "Paging: skip the first offset top-level results (default 0); a cut answer's note names the next page's offset.",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "params": {
+              "description": "Parameter name -> value; omit a parameter to use its default.",
+              "type": "object"
+            }
+          },
+          "required": [
+            "name"
+          ],
+          "type": "object"
+        },
+        "name": "run_saved_query",
+        "title": "Run a saved query"
+      },
+      {
+        "annotations": {
+          "destructiveHint": false,
+          "idempotentHint": true,
+          "openWorldHint": false,
+          "readOnlyHint": true,
+          "title": "Compression rules"
+        },
+        "description": "The compression rules of the graph (element, label, path, codec lz4 or dedup, served, stats).",
+        "inputSchema": {
+          "properties": {},
+          "type": "object"
+        },
+        "name": "list_compressions",
+        "title": "Compression rules"
+      },
+      {
+        "annotations": {
+          "destructiveHint": false,
+          "idempotentHint": true,
+          "openWorldHint": false,
+          "readOnlyHint": true,
+          "title": "Estimate a compression rule"
+        },
+        "description": "Measure candidate compression rules for one label and property path on the current data, changing nothing (sizes, ratio, read speed, the best candidate). Use it before the define_compression tool.",
+        "inputSchema": {
+          "properties": {
+            "codec": {
+              "description": "Measure only this codec, or these codecs (default: lz4 only). dedup stores each distinct value once: values repeated across many elements (any type on a top-level property).",
+              "oneOf": [
+                {
+                  "enum": [
+                    "lz4",
+                    "dedup"
+                  ],
+                  "type": "string"
+                },
+                {
+                  "items": {
+                    "enum": [
+                      "lz4",
+                      "dedup"
+                    ],
+                    "type": "string"
+                  },
+                  "type": "array"
+                }
+              ]
+            },
+            "dictionary": {
+              "description": "Measure only with (true) or without (false) a dictionary (default: both).",
+              "type": "boolean"
+            },
+            "element": {
+              "description": "Default vertex.",
+              "enum": [
+                "vertex",
+                "edge"
+              ],
+              "type": "string"
+            },
+            "label": {
+              "description": "The vertex or edge label.",
+              "type": "string"
+            },
+            "minBytes": {
+              "description": "Measure only this threshold (default: several; 0 only for dedup).",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "path": {
+              "description": "The property path: a name or a jpath of names (details.career.cv).",
+              "type": "string"
+            }
+          },
+          "required": [
+            "label",
+            "path"
+          ],
+          "type": "object"
+        },
+        "name": "estimate_compression",
+        "title": "Estimate a compression rule"
+      },
+      {
+        "annotations": {
+          "destructiveHint": false,
+          "idempotentHint": true,
+          "openWorldHint": false,
+          "readOnlyHint": true,
+          "title": "Property indexes"
+        },
+        "description": "The property indexes of the graph (element, label, key, type, transform, served, stats).",
+        "inputSchema": {
+          "properties": {},
+          "type": "object"
+        },
+        "name": "list_indexes",
+        "title": "Property indexes"
+      },
+      {
+        "annotations": {
+          "destructiveHint": false,
+          "idempotentHint": true,
+          "openWorldHint": false,
+          "readOnlyHint": true,
+          "title": "Graph schema"
+        },
+        "description": "A map of the graph (labels, counts, keys, types, edge from->to pairs, indexes); labels: details. format \"json\": the stored schema.",
+        "inputSchema": {
+          "properties": {
+            "descriptions": {
+              "type": "boolean"
+            },
+            "format": {
+              "enum": [
+                "summary",
+                "json"
+              ]
+            },
+            "labels": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            }
+          },
+          "type": "object"
+        },
+        "name": "get_schema",
+        "title": "Graph schema"
+      },
+      {
+        "annotations": {
+          "destructiveHint": false,
+          "idempotentHint": true,
+          "openWorldHint": false,
+          "readOnlyHint": true,
+          "title": "Inferred schema"
+        },
+        "description": "get_schema's map; format \"json\": the schema the data satisfies.",
+        "inputSchema": {
+          "properties": {
+            "descriptions": {
+              "type": "boolean"
+            },
+            "format": {
+              "enum": [
+                "summary",
+                "json"
+              ]
+            },
+            "labels": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            }
+          },
+          "type": "object"
+        },
+        "name": "infer_schema",
+        "title": "Inferred schema"
+      },
+      {
+        "annotations": {
+          "destructiveHint": false,
+          "idempotentHint": true,
+          "openWorldHint": false,
+          "readOnlyHint": true,
+          "title": "Check a schema"
+        },
+        "description": "Check a proposed schema against the data without applying it: violations, the diff from the stored schema, backward compatibility.",
+        "inputSchema": {
+          "properties": {
+            "mode": {
+              "description": "Replaces the schema's own mode: none (stored, not enforced), open (declared fields enforced), closed (also rejects undeclared labels and properties).",
+              "enum": [
+                "none",
+                "open",
+                "closed"
+              ],
+              "type": "string"
+            },
+            "schema": {
+              "description": "The proposed schema, in Graphersal's schema format: {\"mode\": \"open\", \"vertices\": {\"person\": {\"schema\": {\"type\": \"object\", \"properties\": {\"name\": {\"type\": \"string\"}, \"age\": {\"type\": \"integer\"}}, \"required\": [\"name\"]}}}, \"edges\": {\"knows\": {\"connections\": [{\"from\": \"person\", \"to\": \"person\"}], \"schema\": {\"type\": \"object\", \"properties\": {\"weight\": {\"type\": \"number\"}}}}}} (each label's properties are a JSON Schema object under \"schema\"; mode none/open/closed). infer_schema shows the full shape for the current data. A JSON string is accepted too.",
+              "type": "object"
+            }
+          },
+          "required": [
+            "schema"
+          ],
+          "type": "object"
+        },
+        "name": "validate_schema",
+        "title": "Check a schema"
+      },
+      {
+        "annotations": {
+          "destructiveHint": false,
+          "idempotentHint": true,
+          "openWorldHint": false,
+          "readOnlyHint": true,
+          "title": "Check a schema patch"
+        },
+        "description": "validate_schema of the stored schema with a JSON Merge Patch applied; applies nothing.",
+        "inputSchema": {
+          "properties": {
+            "patch": {
+              "description": "A JSON Merge Patch of the stored schema (a JSON string is accepted too).",
+              "type": "object"
+            }
+          },
+          "required": [
+            "patch"
+          ],
+          "type": "object"
+        },
+        "name": "validate_schema_patch",
+        "title": "Check a schema patch"
+      },
+      {
+        "annotations": {
+          "destructiveHint": false,
+          "idempotentHint": true,
+          "openWorldHint": false,
+          "readOnlyHint": true,
+          "title": "Diff a schema"
+        },
+        "description": "The changes from the stored schema to a proposed one, each marked backward compatible or not.",
+        "inputSchema": {
+          "properties": {
+            "schema": {
+              "description": "The proposed schema, in Graphersal's schema format: {\"mode\": \"open\", \"vertices\": {\"person\": {\"schema\": {\"type\": \"object\", \"properties\": {\"name\": {\"type\": \"string\"}, \"age\": {\"type\": \"integer\"}}, \"required\": [\"name\"]}}}, \"edges\": {\"knows\": {\"connections\": [{\"from\": \"person\", \"to\": \"person\"}], \"schema\": {\"type\": \"object\", \"properties\": {\"weight\": {\"type\": \"number\"}}}}}} (each label's properties are a JSON Schema object under \"schema\"; mode none/open/closed). infer_schema shows the full shape for the current data. A JSON string is accepted too.",
+              "type": "object"
+            }
+          },
+          "required": [
+            "schema"
+          ],
+          "type": "object"
+        },
+        "name": "diff_schema",
+        "title": "Diff a schema"
+      },
+      {
+        "annotations": {
+          "destructiveHint": false,
+          "idempotentHint": true,
+          "openWorldHint": false,
+          "readOnlyHint": true,
+          "title": "Statistics"
+        },
+        "description": "Counts of the graph per label, its memory footprint, the query limits and the memory of the process.",
+        "inputSchema": {
+          "properties": {},
+          "type": "object"
+        },
+        "name": "statistics",
+        "title": "Statistics"
+      },
+      {
+        "annotations": {
+          "destructiveHint": false,
+          "idempotentHint": true,
+          "openWorldHint": false,
+          "readOnlyHint": true,
+          "title": "Workload statistics"
+        },
+        "description": "Which queries ran and how the properties were used, per channel and time window (a graph in a store only).",
+        "inputSchema": {
+          "properties": {
+            "history": {
+              "description": "Add every row's buckets of this tier: the last 60 minutes, 48 hours or 90 days.",
+              "enum": [
+                "minutes",
+                "hours",
+                "days"
+              ],
+              "type": "string"
+            },
+            "max_rows": {
+              "description": "Keep this many rows per list (default 50); <list>_omitted counts the rest.",
+              "minimum": 1,
+              "type": "integer"
+            }
+          },
+          "type": "object"
+        },
+        "name": "workload_statistics",
+        "title": "Workload statistics"
+      },
+      {
+        "annotations": {
+          "destructiveHint": false,
+          "idempotentHint": true,
+          "openWorldHint": false,
+          "readOnlyHint": true,
+          "title": "System journal"
+        },
+        "description": "One page of the system journal: operational events (store opened, checkpoints, backups, damage, denials), oldest first unless newest_first.",
+        "inputSchema": {
+          "properties": {
+            "after": {
+              "description": "Only records after this seq (the previous page's next_after).",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "before": {
+              "description": "Only records before this seq (with newest_first: the previous page's next_before).",
+              "minimum": 1,
+              "type": "integer"
+            },
+            "kind": {
+              "description": "Only records of this kind (store.backup_done, auth.denied, ...).",
+              "type": "string"
+            },
+            "level": {
+              "description": "Only this level and the more severe ones.",
+              "enum": [
+                "error",
+                "warn",
+                "notice",
+                "info"
+              ],
+              "type": "string"
+            },
+            "limit": {
+              "description": "At most this many records (default 100).",
+              "minimum": 1,
+              "type": "integer"
+            },
+            "newest_first": {
+              "description": "The newest matching records, newest first (the answer then has next_before).",
+              "type": "boolean"
+            },
+            "since": {
+              "description": "Only records at or after this time: RFC 3339 with a zone, or microseconds since the Unix epoch.",
+              "type": "string"
+            },
+            "source": {
+              "description": "Only this source and the ones below it (store matches store.backup).",
+              "type": "string"
+            }
+          },
+          "type": "object"
+        },
+        "name": "journal",
+        "title": "System journal"
+      },
+      {
+        "annotations": {
+          "destructiveHint": false,
+          "idempotentHint": true,
+          "openWorldHint": false,
+          "readOnlyHint": true,
+          "title": "Storage advice"
+        },
+        "description": "The storage advisor's recommendations (indexes, compression), each with its evidence, impact and the command applying it; changes nothing.",
+        "inputSchema": {
+          "properties": {
+            "everything": {
+              "description": "Report every candidate, ignoring the default thresholds (for small graphs).",
+              "type": "boolean"
+            }
+          },
+          "type": "object"
+        },
+        "name": "advise",
+        "title": "Storage advice"
+      },
+      {
+        "annotations": {
+          "destructiveHint": false,
+          "idempotentHint": true,
+          "openWorldHint": false,
+          "readOnlyHint": true,
+          "title": "List scheduled jobs"
+        },
+        "description": "The scheduled jobs of the graph's store, their schedules and last runs (the user defines them).",
+        "inputSchema": {
+          "properties": {},
+          "type": "object"
+        },
+        "name": "list_jobs",
+        "title": "List scheduled jobs"
+      },
+      {
+        "annotations": {
+          "destructiveHint": false,
+          "idempotentHint": true,
+          "openWorldHint": false,
+          "readOnlyHint": true,
+          "title": "Memory report"
+        },
+        "description": "Where the memory goes per label and property (bytes, types, compression, indexes) and per process component; changes nothing.",
+        "inputSchema": {
+          "properties": {
+            "limit": {
+              "description": "Keep the property rows and the label rows with the most bytes (default 50 each).",
+              "minimum": 1,
+              "type": "integer"
+            },
+            "max_elements": {
+              "description": "Sample so that about this many elements are read, at least one per label (default: all).",
+              "minimum": 1,
+              "type": "integer"
+            },
+            "max_labels": {
+              "description": "Keep the label rows with the most bytes (default: limit); labels_omitted counts the rest.",
+              "minimum": 1,
+              "type": "integer"
+            },
+            "max_rows": {
+              "description": "Keep the property rows with the most bytes (default: limit); rows_omitted counts the rest.",
+              "minimum": 1,
+              "type": "integer"
+            },
+            "sample_every": {
+              "description": "Read every k-th element only (default 1).",
+              "minimum": 1,
+              "type": "integer"
+            },
+            "scope": {
+              "description": "all (default): every element the graph shows; delta: only a layered graph's own elements, its base as shared_bytes (the whole graph for a plain one).",
+              "enum": [
+                "all",
+                "delta"
+              ],
+              "type": "string"
+            }
+          },
+          "type": "object"
+        },
+        "name": "memory_report",
+        "title": "Memory report"
+      },
+      {
+        "annotations": {
+          "destructiveHint": false,
+          "idempotentHint": true,
+          "openWorldHint": false,
+          "readOnlyHint": true,
+          "title": "Graph info"
+        },
+        "description": "What the server serves: the graph's name, counts, schema mode, source, a read-only view the user opened, and answerLimitChars.",
+        "inputSchema": {
+          "properties": {},
+          "type": "object"
+        },
+        "name": "graph_info",
+        "title": "Graph info"
+      }
+    ]
+  },
+  "writable": {
+    "instructions": "Graphersal dev server: an in-memory property graph (Gremlin/TinkerPop model: vertices and edges with labels and properties) that a user works with LIVE in a browser playground at the same time; the browser reloads when you change the graph. Prefer GQL, the ISO graph query language (it also accepts the Cypher spellings, such as CREATE and UNWIND), for reading and writing data: the `gql` tool takes the query text as it is (MATCH ... WHERE ... RETURN, rows as JSON objects, INSERT / CREATE, SET, REMOVE, DELETE and MERGE writes; experimental, see its description). Use `query` for what GQL does not cover: Gremlin (Apache TinkerPop) in Rhai syntax, and scripts with several statements (see its description). Use `get_schema`/`statistics`/`graph_info` to learn the data first, and the schema tools to read or evolve the schema. Before writing a new query, check `list_saved_queries`: saved queries are named, parameterized queries the user stored in the graph, each written in GQL (`language: \"gql\"`) or in Gremlin (Rhai); run one with `run_saved_query` {name, params} instead of writing it again (a GQL query calls one written in GQL as `CALL folder.name(args) YIELD col`). Saved queries marked `writes: true` change data (their `effects` say what); run them only when the user asked for that change. Large text that queries rarely read (CVs, descriptions) can be kept compressed in memory with a compression rule: `list_compressions`, `estimate_compression` (measures the candidate rules on the current data first, changes nothing), `define_compression`, `drop_compression`, `recompress` (reads stay plain); `memory_report` shows where the memory goes per label and property, `workload_statistics` which queries ran and how the properties were used. A query that filters a label on a property (`g.v().has_label(\"person\").has(\"age\", P.gt(30))`) and is slow on a large graph can be served by a property index: `list_indexes`, `create_index` {label, key, element?, type?, transform?}, `drop_index`; results never change, `.profile()` names the index it reads. For a case-insensitive search create it with transform \"to_lower\" and query `has(\"name\", __.to_lower().is(\"alice\"))` (the constant compared as given, so write it in lower case). Resources: graphersal://dsl-reference (every step and function), graphersal://examples (runnable examples), graphersal://saved-queries, graphersal://schema, graphersal://statistics. To create test data, use `Fake(seed)` inside a query (reproducible English names, e-mails, addresses, companies and random numbers; section \"Test data generator\" of graphersal://dsl-reference, group \"Generated test data (Fake)\" of graphersal://examples). Every query is one transaction: a failing query changes nothing. Errors carry a `Help:` line that names the fix. Answers are compact JSON. `query`, `gql` and `run_saved_query` page their results: at most `max_rows` results (default 100) after the first `offset` ones (default 0), `max_items` items of every nested list (default 100), and only whole results within the server's answer limit (`graph_info`: `answerLimitChars`); a trailing note says what was shown and names the next page's `offset`. Bound large answers in the query itself (LIMIT, `values(..)`) or page them. Persistence (checkpoints, history, views of past states) is the user's, in the browser: when the user opens a read-only view of a past state, `graph_info` says so and writes are refused until they go back to the live graph.",
+    "tools": [
+      {
+        "annotations": {
+          "destructiveHint": true,
+          "idempotentHint": false,
+          "openWorldHint": false,
+          "readOnlyHint": false,
+          "title": "Run a query"
+        },
+        "description": "Run a Graphersal script: Gremlin in Rhai syntax (double-quoted strings, `__.` for child traversals, tokens such as P.gt(30), Order.desc, T.label); statements end with `;`, the last value is the result, and a traversal before it runs only with a terminal (.to_list(), .next(), .iterate()). Compact JSON, paged (offset, max_rows, max_items). Prefer the gql tool for plain reads and writes; in a script GQL is g.gql(\"MATCH ...\", #{name: value}) and a saved query g.query(\"name\", #{..}). Writes, only when the user asked; the whole script is one transaction (a failure changes nothing): g.add_v(\"person\").property(\"name\", \"ada\"), g.v(\"id1\").add_e(\"knows\").to(\"id2\") (vertex ids), .property(k, v) sets, .properties(k).drop() removes a property, .drop() removes elements (vertices with their edges). Every step: resource graphersal://dsl-reference. Example: g.v().has_label(\"person\").values(\"name\")",
+        "inputSchema": {
+          "properties": {
+            "max_items": {
+              "description": "Most items shown of every nested list or map (default 100); a cut list ends with \"… N more\".",
+              "minimum": 1,
+              "type": "integer"
+            },
+            "max_rows": {
+              "description": "Most top-level results returned per page (default 100).",
+              "minimum": 1,
+              "type": "integer"
+            },
+            "offset": {
+              "description": "Paging: skip the first offset top-level results (default 0); a cut answer's note names the next page's offset.",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "profile": {
+              "description": "Also return the per-step metrics of the optimized plan (default false).",
+              "type": "boolean"
+            },
+            "script": {
+              "description": "The Graphersal script (Gremlin in Rhai syntax).",
+              "type": "string"
+            }
+          },
+          "required": [
+            "script"
+          ],
+          "type": "object"
+        },
+        "name": "query",
+        "title": "Run a query"
+      },
+      {
+        "annotations": {
+          "destructiveHint": true,
+          "idempotentHint": false,
+          "openWorldHint": false,
+          "readOnlyHint": false,
+          "title": "Run a GQL query"
+        },
+        "description": "Run a GQL query (ISO graph query language; Cypher spellings accepted): the text as it is, strings in single quotes, $name values from params; one JSON object per row (elements as {id, label, properties}), paged (offset, max_rows). Ids: element_id(n) = 'x', not id(n); labels(n), type(r). Anchor a variable-length pattern -[:T*1..3]-> on a node found by a property (an unanchored one can exceed the memory limit). Writes, only when the user asked; each call is one transaction (a failure changes nothing; the answer names the net changes): INSERT (Cypher CREATE) (n:L {k: v}), an edge (one label) between matched nodes MATCH (a:L {k: 1}), (b:L {k: 2}) INSERT (a)-[:T {k: v}]->(b), once per row (FOR x IN $list INSERT .. for many); SET n.k = v, n += {..} (merge), n = {..} (replace all), n:L (add a label); REMOVE n.k, n:L; MERGE (n:L {k: v}) [ON CREATE SET ..] [ON MATCH SET ..] finds or creates (idempotent; MERGE (a)-[:T]->(b) for an edge between matched nodes); DETACH DELETE n removes a node with its edges (DELETE fails on a node that has edges; DELETE r removes an edge); do not return a deleted element. Every clause and function: resource graphersal://gql-reference. Example: MATCH (p:person)-[:knows]->(f) WHERE f.age > $min RETURN p.name AS who, f.name AS friend ORDER BY who, params {\"min\": 30}",
+        "inputSchema": {
+          "properties": {
+            "max_items": {
+              "description": "Most items shown of every nested list or map (default 100); a cut list ends with \"… N more\".",
+              "minimum": 1,
+              "type": "integer"
+            },
+            "max_rows": {
+              "description": "Most rows returned per page (default 100).",
+              "minimum": 1,
+              "type": "integer"
+            },
+            "offset": {
+              "description": "Paging: skip the first offset rows (default 0); a cut answer's note names the next page's offset.",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "params": {
+              "description": "Parameter name -> value; $name in the query reads the entry name.",
+              "type": "object"
+            },
+            "profile": {
+              "description": "Also return the per-step metrics of the Gremlin plan the query runs as (default false).",
+              "type": "boolean"
+            },
+            "query": {
+              "description": "The GQL query (MATCH ... RETURN ..., or a write such as INSERT ..., SET ... or MERGE ...), as plain text.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "query"
+          ],
+          "type": "object"
+        },
+        "name": "gql",
+        "title": "Run a GQL query"
+      },
+      {
+        "annotations": {
+          "destructiveHint": false,
+          "idempotentHint": true,
+          "openWorldHint": false,
+          "readOnlyHint": true,
+          "title": "Saved queries"
+        },
+        "description": "The saved queries stored in the graph (name, folder, description, parameters, language gql or rhai, writes and effects). Check them before writing a new query.",
+        "inputSchema": {
+          "properties": {
+            "folder": {
+              "description": "Only the queries in this folder and below it (e.g. \"reports\" lists reports and reports/sales).",
+              "type": "string"
+            },
+            "search": {
+              "description": "Only the queries whose name or description contains this text (case-insensitive).",
+              "type": "string"
+            }
+          },
+          "type": "object"
+        },
+        "name": "list_saved_queries",
+        "title": "Saved queries"
+      },
+      {
+        "annotations": {
+          "destructiveHint": true,
+          "idempotentHint": false,
+          "openWorldHint": false,
+          "readOnlyHint": false,
+          "title": "Run a saved query"
+        },
+        "description": "Run a saved query by name with named parameters (checked against their schemas; defaults fill the rest), paged like the gql tool. Run one with writes: true only when the user asked for that change. Example: {\"name\": \"older\", \"params\": {\"min\": 30}}",
+        "inputSchema": {
+          "properties": {
+            "max_items": {
+              "description": "Most items shown of every nested list or map (default 100); a cut list ends with \"… N more\".",
+              "minimum": 1,
+              "type": "integer"
+            },
+            "max_rows": {
+              "description": "Most top-level results returned per page (default 100).",
+              "minimum": 1,
+              "type": "integer"
+            },
+            "name": {
+              "description": "The saved query's name (list_saved_queries).",
+              "type": "string"
+            },
+            "offset": {
+              "description": "Paging: skip the first offset top-level results (default 0); a cut answer's note names the next page's offset.",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "params": {
+              "description": "Parameter name -> value; omit a parameter to use its default.",
+              "type": "object"
+            }
+          },
+          "required": [
+            "name"
+          ],
+          "type": "object"
+        },
+        "name": "run_saved_query",
+        "title": "Run a saved query"
+      },
+      {
+        "annotations": {
+          "destructiveHint": false,
+          "idempotentHint": true,
+          "openWorldHint": false,
+          "readOnlyHint": true,
+          "title": "Compression rules"
+        },
+        "description": "The compression rules of the graph (element, label, path, codec lz4 or dedup, served, stats).",
+        "inputSchema": {
+          "properties": {},
+          "type": "object"
+        },
+        "name": "list_compressions",
+        "title": "Compression rules"
+      },
+      {
+        "annotations": {
+          "destructiveHint": false,
+          "idempotentHint": true,
+          "openWorldHint": false,
+          "readOnlyHint": true,
+          "title": "Estimate a compression rule"
+        },
+        "description": "Measure candidate compression rules for one label and property path on the current data, changing nothing (sizes, ratio, read speed, the best candidate). Use it before the define_compression tool.",
+        "inputSchema": {
+          "properties": {
+            "codec": {
+              "description": "Measure only this codec, or these codecs (default: lz4 only). dedup stores each distinct value once: values repeated across many elements (any type on a top-level property).",
+              "oneOf": [
+                {
+                  "enum": [
+                    "lz4",
+                    "dedup"
+                  ],
+                  "type": "string"
+                },
+                {
+                  "items": {
+                    "enum": [
+                      "lz4",
+                      "dedup"
+                    ],
+                    "type": "string"
+                  },
+                  "type": "array"
+                }
+              ]
+            },
+            "dictionary": {
+              "description": "Measure only with (true) or without (false) a dictionary (default: both).",
+              "type": "boolean"
+            },
+            "element": {
+              "description": "Default vertex.",
+              "enum": [
+                "vertex",
+                "edge"
+              ],
+              "type": "string"
+            },
+            "label": {
+              "description": "The vertex or edge label.",
+              "type": "string"
+            },
+            "minBytes": {
+              "description": "Measure only this threshold (default: several; 0 only for dedup).",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "path": {
+              "description": "The property path: a name or a jpath of names (details.career.cv).",
+              "type": "string"
+            }
+          },
+          "required": [
+            "label",
+            "path"
+          ],
+          "type": "object"
+        },
+        "name": "estimate_compression",
+        "title": "Estimate a compression rule"
+      },
+      {
+        "annotations": {
+          "destructiveHint": false,
+          "idempotentHint": false,
+          "openWorldHint": false,
+          "readOnlyHint": false,
+          "title": "Define a compression rule"
+        },
+        "description": "Store or replace a compression rule: strings of one label at one property path kept LZ4-compressed (large, rarely read text) or stored once per distinct value (codec dedup); existing values are re-encoded at once.",
+        "inputSchema": {
+          "properties": {
+            "codec": {
+              "description": "lz4 (default) compresses each value; dedup stores each distinct value once.",
+              "enum": [
+                "lz4",
+                "dedup"
+              ],
+              "type": "string"
+            },
+            "dictionary": {
+              "description": "lz4 only: build a dictionary from the rule's values (default true; a dedup rule has none).",
+              "type": "boolean"
+            },
+            "element": {
+              "description": "Default vertex.",
+              "enum": [
+                "vertex",
+                "edge"
+              ],
+              "type": "string"
+            },
+            "label": {
+              "description": "The vertex or edge label.",
+              "type": "string"
+            },
+            "minBytes": {
+              "description": "Shorter strings stay plain (lz4: 1 or more, default 256; dedup: default 0, every string; dedup on a top-level key also stores every number, boolean, date, array or object value once).",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "name": {
+              "description": "The rule's name (an identifier, e.g. customer_cv).",
+              "type": "string"
+            },
+            "path": {
+              "description": "The property path: a name or a jpath of names (details.career.cv).",
+              "type": "string"
+            },
+            "replaces": {
+              "description": "Rename: the rule this one replaces (dropped in the same commit).",
+              "type": "string"
+            }
+          },
+          "required": [
+            "name",
+            "label",
+            "path"
+          ],
+          "type": "object"
+        },
+        "name": "define_compression",
+        "title": "Define a compression rule"
+      },
+      {
+        "annotations": {
+          "destructiveHint": true,
+          "idempotentHint": false,
+          "openWorldHint": false,
+          "readOnlyHint": false,
+          "title": "Drop a compression rule"
+        },
+        "description": "Remove a compression rule; its values are decompressed (no data changes).",
+        "inputSchema": {
+          "properties": {
+            "name": {
+              "description": "The rule's name (list_compressions).",
+              "type": "string"
+            }
+          },
+          "required": [
+            "name"
+          ],
+          "type": "object"
+        },
+        "name": "drop_compression",
+        "title": "Drop a compression rule"
+      },
+      {
+        "annotations": {
+          "destructiveHint": false,
+          "idempotentHint": false,
+          "openWorldHint": false,
+          "readOnlyHint": false,
+          "title": "Recompress a rule"
+        },
+        "description": "Rebuild a compression rule's dictionary from the current values; no data changes.",
+        "inputSchema": {
+          "properties": {
+            "name": {
+              "description": "The rule's name (list_compressions).",
+              "type": "string"
+            }
+          },
+          "required": [
+            "name"
+          ],
+          "type": "object"
+        },
+        "name": "recompress",
+        "title": "Recompress a rule"
+      },
+      {
+        "annotations": {
+          "destructiveHint": false,
+          "idempotentHint": true,
+          "openWorldHint": false,
+          "readOnlyHint": true,
+          "title": "Property indexes"
+        },
+        "description": "The property indexes of the graph (element, label, key, type, transform, served, stats).",
+        "inputSchema": {
+          "properties": {},
+          "type": "object"
+        },
+        "name": "list_indexes",
+        "title": "Property indexes"
+      },
+      {
+        "annotations": {
+          "destructiveHint": false,
+          "idempotentHint": false,
+          "openWorldHint": false,
+          "readOnlyHint": false,
+          "title": "Create a property index"
+        },
+        "description": "Create a property index on one label's top-level property, so has_label(label) with has(key, ..) (equality, P.within, ranges) reads only the matching elements; results never change. Example: {\"label\": \"person\", \"key\": \"name\"}",
+        "inputSchema": {
+          "properties": {
+            "element": {
+              "description": "Default vertex.",
+              "enum": [
+                "vertex",
+                "edge"
+              ],
+              "type": "string"
+            },
+            "key": {
+              "description": "The top-level property name (not a jpath).",
+              "type": "string"
+            },
+            "label": {
+              "description": "The vertex or edge label; omit for every label.",
+              "type": "string"
+            },
+            "name": {
+              "description": "The index's name (an identifier); default <label>_<key> (<key> label-less).",
+              "type": "string"
+            },
+            "transform": {
+              "description": "Optional: to_lower for has(key, __.to_lower().is(..)); each (list elements) for has(key, __.unfold().is(..)); [\"each\", \"to_lower\"] for has(key, __.unfold().to_lower().is(..)). Default: none.",
+              "enum": [
+                "to_lower",
+                "each",
+                [
+                  "each",
+                  "to_lower"
+                ]
+              ]
+            },
+            "type": {
+              "description": "The index type; default memory-ordered (an ordered index kept in memory, rebuilt from the data on open; serves =, P.within and ranges).",
+              "enum": [
+                "memory-ordered"
+              ],
+              "type": "string"
+            },
+            "unique": {
+              "description": "true: no value twice (null exempt).",
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "key"
+          ],
+          "type": "object"
+        },
+        "name": "create_index",
+        "title": "Create a property index"
+      },
+      {
+        "annotations": {
+          "destructiveHint": true,
+          "idempotentHint": false,
+          "openWorldHint": false,
+          "readOnlyHint": false,
+          "title": "Drop a property index"
+        },
+        "description": "Remove a property index (no data changes; queries scan again).",
+        "inputSchema": {
+          "properties": {
+            "name": {
+              "description": "The index's name (list_indexes).",
+              "type": "string"
+            }
+          },
+          "required": [
+            "name"
+          ],
+          "type": "object"
+        },
+        "name": "drop_index",
+        "title": "Drop a property index"
+      },
+      {
+        "annotations": {
+          "destructiveHint": false,
+          "idempotentHint": true,
+          "openWorldHint": false,
+          "readOnlyHint": true,
+          "title": "Graph schema"
+        },
+        "description": "A map of the graph (labels, counts, keys, types, edge from->to pairs, indexes); labels: details. format \"json\": the stored schema.",
+        "inputSchema": {
+          "properties": {
+            "descriptions": {
+              "type": "boolean"
+            },
+            "format": {
+              "enum": [
+                "summary",
+                "json"
+              ]
+            },
+            "labels": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            }
+          },
+          "type": "object"
+        },
+        "name": "get_schema",
+        "title": "Graph schema"
+      },
+      {
+        "annotations": {
+          "destructiveHint": false,
+          "idempotentHint": true,
+          "openWorldHint": false,
+          "readOnlyHint": true,
+          "title": "Inferred schema"
+        },
+        "description": "get_schema's map; format \"json\": the schema the data satisfies.",
+        "inputSchema": {
+          "properties": {
+            "descriptions": {
+              "type": "boolean"
+            },
+            "format": {
+              "enum": [
+                "summary",
+                "json"
+              ]
+            },
+            "labels": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            }
+          },
+          "type": "object"
+        },
+        "name": "infer_schema",
+        "title": "Inferred schema"
+      },
+      {
+        "annotations": {
+          "destructiveHint": false,
+          "idempotentHint": true,
+          "openWorldHint": false,
+          "readOnlyHint": true,
+          "title": "Check a schema"
+        },
+        "description": "Check a proposed schema against the data without applying it: violations, the diff from the stored schema, backward compatibility.",
+        "inputSchema": {
+          "properties": {
+            "mode": {
+              "description": "Replaces the schema's own mode: none (stored, not enforced), open (declared fields enforced), closed (also rejects undeclared labels and properties).",
+              "enum": [
+                "none",
+                "open",
+                "closed"
+              ],
+              "type": "string"
+            },
+            "schema": {
+              "description": "The proposed schema, in Graphersal's schema format: {\"mode\": \"open\", \"vertices\": {\"person\": {\"schema\": {\"type\": \"object\", \"properties\": {\"name\": {\"type\": \"string\"}, \"age\": {\"type\": \"integer\"}}, \"required\": [\"name\"]}}}, \"edges\": {\"knows\": {\"connections\": [{\"from\": \"person\", \"to\": \"person\"}], \"schema\": {\"type\": \"object\", \"properties\": {\"weight\": {\"type\": \"number\"}}}}}} (each label's properties are a JSON Schema object under \"schema\"; mode none/open/closed). infer_schema shows the full shape for the current data. A JSON string is accepted too.",
+              "type": "object"
+            }
+          },
+          "required": [
+            "schema"
+          ],
+          "type": "object"
+        },
+        "name": "validate_schema",
+        "title": "Check a schema"
+      },
+      {
+        "annotations": {
+          "destructiveHint": false,
+          "idempotentHint": true,
+          "openWorldHint": false,
+          "readOnlyHint": true,
+          "title": "Check a schema patch"
+        },
+        "description": "validate_schema of the stored schema with a JSON Merge Patch applied; applies nothing.",
+        "inputSchema": {
+          "properties": {
+            "patch": {
+              "description": "A JSON Merge Patch of the stored schema (a JSON string is accepted too).",
+              "type": "object"
+            }
+          },
+          "required": [
+            "patch"
+          ],
+          "type": "object"
+        },
+        "name": "validate_schema_patch",
+        "title": "Check a schema patch"
+      },
+      {
+        "annotations": {
+          "destructiveHint": false,
+          "idempotentHint": true,
+          "openWorldHint": false,
+          "readOnlyHint": true,
+          "title": "Diff a schema"
+        },
+        "description": "The changes from the stored schema to a proposed one, each marked backward compatible or not.",
+        "inputSchema": {
+          "properties": {
+            "schema": {
+              "description": "The proposed schema, in Graphersal's schema format: {\"mode\": \"open\", \"vertices\": {\"person\": {\"schema\": {\"type\": \"object\", \"properties\": {\"name\": {\"type\": \"string\"}, \"age\": {\"type\": \"integer\"}}, \"required\": [\"name\"]}}}, \"edges\": {\"knows\": {\"connections\": [{\"from\": \"person\", \"to\": \"person\"}], \"schema\": {\"type\": \"object\", \"properties\": {\"weight\": {\"type\": \"number\"}}}}}} (each label's properties are a JSON Schema object under \"schema\"; mode none/open/closed). infer_schema shows the full shape for the current data. A JSON string is accepted too.",
+              "type": "object"
+            }
+          },
+          "required": [
+            "schema"
+          ],
+          "type": "object"
+        },
+        "name": "diff_schema",
+        "title": "Diff a schema"
+      },
+      {
+        "annotations": {
+          "destructiveHint": true,
+          "idempotentHint": false,
+          "openWorldHint": false,
+          "readOnlyHint": false,
+          "title": "Replace the schema"
+        },
+        "description": "Store a schema, replacing the stored one; in mode open/closed the data is validated first and nothing changes on a violation. Check it with the validate_schema tool first. The whole database is LOCKED while a new vector rule fills (confirm_lock).",
+        "inputSchema": {
+          "properties": {
+            "confirm_lock": {
+              "description": "Confirms a vector fill above the threshold (an estimate of 1 s or more, or 10,000 elements without an estimate): the whole database is locked while it runs. Default false: such a change is refused with the warning text and nothing is applied.",
+              "type": "boolean"
+            },
+            "mode": {
+              "description": "Replaces the schema's own mode: none (stored, not enforced), open (declared fields enforced), closed (also rejects undeclared labels and properties).",
+              "enum": [
+                "none",
+                "open",
+                "closed"
+              ],
+              "type": "string"
+            },
+            "schema": {
+              "description": "The new schema, in Graphersal's schema format: {\"mode\": \"open\", \"vertices\": {\"person\": {\"schema\": {\"type\": \"object\", \"properties\": {\"name\": {\"type\": \"string\"}, \"age\": {\"type\": \"integer\"}}, \"required\": [\"name\"]}}}, \"edges\": {\"knows\": {\"connections\": [{\"from\": \"person\", \"to\": \"person\"}], \"schema\": {\"type\": \"object\", \"properties\": {\"weight\": {\"type\": \"number\"}}}}}} (each label's properties are a JSON Schema object under \"schema\"; mode none/open/closed). infer_schema shows the full shape for the current data. A JSON string is accepted too.",
+              "type": "object"
+            }
+          },
+          "required": [
+            "schema"
+          ],
+          "type": "object"
+        },
+        "name": "set_schema",
+        "title": "Replace the schema"
+      },
+      {
+        "annotations": {
+          "destructiveHint": false,
+          "idempotentHint": false,
+          "openWorldHint": false,
+          "readOnlyHint": false,
+          "title": "Patch the schema"
+        },
+        "description": "Apply a JSON Merge Patch to the stored schema, validated like set_schema (the database is LOCKED while a vector rule fills). Example: {\"vertices\": {\"person\": {\"schema\": {\"properties\": {\"email\": {\"type\": \"string\"}}}}}}",
+        "inputSchema": {
+          "properties": {
+            "confirm_lock": {
+              "description": "Confirms a vector fill above the threshold (an estimate of 1 s or more, or 10,000 elements without an estimate): the whole database is locked while it runs. Default false: such a change is refused with the warning text and nothing is applied.",
+              "type": "boolean"
+            },
+            "patch": {
+              "description": "A JSON Merge Patch of the stored schema (a JSON string is accepted too).",
+              "type": "object"
+            }
+          },
+          "required": [
+            "patch"
+          ],
+          "type": "object"
+        },
+        "name": "patch_schema",
+        "title": "Patch the schema"
+      },
+      {
+        "annotations": {
+          "destructiveHint": false,
+          "idempotentHint": true,
+          "openWorldHint": false,
+          "readOnlyHint": true,
+          "title": "Statistics"
+        },
+        "description": "Counts of the graph per label, its memory footprint, the query limits and the memory of the process.",
+        "inputSchema": {
+          "properties": {},
+          "type": "object"
+        },
+        "name": "statistics",
+        "title": "Statistics"
+      },
+      {
+        "annotations": {
+          "destructiveHint": false,
+          "idempotentHint": true,
+          "openWorldHint": false,
+          "readOnlyHint": true,
+          "title": "Workload statistics"
+        },
+        "description": "Which queries ran and how the properties were used, per channel and time window (a graph in a store only).",
+        "inputSchema": {
+          "properties": {
+            "history": {
+              "description": "Add every row's buckets of this tier: the last 60 minutes, 48 hours or 90 days.",
+              "enum": [
+                "minutes",
+                "hours",
+                "days"
+              ],
+              "type": "string"
+            },
+            "max_rows": {
+              "description": "Keep this many rows per list (default 50); <list>_omitted counts the rest.",
+              "minimum": 1,
+              "type": "integer"
+            }
+          },
+          "type": "object"
+        },
+        "name": "workload_statistics",
+        "title": "Workload statistics"
+      },
+      {
+        "annotations": {
+          "destructiveHint": false,
+          "idempotentHint": true,
+          "openWorldHint": false,
+          "readOnlyHint": true,
+          "title": "System journal"
+        },
+        "description": "One page of the system journal: operational events (store opened, checkpoints, backups, damage, denials), oldest first unless newest_first.",
+        "inputSchema": {
+          "properties": {
+            "after": {
+              "description": "Only records after this seq (the previous page's next_after).",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "before": {
+              "description": "Only records before this seq (with newest_first: the previous page's next_before).",
+              "minimum": 1,
+              "type": "integer"
+            },
+            "kind": {
+              "description": "Only records of this kind (store.backup_done, auth.denied, ...).",
+              "type": "string"
+            },
+            "level": {
+              "description": "Only this level and the more severe ones.",
+              "enum": [
+                "error",
+                "warn",
+                "notice",
+                "info"
+              ],
+              "type": "string"
+            },
+            "limit": {
+              "description": "At most this many records (default 100).",
+              "minimum": 1,
+              "type": "integer"
+            },
+            "newest_first": {
+              "description": "The newest matching records, newest first (the answer then has next_before).",
+              "type": "boolean"
+            },
+            "since": {
+              "description": "Only records at or after this time: RFC 3339 with a zone, or microseconds since the Unix epoch.",
+              "type": "string"
+            },
+            "source": {
+              "description": "Only this source and the ones below it (store matches store.backup).",
+              "type": "string"
+            }
+          },
+          "type": "object"
+        },
+        "name": "journal",
+        "title": "System journal"
+      },
+      {
+        "annotations": {
+          "destructiveHint": false,
+          "idempotentHint": true,
+          "openWorldHint": false,
+          "readOnlyHint": true,
+          "title": "Storage advice"
+        },
+        "description": "The storage advisor's recommendations (indexes, compression), each with its evidence, impact and the command applying it; changes nothing.",
+        "inputSchema": {
+          "properties": {
+            "everything": {
+              "description": "Report every candidate, ignoring the default thresholds (for small graphs).",
+              "type": "boolean"
+            }
+          },
+          "type": "object"
+        },
+        "name": "advise",
+        "title": "Storage advice"
+      },
+      {
+        "annotations": {
+          "destructiveHint": false,
+          "idempotentHint": false,
+          "openWorldHint": false,
+          "readOnlyHint": false,
+          "title": "Apply recommendations"
+        },
+        "description": "Apply the advisor's recommendations named by ids in one commit; only the ones the user picked.",
+        "inputSchema": {
+          "properties": {
+            "everything": {
+              "description": "The same value advise was called with (the advice is recomputed with it).",
+              "type": "boolean"
+            },
+            "ids": {
+              "description": "The recommendation ids from advise (recommendations[].id or groups[].ids).",
+              "items": {
+                "type": "string"
+              },
+              "minItems": 1,
+              "type": "array"
+            }
+          },
+          "required": [
+            "ids"
+          ],
+          "type": "object"
+        },
+        "name": "apply_recommendations",
+        "title": "Apply recommendations"
+      },
+      {
+        "annotations": {
+          "destructiveHint": false,
+          "idempotentHint": true,
+          "openWorldHint": false,
+          "readOnlyHint": true,
+          "title": "List scheduled jobs"
+        },
+        "description": "The scheduled jobs of the graph's store, their schedules and last runs (the user defines them).",
+        "inputSchema": {
+          "properties": {},
+          "type": "object"
+        },
+        "name": "list_jobs",
+        "title": "List scheduled jobs"
+      },
+      {
+        "annotations": {
+          "destructiveHint": false,
+          "idempotentHint": true,
+          "openWorldHint": false,
+          "readOnlyHint": true,
+          "title": "Memory report"
+        },
+        "description": "Where the memory goes per label and property (bytes, types, compression, indexes) and per process component; changes nothing.",
+        "inputSchema": {
+          "properties": {
+            "limit": {
+              "description": "Keep the property rows and the label rows with the most bytes (default 50 each).",
+              "minimum": 1,
+              "type": "integer"
+            },
+            "max_elements": {
+              "description": "Sample so that about this many elements are read, at least one per label (default: all).",
+              "minimum": 1,
+              "type": "integer"
+            },
+            "max_labels": {
+              "description": "Keep the label rows with the most bytes (default: limit); labels_omitted counts the rest.",
+              "minimum": 1,
+              "type": "integer"
+            },
+            "max_rows": {
+              "description": "Keep the property rows with the most bytes (default: limit); rows_omitted counts the rest.",
+              "minimum": 1,
+              "type": "integer"
+            },
+            "sample_every": {
+              "description": "Read every k-th element only (default 1).",
+              "minimum": 1,
+              "type": "integer"
+            },
+            "scope": {
+              "description": "all (default): every element the graph shows; delta: only a layered graph's own elements, its base as shared_bytes (the whole graph for a plain one).",
+              "enum": [
+                "all",
+                "delta"
+              ],
+              "type": "string"
+            }
+          },
+          "type": "object"
+        },
+        "name": "memory_report",
+        "title": "Memory report"
+      },
+      {
+        "annotations": {
+          "destructiveHint": false,
+          "idempotentHint": true,
+          "openWorldHint": false,
+          "readOnlyHint": true,
+          "title": "Graph info"
+        },
+        "description": "What the server serves: the graph's name, counts, schema mode, source, a read-only view the user opened, and answerLimitChars.",
+        "inputSchema": {
+          "properties": {},
+          "type": "object"
+        },
+        "name": "graph_info",
+        "title": "Graph info"
+      }
+    ]
+  }
+}

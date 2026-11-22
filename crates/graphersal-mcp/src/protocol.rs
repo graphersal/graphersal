@@ -12,6 +12,7 @@ use serde_json::{Value, json};
 use crate::catalog::is_built_in;
 use crate::config::{Instructions, McpConfig, SavedQueryTools};
 use crate::connection::Stream;
+use crate::directory::InFlight;
 use crate::host::{ClientRef, Ctx, Host, McpError, clear_busy, take_busy};
 use crate::profile::Profile;
 use crate::resources::{RESOURCES, read_resource};
@@ -37,9 +38,12 @@ const SERVER_TITLE: &str = "Graphersal dev server";
 /// JSON-RPC error codes.
 pub(crate) const PARSE_ERROR: i64 = -32700;
 pub(crate) const INVALID_REQUEST: i64 = -32600;
-const METHOD_NOT_FOUND: i64 = -32601;
-const INVALID_PARAMS: i64 = -32602;
+pub(crate) const METHOD_NOT_FOUND: i64 = -32601;
+pub(crate) const INVALID_PARAMS: i64 = -32602;
 pub(crate) const INTERNAL_ERROR: i64 = -32603;
+
+/// The path [`Mcp::status`] names by default.
+const DEFAULT_ENDPOINT: &str = "/mcp";
 
 /// The client name of the endpoint's session jobs (the host's change feed records it).
 pub(crate) const MCP_CLIENT: &str = "mcp";
@@ -47,23 +51,28 @@ pub(crate) const MCP_CLIENT: &str = "mcp";
 /// The MCP endpoint: its options and its MCP sessions. One per server; [`Mcp::handle`] answers
 /// every request to it.
 pub struct Mcp {
-    token: Option<String>,
+    pub(crate) token: Option<String>,
     /// The default profile: the operator's configuration (tools, descriptions, instructions,
     /// saved-query tools, resources, answer limit, with the shorthand flags folded in), the
     /// read-only flag and the access policy. A connection or a request may get another from
     /// the host ([`Connection::with_profile`](crate::Connection::with_profile),
     /// [`Mcp::handle_with_profile`]).
-    profile: Profile,
+    pub(crate) profile: Profile,
     /// The MCP sessions: a bounded table (the default) or stateless signed ids
     /// ([`Mcp::with_session_key`]).
-    sessions: Sessions,
+    pub(crate) sessions: Sessions,
     /// The usage statistics (memory only, since the endpoint was built).
-    stats: Arc<McpStats>,
+    pub(crate) stats: Arc<McpStats>,
     /// The `clientInfo` of the last `initialize` (the playground's top bar names it).
     client: Mutex<Option<Value>>,
     /// The open stream connections ([`crate::Connection`]), which hear the server's pushes.
     /// Weak: a dropped connection leaves by itself.
     streams: Mutex<Vec<Weak<Stream>>>,
+    /// The path [`Mcp::status`] names (`/mcp` unless [`Mcp::with_endpoint`]).
+    endpoint: String,
+    /// The `tools/call` requests running in directory mode, with the graph host each runs on,
+    /// so a `notifications/cancelled` reaches it ([`Mcp::handle_directory`]).
+    pub(crate) directory_calls: Mutex<Vec<InFlight>>,
 }
 
 impl Mcp {
@@ -83,7 +92,27 @@ impl Mcp {
             sessions,
             client: Mutex::new(None),
             streams: Mutex::new(Vec::new()),
+            endpoint: DEFAULT_ENDPOINT.to_string(),
+            directory_calls: Mutex::new(Vec::new()),
         }
+    }
+
+    /// Remembers at most `max` MCP sessions (at least 1; default [`crate::MAX_SESSIONS`]),
+    /// the oldest forgotten first: its client gets `404` for an unknown session, initializes
+    /// again and, in directory mode ([`Mcp::handle_directory`]), selects its graph again. A
+    /// host serving many agents through one directory endpoint raises it. No effect with
+    /// signed session ids ([`Mcp::with_session_key`]), which keep no table.
+    pub fn with_max_sessions(mut self, max: usize) -> Self {
+        self.sessions = self.sessions.with_max(max);
+        self
+    }
+
+    /// The path the host serves the endpoint at, which [`Mcp::status`] names as `endpoint`
+    /// (default `/mcp`; e.g. a host's directory endpoint at `/agents/mcp`). The endpoint itself
+    /// answers whatever request the host passes it.
+    pub fn with_endpoint(mut self, path: &str) -> Self {
+        self.endpoint = path.to_string();
+        self
     }
 
     /// Makes the MCP session ids stateless: `initialize` answers an id signed with `key`
@@ -198,7 +227,7 @@ impl Mcp {
 
     /// The caller of the endpoint's tools for `client` (the request's MCP session as its key)
     /// under `profile`.
-    fn caller_for(&self, client: ClientRef, profile: &Profile) -> ToolCaller {
+    pub(crate) fn caller_for(&self, client: ClientRef, profile: &Profile) -> ToolCaller {
         ToolCaller::new(client, profile.read_only)
             .with_profile(profile)
             .with_stats(self.stats.clone())
@@ -239,7 +268,7 @@ impl Mcp {
     /// endpoint (`readOnly` of the default profile, `client` = the last `initialize`'s client).
     pub fn status(&self) -> Value {
         json!({
-            "endpoint": "/mcp",
+            "endpoint": self.endpoint,
             "readOnly": self.profile.read_only,
             "client": self.client.lock().ok().and_then(|c| c.clone()),
         })
@@ -262,57 +291,57 @@ impl Mcp {
         profile: &Profile,
         mut request: McpRequest<'_>,
     ) -> McpResponse {
-        if let Some(token) = &self.token {
-            let given = request
-                .header_value("Authorization")
-                .and_then(|v| v.trim().strip_prefix("Bearer "))
-                .map(str::trim);
-            if !given.is_some_and(|given| same_secret(given, token)) {
-                self.stats.record_refusal(Refusal::Unauthorized);
-                let answer = rpc_error(
-                    401,
-                    Value::Null,
-                    INVALID_REQUEST,
-                    "unauthorized: send the header \"Authorization: Bearer <token>\" with the \
-                     server's --mcp-token",
-                );
-                return answer.with_header("WWW-Authenticate", "Bearer");
-            }
+        if let Some(refused) = self.check_token(&request) {
+            return refused;
         }
         match request.method() {
-            "POST" => self.post(host, profile, &mut request),
-            "DELETE" => {
-                let Some(id) = request.header_value("Mcp-Session-Id") else {
-                    return rpc_error(
-                        400,
-                        Value::Null,
-                        INVALID_REQUEST,
-                        "DELETE /mcp needs the Mcp-Session-Id header",
-                    );
-                };
-                let removed = self.sessions.forget(id);
-                empty(if removed { 200 } else { 404 })
+            "POST" => {
+                let answer = self.post_message(host, profile, &mut request);
+                self.count_refusal(answer)
             }
-            // No server-initiated stream (GET) on this endpoint.
-            _ => rpc_error(
-                405,
-                Value::Null,
-                INVALID_REQUEST,
-                "the MCP endpoint takes POST (JSON-RPC); it offers no SSE stream",
-            )
-            .with_header("Allow", "POST, DELETE"),
+            "DELETE" => self.delete(&request),
+            _ => method_not_allowed(),
         }
     }
 
-    /// One `POST /mcp`: a JSON-RPC request, notification or response; a `4xx` answer before
-    /// the message is dispatched counts as a refusal (unknown session or invalid request).
-    fn post(
-        &self,
-        host: &dyn Host,
-        profile: &Profile,
-        request: &mut McpRequest<'_>,
-    ) -> McpResponse {
-        let answer = self.post_message(host, profile, request);
+    /// The `401` answer when the endpoint has a token and the request does not carry it.
+    pub(crate) fn check_token(&self, request: &McpRequest<'_>) -> Option<McpResponse> {
+        let token = self.token.as_ref()?;
+        let given = request
+            .header_value("Authorization")
+            .and_then(|v| v.trim().strip_prefix("Bearer "))
+            .map(str::trim);
+        if given.is_some_and(|given| same_secret(given, token)) {
+            return None;
+        }
+        self.stats.record_refusal(Refusal::Unauthorized);
+        let answer = rpc_error(
+            401,
+            Value::Null,
+            INVALID_REQUEST,
+            "unauthorized: send the header \"Authorization: Bearer <token>\" with the \
+             server's --mcp-token",
+        );
+        Some(answer.with_header("WWW-Authenticate", "Bearer"))
+    }
+
+    /// `DELETE /mcp`: ends the MCP session the request names.
+    pub(crate) fn delete(&self, request: &McpRequest<'_>) -> McpResponse {
+        let Some(id) = request.header_value("Mcp-Session-Id") else {
+            return rpc_error(
+                400,
+                Value::Null,
+                INVALID_REQUEST,
+                "DELETE /mcp needs the Mcp-Session-Id header",
+            );
+        };
+        let removed = self.sessions.forget(id);
+        empty(if removed { 200 } else { 404 })
+    }
+
+    /// Counts the answer of a `POST /mcp` as a refusal when it is a `4xx` before the message
+    /// was dispatched (unknown session or invalid request).
+    pub(crate) fn count_refusal(&self, answer: McpResponse) -> McpResponse {
         match answer.status() {
             404 => self.stats.record_refusal(Refusal::UnknownSession),
             400..=499 => self.stats.record_refusal(Refusal::InvalidRequest),
@@ -327,22 +356,47 @@ impl Mcp {
         profile: &Profile,
         request: &mut McpRequest<'_>,
     ) -> McpResponse {
+        let posted = match self.read_post(request) {
+            Ok(posted) => posted,
+            Err(answer) => return answer,
+        };
+        let peer = Peer {
+            host,
+            profile,
+            key: posted.session_id.as_deref(),
+            client_digest: posted
+                .session_id
+                .as_deref()
+                .and_then(|id| self.sessions.client_of(id)),
+            identity: posted.identity.as_deref(),
+            stream: None,
+        };
+        let outcome = match parse_message(&posted.body) {
+            Ok(message) => self.message(&peer, &message),
+            Err(outcome) => outcome,
+        };
+        frame(outcome)
+    }
+
+    /// The header checks of a `POST /mcp` and its body: the session id, the body text and the
+    /// host's identity, or the refusal to answer.
+    pub(crate) fn read_post(&self, request: &mut McpRequest<'_>) -> Result<Posted, McpResponse> {
         if let Some(accept) = request.header_value("Accept") {
             let accept = accept.to_ascii_lowercase();
             if !accept.contains("application/json") && !accept.contains("*/*") {
-                return rpc_error(
+                return Err(rpc_error(
                     406,
                     Value::Null,
                     INVALID_REQUEST,
                     "this endpoint answers application/json: send Accept: application/json, \
                      text/event-stream",
-                );
+                ));
             }
         }
         if let Some(version) = request.header_value("MCP-Protocol-Version")
             && !PROTOCOL_VERSIONS.contains(&version.trim())
         {
-            return rpc_error(
+            return Err(rpc_error(
                 400,
                 Value::Null,
                 INVALID_REQUEST,
@@ -351,61 +405,58 @@ impl Mcp {
                      (initialize first)",
                     PROTOCOL_VERSIONS.join(", ")
                 ),
-            );
+            ));
         }
         let session_id = request.header_value("Mcp-Session-Id").map(str::to_string);
         if let Some(id) = &session_id
             && !self.sessions.knows(id)
         {
-            return rpc_error(
+            return Err(rpc_error(
                 404,
                 Value::Null,
                 INVALID_REQUEST,
                 "unknown or expired MCP session (the server restarted?): initialize again",
-            );
+            ));
         }
         let body = match request.text_body() {
             Ok(body) => body,
             Err((status, message)) => {
-                return rpc_error(status, Value::Null, INVALID_REQUEST, &message);
+                return Err(rpc_error(status, Value::Null, INVALID_REQUEST, &message));
             }
         };
-        let identity = request.identity().map(str::to_string);
-        let peer = Peer {
-            host,
-            profile,
-            key: session_id.as_deref(),
-            client_digest: session_id
-                .as_deref()
-                .and_then(|id| self.sessions.client_of(id)),
-            identity: identity.as_deref(),
-            stream: None,
-        };
-        let outcome = match parse_message(&body) {
-            Ok(message) => self.message(&peer, &message),
-            Err(outcome) => outcome,
-        };
-        match outcome {
-            Outcome::Accepted => empty(202),
-            Outcome::Answer { body, session } => {
-                let answer = rpc_answer(200, &body);
-                match session {
-                    Some(session) => answer.with_header("Mcp-Session-Id", &session),
-                    None => answer,
-                }
-            }
-            // The host could not take a job now (queue full, waited too long, too many jobs of
-            // this client, stopping): the whole request is `503`, so the client retries it.
-            Outcome::Busy { id, message } => {
-                rpc_error(503, id, INTERNAL_ERROR, &message).with_header("Retry-After", "1")
-            }
-            Outcome::Invalid { id, code, message } => rpc_error(400, id, code, &message),
-        }
+        Ok(Posted {
+            session_id,
+            body,
+            identity: request.identity().map(str::to_string),
+        })
     }
 
     /// One parsed JSON-RPC message of `peer`, whatever carried it (an HTTP `POST` or a line of
     /// a stream connection): a request is dispatched, a notification or a response accepted.
     pub(crate) fn message(&self, peer: &Peer<'_>, message: &Value) -> Outcome {
+        self.message_with(
+            peer.key,
+            peer.client_digest,
+            peer.client(),
+            message,
+            |params| cancel_request(peer.host, peer.key, params),
+            |client, method, params| self.dispatch(peer, client, method, params),
+        )
+    }
+
+    /// One parsed JSON-RPC message of the sender `key` (MCP session id or connection key, with
+    /// its client digest) whose jobs run for `sender`: a notification is accepted
+    /// (`notifications/cancelled` goes to `cancel` with its params), a request goes to
+    /// `dispatch`, a host's busy refusal while it runs makes the outcome [`Outcome::Busy`].
+    pub(crate) fn message_with(
+        &self,
+        key: Option<&str>,
+        client_digest: Option<u64>,
+        sender: ClientRef,
+        message: &Value,
+        cancel: impl FnOnce(Option<&Value>),
+        dispatch: impl FnOnce(&ClientRef, &str, &Value) -> RpcResult,
+    ) -> Outcome {
         let Some(object) = message.as_object() else {
             return Outcome::Invalid {
                 id: Value::Null,
@@ -428,21 +479,21 @@ impl Mcp {
         };
         self.stats.record_request(
             id.is_some().then_some(method),
-            peer.key,
-            peer.client_digest,
+            key,
+            client_digest,
             method == "tools/call" && id.is_some(),
         );
         let Some(id) = id else {
             // A notification (`notifications/initialized`, `notifications/cancelled`, ...).
             if method == "notifications/cancelled" {
-                cancel_request(peer.host, peer.key, object.get("params"));
+                cancel(object.get("params"));
             }
             return Outcome::Accepted;
         };
         let params = object.get("params").cloned().unwrap_or(Value::Null);
-        let client = peer.client().with_request(&id.to_string());
+        let client = sender.with_request(&id.to_string());
         clear_busy();
-        let dispatched = self.dispatch(peer, &client, method, &params);
+        let dispatched = dispatch(&client, method, &params);
         if let Some(message) = take_busy() {
             self.stats.record_busy();
             return Outcome::Busy { id, message };
@@ -566,20 +617,7 @@ impl Mcp {
     /// that the tool list may change (`tools.listChanged`) when it can: saved queries are tools
     /// of their own, and a stream carries the notification.
     fn initialize(&self, peer: &Peer<'_>, params: &Value) -> RpcResult {
-        let requested = params
-            .get("protocolVersion")
-            .and_then(Value::as_str)
-            .unwrap_or("");
-        let version = PROTOCOL_VERSIONS
-            .iter()
-            .find(|v| **v == requested)
-            .copied()
-            .unwrap_or(PROTOCOL_VERSIONS[0]);
-        let client = params.get("clientInfo").cloned().unwrap_or(Value::Null);
-        let client = json!({
-            "name": client.get("name").and_then(Value::as_str).unwrap_or("unknown client"),
-            "version": client.get("version").and_then(Value::as_str).unwrap_or(""),
-        });
+        let (version, client) = negotiate(params);
         let session = match peer.stream {
             None => {
                 // The host's route tag pins the session to the graph it resolved (asked from
@@ -611,9 +649,7 @@ impl Mcp {
                 None
             }
         };
-        if let Ok(mut last) = self.client.lock() {
-            *last = Some(client);
-        }
+        self.remember_last_client(client);
         let instructions = match &peer.profile.config.instructions {
             // The operator's own text is answered as it is: no graph is asked.
             Instructions::Replace(_) => instructions_of(peer.profile, false),
@@ -621,21 +657,16 @@ impl Mcp {
         };
         let list_changed = peer.stream.is_some() && lists_change(peer.profile);
         Ok((
-            json!({
-                "protocolVersion": version,
-                "capabilities": {
-                    "tools": { "listChanged": list_changed },
-                    "resources": { "listChanged": false },
-                },
-                "serverInfo": {
-                    "name": peer.profile.config.server_name.as_deref().unwrap_or(SERVER_NAME),
-                    "title": peer.profile.config.server_title.as_deref().unwrap_or(SERVER_TITLE),
-                    "version": env!("CARGO_PKG_VERSION"),
-                },
-                "instructions": instructions,
-            }),
+            initialize_result(version, list_changed, peer.profile, instructions),
             session,
         ))
+    }
+
+    /// Remembers the client of the last `initialize` for [`Mcp::status`].
+    pub(crate) fn remember_last_client(&self, client: Value) {
+        if let Ok(mut last) = self.client.lock() {
+            *last = Some(client);
+        }
     }
 
     /// Registers a stream connection for the server's pushes.
@@ -712,6 +743,89 @@ impl Mcp {
     }
 }
 
+/// The client's `initialize` params: the negotiated protocol version (the client's when this
+/// server speaks it, else the newest) and the client's `{name, version}`.
+pub(crate) fn negotiate(params: &Value) -> (&'static str, Value) {
+    let requested = params
+        .get("protocolVersion")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    let version = PROTOCOL_VERSIONS
+        .iter()
+        .find(|v| **v == requested)
+        .copied()
+        .unwrap_or(PROTOCOL_VERSIONS[0]);
+    let client = params.get("clientInfo").cloned().unwrap_or(Value::Null);
+    let client = json!({
+        "name": client.get("name").and_then(Value::as_str).unwrap_or("unknown client"),
+        "version": client.get("version").and_then(Value::as_str).unwrap_or(""),
+    });
+    (version, client)
+}
+
+/// The result of `initialize` under `profile`.
+pub(crate) fn initialize_result(
+    version: &str,
+    list_changed: bool,
+    profile: &Profile,
+    instructions: String,
+) -> Value {
+    json!({
+        "protocolVersion": version,
+        "capabilities": {
+            "tools": { "listChanged": list_changed },
+            "resources": { "listChanged": false },
+        },
+        "serverInfo": {
+            "name": profile.config.server_name.as_deref().unwrap_or(SERVER_NAME),
+            "title": profile.config.server_title.as_deref().unwrap_or(SERVER_TITLE),
+            "version": env!("CARGO_PKG_VERSION"),
+        },
+        "instructions": instructions,
+    })
+}
+
+/// A `POST /mcp` that passed the header checks.
+pub(crate) struct Posted {
+    /// The `Mcp-Session-Id` (a known session), if any.
+    pub(crate) session_id: Option<String>,
+    /// The body text.
+    pub(crate) body: String,
+    /// The host's identity of the request ([`McpRequest::with_identity`]).
+    pub(crate) identity: Option<String>,
+}
+
+/// The HTTP answer of a message's outcome.
+pub(crate) fn frame(outcome: Outcome) -> McpResponse {
+    match outcome {
+        Outcome::Accepted => empty(202),
+        Outcome::Answer { body, session } => {
+            let answer = rpc_answer(200, &body);
+            match session {
+                Some(session) => answer.with_header("Mcp-Session-Id", &session),
+                None => answer,
+            }
+        }
+        // The host could not take a job now (queue full, waited too long, too many jobs of
+        // this client, stopping): the whole request is `503`, so the client retries it.
+        Outcome::Busy { id, message } => {
+            rpc_error(503, id, INTERNAL_ERROR, &message).with_header("Retry-After", "1")
+        }
+        Outcome::Invalid { id, code, message } => rpc_error(400, id, code, &message),
+    }
+}
+
+/// `405`: no server-initiated stream (GET) on this endpoint.
+pub(crate) fn method_not_allowed() -> McpResponse {
+    rpc_error(
+        405,
+        Value::Null,
+        INVALID_REQUEST,
+        "the MCP endpoint takes POST (JSON-RPC); it offers no SSE stream",
+    )
+    .with_header("Allow", "POST, DELETE")
+}
+
 /// Who sent a message: the host its jobs run on, the profile the host chose for it and how the
 /// endpoint tells its clients apart.
 pub(crate) struct Peer<'a> {
@@ -745,13 +859,13 @@ impl Peer<'_> {
 
 /// Whether the tool list of `profile` can change while a client is connected: saved queries
 /// are tools of their own (the rest of the list is fixed by the configuration).
-fn lists_change(profile: &Profile) -> bool {
+pub(crate) fn lists_change(profile: &Profile) -> bool {
     profile.config.has_saved_query_tools()
 }
 
 /// The instructions `initialize` answers under `profile`, with the note on the layer steps
 /// when the graph is `layered` (never added to an operator's replacing text).
-fn instructions_of(profile: &Profile, layered: bool) -> String {
+pub(crate) fn instructions_of(profile: &Profile, layered: bool) -> String {
     let mut instructions = match &profile.config.instructions {
         Instructions::Replace(text) => return text.clone(),
         Instructions::Builtin | Instructions::Append(_) => INSTRUCTIONS.to_string(),
@@ -830,7 +944,7 @@ fn fingerprint(listed: &Value) -> u64 {
 }
 
 /// A JSON-RPC error answer with an HTTP status (`id` null when the request had none).
-fn rpc_error(status: u16, id: Value, code: i64, message: &str) -> McpResponse {
+pub(crate) fn rpc_error(status: u16, id: Value, code: i64, message: &str) -> McpResponse {
     rpc_answer(status, &error_body(id, code, message))
 }
 
@@ -869,7 +983,7 @@ pub(crate) fn same_secret(given: &str, expected: &str) -> bool {
             == 0
 }
 
-type RpcResult = Result<(Value, Option<String>), (i64, String)>;
+pub(crate) type RpcResult = Result<(Value, Option<String>), (i64, String)>;
 
 /// What an endpoint's prompt costs ([`Mcp::prompt_cost`]): characters of the instructions and
 /// of every tool's `tools/list` entry (its compact JSON). Tokens are estimated as characters / 4.
