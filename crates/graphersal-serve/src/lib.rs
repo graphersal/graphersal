@@ -92,6 +92,8 @@ mod runs;
 mod server;
 mod ui;
 
+#[cfg(all(test, feature = "mcp"))]
+mod directory_tests;
 #[cfg(test)]
 mod extension_tests;
 #[cfg(test)]

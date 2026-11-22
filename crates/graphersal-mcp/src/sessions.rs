@@ -19,9 +19,10 @@ use serde_json::Value;
 
 use crate::host::McpError;
 
-/// Most MCP sessions the table remembers; the oldest is forgotten first (its client initializes
-/// again).
-const MAX_SESSIONS: usize = 64;
+/// Most MCP sessions the table remembers by default ([`crate::Mcp::with_max_sessions`] sets
+/// another); the oldest is forgotten first (its client gets `404`, initializes again and, in
+/// directory mode, selects its graph again).
+pub const MAX_SESSIONS: usize = 64;
 
 /// Most client names (`clientInfo` of `initialize`) an endpoint remembers for its statistics;
 /// the least recently initialized one is forgotten first (with its counters).
@@ -121,13 +122,23 @@ impl std::fmt::Debug for SessionKey {
     }
 }
 
+/// One session of the table.
+pub(crate) struct TableEntry {
+    id: String,
+    client: Value,
+    /// The route of the graph `use_graph` selected (directory mode), if any.
+    selected: Option<String>,
+}
+
 /// The MCP sessions of an endpoint.
 pub(crate) enum Sessions {
-    /// Session id -> `clientInfo` of its `initialize`, in the order they were created; the
-    /// client names for the statistics.
+    /// The sessions (id, `clientInfo` of its `initialize`, the graph selected in directory
+    /// mode), in the order they were created, at most `max`; the client names for the
+    /// statistics.
     Table {
-        ids: Mutex<Vec<(String, Value)>>,
+        ids: Mutex<Vec<TableEntry>>,
         clients: Arc<RwLock<ClientNames>>,
+        max: usize,
     },
     /// Signed ids, checked without a table; the client names for the statistics.
     Signed {
@@ -142,6 +153,49 @@ impl Sessions {
         Self::Table {
             ids: Mutex::new(Vec::new()),
             clients: Arc::default(),
+            max: MAX_SESSIONS,
+        }
+    }
+
+    /// Remembers at most `max` sessions (at least 1); table only, signed ids keep no table.
+    pub(crate) fn with_max(self, max: usize) -> Self {
+        match self {
+            Self::Table { ids, clients, .. } => Self::Table {
+                ids,
+                clients,
+                max: max.max(1),
+            },
+            signed @ Self::Signed { .. } => signed,
+        }
+    }
+
+    /// Stores `route` as the graph the table session `id` selected (directory mode): whether
+    /// the session is known (signed ids keep nothing: `false`).
+    pub(crate) fn select(&self, id: &str, route: &str) -> bool {
+        match self {
+            Self::Table { ids, .. } => ids.lock().is_ok_and(|mut sessions| {
+                match sessions.iter_mut().find(|entry| entry.id == id) {
+                    Some(entry) => {
+                        entry.selected = Some(route.to_string());
+                        true
+                    }
+                    None => false,
+                }
+            }),
+            Self::Signed { .. } => false,
+        }
+    }
+
+    /// The route of the graph the table session `id` selected, if any.
+    pub(crate) fn selected(&self, id: &str) -> Option<String> {
+        match self {
+            Self::Table { ids, .. } => ids.lock().ok().and_then(|sessions| {
+                sessions
+                    .iter()
+                    .find(|entry| entry.id == id)
+                    .and_then(|entry| entry.selected.clone())
+            }),
+            Self::Signed { .. } => None,
         }
     }
 
@@ -165,8 +219,8 @@ impl Sessions {
         match self {
             Self::Table { ids, .. } => ids.lock().ok().and_then(|ids| {
                 ids.iter()
-                    .find(|(known, _)| known == id)
-                    .map(|(_, client)| client_digest(client))
+                    .find(|entry| entry.id == id)
+                    .map(|entry| client_digest(&entry.client))
             }),
             Self::Signed { .. } => {
                 let (_, id) = split_route(id);
@@ -193,13 +247,18 @@ impl Sessions {
     pub(crate) fn create_routed(&self, client: &Value, route: Option<&str>) -> String {
         let prefix = route.map_or(String::new(), |route| format!("{route}{ROUTE_SEPARATOR}"));
         match self {
-            Self::Table { ids, clients } => {
+            Self::Table { ids, clients, max } => {
                 let session = format!("{prefix}{:032x}", rand::random::<u128>());
                 if let Ok(mut sessions) = ids.lock() {
-                    if sessions.len() >= MAX_SESSIONS {
-                        sessions.remove(0);
+                    if sessions.len() >= *max {
+                        let excess = sessions.len() + 1 - *max;
+                        sessions.drain(..excess);
                     }
-                    sessions.push((session.clone(), client.clone()));
+                    sessions.push(TableEntry {
+                        id: session.clone(),
+                        client: client.clone(),
+                        selected: None,
+                    });
                 }
                 if let Ok(mut clients) = clients.write() {
                     clients.remember(client_digest(client), client.clone());
@@ -236,7 +295,7 @@ impl Sessions {
         match self {
             Self::Table { ids, .. } => ids
                 .lock()
-                .is_ok_and(|sessions| sessions.iter().any(|(known, _)| known == id)),
+                .is_ok_and(|sessions| sessions.iter().any(|entry| entry.id == id)),
             Self::Signed { key, .. } => verify(key, id),
         }
     }
@@ -247,7 +306,7 @@ impl Sessions {
         match self {
             Self::Table { ids, .. } => ids.lock().is_ok_and(|mut sessions| {
                 let before = sessions.len();
-                sessions.retain(|(known, _)| known != id);
+                sessions.retain(|entry| entry.id != id);
                 sessions.len() < before
             }),
             Self::Signed { key, .. } => verify(key, id),
@@ -258,17 +317,19 @@ impl Sessions {
     /// `(0, 0)` while a request holds the lock.
     pub(crate) fn memory_bytes(&self) -> (usize, u64) {
         match self {
-            Self::Table { ids, clients } => {
+            Self::Table { ids, clients, .. } => {
                 let Ok(sessions) = ids.try_lock() else {
                     return (0, 0);
                 };
                 let clients = clients.try_read().map_or(0, |clients| clients.bytes());
                 let bytes: u64 = sessions
                     .iter()
-                    .map(|(id, value)| {
-                        (std::mem::size_of::<(String, Value)>()
-                            + id.capacity()
-                            + value.to_string().len()) as u64
+                    .map(|entry| {
+                        (std::mem::size_of::<TableEntry>()
+                            + entry.id.capacity()
+                            + entry.client.to_string().len()
+                            + entry.selected.as_ref().map_or(0, String::capacity))
+                            as u64
                     })
                     .sum();
                 (sessions.len(), bytes + clients)
@@ -491,5 +552,24 @@ mod tests {
         }
         assert!(!sessions.knows(&first));
         assert!(!sessions.is_signed());
+    }
+
+    #[test]
+    fn a_table_session_keeps_its_selection_and_its_size_is_configurable() {
+        let sessions = Sessions::table().with_max(2);
+        let first = sessions.create(&json!({"name": "a"}));
+        assert_eq!(sessions.selected(&first), None);
+        assert!(sessions.select(&first, "acme@2"));
+        assert_eq!(sessions.selected(&first).as_deref(), Some("acme@2"));
+        assert!(!sessions.select("unknown", "acme@2"));
+        let second = sessions.create(&json!({"name": "b"}));
+        assert!(sessions.knows(&first) && sessions.knows(&second));
+        sessions.create(&json!({"name": "c"}));
+        // The oldest is forgotten with its selection.
+        assert!(!sessions.knows(&first) && sessions.selected(&first).is_none());
+        // Signed ids keep no selection.
+        let signed = Sessions::signed(&SessionKey::random()).with_max(2);
+        let id = signed.create(&json!({"name": "a"}));
+        assert!(!signed.select(&id, "acme") && signed.selected(&id).is_none());
     }
 }
