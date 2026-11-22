@@ -27,6 +27,7 @@
 
 import { ref, reactive, computed, watch, nextTick } from 'vue';
 import { state, elementEdited } from '../store.js';
+import { serverReadOnlyReason } from '../server-mode.js';
 import { debounce } from '../util.js';
 import {
   TYPES, CONTAINERS, nodeFromTyped, setType, addItem, addEntry, scalarError, wantsTextarea, nodeToJson,
@@ -302,7 +303,7 @@ export const ElementEditor = {
       return o ? o.note : (d.label && d.choices && d.choices.free ? 'a new label' : '');
     });
 
-    const readOnly = computed(() => (d.element && d.element.readOnly) || null);
+    const readOnly = computed(() => (d.element && (serverReadOnlyReason(state.engineInfo) || d.element.readOnly)) || null);
     const diff = computed(() => (d.form ? diffForm(d.form, d.fields) : null));
     const fieldOf = (row) => (d.fields ? d.fields.fields.get(row.key) || null : null);
     const rowSchema = (row) => { const f = fieldOf(row); return f ? f.schema : null; };

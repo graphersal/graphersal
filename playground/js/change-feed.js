@@ -97,10 +97,20 @@ export function createPoller(o) {
   };
 }
 
-/** The tooltip of the top bar's MCP badge. */
-export function mcpBadgeTitle(mcp, host) {
+/**
+ * The MCP endpoint's address: the server's `mcp.endpoint` (`/api/info`, `/api/changes`; already
+ * prefixed by the mount of a multi-database server, e.g. `/db/acme/mcp`) on this page's host.
+ */
+export function mcpEndpointUrl(mcp, host, protocol = 'http:') {
   if (!mcp) return '';
-  const where = `MCP endpoint http://${host}${mcp.endpoint || '/mcp'}`;
+  const scheme = protocol === 'https:' ? 'https:' : 'http:';
+  return `${scheme}//${host}${mcp.endpoint || '/mcp'}`;
+}
+
+/** The tooltip of the top bar's MCP badge. */
+export function mcpBadgeTitle(mcp, host, protocol = 'http:') {
+  if (!mcp) return '';
+  const where = `MCP endpoint ${mcpEndpointUrl(mcp, host, protocol)}`;
   const mode = mcp.readOnly ? ' (read-only for agents)' : '';
   const client = mcp.client
     ? `; connected: ${mcp.client.name}${mcp.client.version ? ' ' + mcp.client.version : ''}`

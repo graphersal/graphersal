@@ -7,12 +7,13 @@ import { reactive, markRaw } from 'vue';
 import { getEngine } from './engine/index.js';
 import { DEFAULT_LIMITS } from './engine/engine.js';
 import { StoppedError } from './engine/wasm-engine.js';
-import { storage, debounce } from './util.js';
+import { storage, debounce, setStorageNamespace } from './util.js';
 import { downloadBlob, savedGraphFile, schemaFile, isEmptySchema, catalogFile, isEmptyCatalog } from './export.js';
 import * as tabs from './tabs.js';
 import { createReadyGate } from './ready.js';
 import { changedData } from './statistics.js';
 import { createPoller, readChanges } from './change-feed.js';
+import { infoAfterChanges } from './server-mode.js';
 import { createBurst, burstAnnouncement } from './change-burst.js';
 import { LayoutJobs } from './graph/layout-jobs.js';
 import { ChatController } from './ai-chat.js';
@@ -85,6 +86,9 @@ export const state = reactive({
   // The header's version (js/build-info.js `versionLabel`): {text, title}, or null.
   versionLabel: null,
   engineMissing: false, // the WebAssembly build is not there: the page explains how to build it
+  // The root of a multi-database server (js/server-mode.js `isLanding`): `{info, headers}` of its
+  // `/api/info`; the page shows the landing view (components/landing-page.js), no engine. Else null.
+  landing: null,
   route: 'start',
   graph: null,
   graphVersion: 0,
@@ -229,11 +233,17 @@ export async function init() {
   }
   applyTheme();
   try {
-    const { engine, missing } = await getEngine();
+    const { engine, missing, landing } = await getEngine();
     state.engineMissing = missing;
+    if (landing) state.landing = markRaw(landing);
     if (engine) {
       state.engine = markRaw(engine);
       state.engineInfo = await engine.info();
+      if (state.engineInfo.mountPath) {
+        // Served under a mount of a multi-database server: this mount's own saved state.
+        setStorageNamespace(state.engineInfo.mountPath);
+        restoreFromStorage();
+      }
       state.storeView = state.engineInfo.view || null;
       const build = state.engineInfo.server ? null : await loadBuildInfo();
       applyProfile();
@@ -243,6 +253,19 @@ export async function init() {
     engineGate.open();
   }
   state.ready = true;
+}
+
+/**
+ * Reads the saved state again after the storage namespace changed (`setStorageNamespace`): the
+ * state above was read at module load, before the page knew its mount. The theme is shared by
+ * every mount (js/util.js `SHARED_KEYS`) and stays.
+ */
+function restoreFromStorage() {
+  state.settings = { ...DEFAULT_SETTINGS, ...storage.get('settings', {}) };
+  state.history = storage.get('history', []);
+  const restored = restoredTabs();
+  state.tabs = restored.tabs;
+  state.activeId = restored.activeId;
 }
 
 export function setTheme(theme) {
@@ -927,6 +950,12 @@ export function startChangeFeed() {
 }
 
 async function applyChanges(answer) {
+  // Read-only now (a multi-database server toggles it at run time): the write affordances follow.
+  const flipped = infoAfterChanges(state.engineInfo, answer);
+  if (flipped) {
+    state.engineInfo = flipped;
+    if (state.engine.serverInfo) state.engine.serverInfo = { ...state.engine.serverInfo, readOnly: flipped.readOnly };
+  }
   if (state.engineInfo && JSON.stringify(state.engineInfo.mcp || null) !== JSON.stringify(answer.mcp || null)) {
     state.engineInfo = { ...state.engineInfo, mcp: answer.mcp || null };
   }

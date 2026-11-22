@@ -3,13 +3,50 @@
 const PREFIX = 'graphersal.playground.';
 
 /**
+ * Keys every mount of one server shares (browser-wide preferences): the theme, which index.html
+ * applies before first paint, long before the page knows its mount.
+ */
+const SHARED_KEYS = Object.freeze(['theme']);
+
+/** The current mount's part of every key (`setStorageNamespace`); '' at the root. */
+let namespace = '';
+
+/**
+ * Namespaces the page's storage keys by the mount it is served under (`GET /api/info`
+ * `mountPath`, e.g. `/db/acme`, set by a multi-database server): every mount on one origin keeps
+ * its own tabs, history, layout and views. The key of `key` under mount `/db/acme` is
+ * `graphersal.playground.@/db/acme#<key>` (`#` never occurs in a URL path); at the root (no or
+ * an empty mount path: the dev server, the WebAssembly playground) keys stay
+ * `graphersal.playground.<key>`, so existing state is kept. `SHARED_KEYS` are never namespaced.
+ * reset/ clears the keys of every mount.
+ * @param {string|null|undefined} mountPath
+ */
+export function setStorageNamespace(mountPath) {
+  namespace = normalizeMountPath(mountPath);
+}
+
+/** `mountPath` with one leading `/` and no trailing `/`; '' for the root or anything not a text. */
+export function normalizeMountPath(mountPath) {
+  if (typeof mountPath !== 'string') return '';
+  const trimmed = mountPath.replace(/^\/+|\/+$/g, '');
+  return trimmed ? `/${trimmed}` : '';
+}
+
+/** The full localStorage key of `key` in the current namespace. */
+export function storageKey(key) {
+  if (!namespace || SHARED_KEYS.includes(key)) return PREFIX + key;
+  return `${PREFIX}@${namespace}#${key}`;
+}
+
+/**
  * localStorage access that never throws: storage can be disabled, full, or unavailable
- * (private windows, blocked site data). Values are JSON.
+ * (private windows, blocked site data). Values are JSON. Keys are namespaced by the mount
+ * (`setStorageNamespace`).
  */
 export const storage = {
   get(key, fallback) {
     try {
-      const raw = window.localStorage.getItem(PREFIX + key);
+      const raw = window.localStorage.getItem(storageKey(key));
       return raw === null ? fallback : JSON.parse(raw);
     } catch (e) {
       return fallback;
@@ -17,14 +54,14 @@ export const storage = {
   },
   set(key, value) {
     try {
-      window.localStorage.setItem(PREFIX + key, JSON.stringify(value));
+      window.localStorage.setItem(storageKey(key), JSON.stringify(value));
     } catch (e) {
       /* storage unavailable: the setting lasts for this page view only */
     }
   },
   remove(key) {
     try {
-      window.localStorage.removeItem(PREFIX + key);
+      window.localStorage.removeItem(storageKey(key));
     } catch (e) {
       /* ignore */
     }

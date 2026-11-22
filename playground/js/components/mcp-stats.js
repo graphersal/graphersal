@@ -5,6 +5,7 @@
 import { ref, computed } from 'vue';
 import { state } from '../store.js';
 import { mcpStatsModel } from '../mcp-stats.js';
+import { mcpEndpointUrl } from '../change-feed.js';
 
 export const McpStatsDialog = {
   setup(props, { expose }) {
@@ -31,7 +32,11 @@ export const McpStatsDialog = {
     const close = () => { if (dlg.value) dlg.value.close(); };
     expose({ open, close });
     const model = computed(() => mcpStatsModel(stats.value));
-    return { dlg, close, load, loading, error, model };
+    // The endpoint the server announces (`mcp.endpoint`, prefixed under a mount).
+    const endpoint = computed(() => (state.engineInfo && state.engineInfo.mcp
+      ? mcpEndpointUrl(state.engineInfo.mcp, window.location.host, window.location.protocol)
+      : ''));
+    return { dlg, close, load, loading, error, model, endpoint };
   },
   template: `
   <dialog ref="dlg" class="mcp-stats-dialog" aria-labelledby="mcp-stats-title" @click.self="close">
@@ -43,6 +48,7 @@ export const McpStatsDialog = {
     <div class="dialog-body">
       <p class="muted">How agents used this server's MCP endpoint since it started. Kept in the server's memory
       only: nothing is written, a restart starts from zero.</p>
+      <p v-if="endpoint" class="muted">Endpoint: <code class="mono">{{ endpoint }}</code></p>
       <p v-if="error" role="alert" style="color: var(--danger)">{{ error }}</p>
       <template v-if="model">
         <table class="data-table catalog-table">

@@ -40,6 +40,7 @@
 
 import { ref, watch, onMounted, onBeforeUnmount, computed, markRaw } from 'vue';
 import { state, isDark, layoutJobs, elementEdited } from '../store.js';
+import { serverReadOnlyReason } from '../server-mode.js';
 import { formatValue, debounce } from '../util.js';
 import { legendLabels, inspectorRows, neighbourhood, idsOfIndices } from '../graph-data.js';
 import { rendererFactory } from '../graph/renderer.js';
@@ -294,8 +295,9 @@ export const GraphCanvas = {
     async function askDelete() {
       const s = selected.value;
       if (!editing() || !s || s.id === undefined || isSchema()) return;
-      if (s.readOnly) {
-        editNote.value = `Read-only: ${s.readOnly}`;
+      const ro = serverReadOnlyReason(state.engineInfo) || s.readOnly;
+      if (ro) {
+        editNote.value = `Read-only: ${ro}`;
         return;
       }
       if (refuseWhileRunning()) return;
@@ -376,6 +378,8 @@ export const GraphCanvas = {
       const s = selected.value;
       if (!s || s.id === undefined) return { disabled: true, title: '' };
       if (state.running) return { disabled: true, title: 'A query is running: delete when it has finished' };
+      const serverRo = serverReadOnlyReason(state.engineInfo);
+      if (serverRo) return { disabled: true, title: `Read-only: ${serverRo}` };
       if (s.readOnly === undefined) return { disabled: true, title: 'Checking whether the graph can be written…' };
       if (s.readOnly) return { disabled: true, title: `Read-only: ${s.readOnly}` };
       return { disabled: false, title: s.kind === 'vertex' ? 'Delete this vertex and its edges (Delete key)' : 'Delete this edge (Delete key)' };
@@ -415,6 +419,8 @@ export const GraphCanvas = {
       const s = selected.value;
       if (!s || s.id === undefined) return { disabled: true, title: '' };
       if (state.running) return { disabled: true, title: 'A query is running: edit when it has finished' };
+      const serverRo = serverReadOnlyReason(state.engineInfo);
+      if (serverRo) return { disabled: true, title: `Read-only: ${serverRo}` };
       if (s.readOnly === undefined) return { disabled: true, title: 'Checking whether the graph can be written…' };
       if (s.readOnly) return { disabled: true, title: `Read-only: ${s.readOnly}` };
       return { disabled: false, title: `Edit the properties of this ${s.kind}` };
