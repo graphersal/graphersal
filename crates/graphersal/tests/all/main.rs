@@ -137,6 +137,7 @@ mod job_definition_tests;
 mod job_run_tests;
 mod journal_panic_tests;
 mod jpath_tests;
+mod layer_base_tests;
 mod layer_diff_tests;
 mod layer_steps_tests;
 mod layer_summary_tests;

@@ -43,6 +43,13 @@ pub(super) const DEFAULT_NAME: &str = "base";
 /// let identity = base.base_ref().unwrap();
 /// assert_eq!(*identity, BaseRef::of(base.graph()));
 /// ```
+///
+/// **A pool of bases.** A host serving many layers keeps one `LayerBase` per base commit and
+/// shares it among the layers over it, keyed by [`BaseRef`] (`Hash + Eq`): two loads of the
+/// same commit (two read-only opens of a Store, a `.gsnap` export of that commit) have the same
+/// identity, so the second load is dropped in favour of the pooled one. The pool's lifetime
+/// and eviction are the host's (a `HashMap<BaseRef, Weak<…>>` works as well); the example of
+/// `LayerBase::from_store_read_only` (feature `persist`) keeps such a pool.
 #[derive(Clone)]
 #[non_exhaustive]
 pub struct LayerBase {
@@ -163,6 +170,83 @@ impl LayerBase {
     pub fn from_graph(graph: Graph<TraversalGraph>) -> Result<Self, GraphError> {
         let (storage, models) = graph.into_storage_and_models()?;
         Ok(Self::of(Arc::new(storage), models))
+    }
+
+    /// The base of the store in `dir` at `target`, opened read-only
+    /// ([`Store::open_read_only`](crate::persist::Store::open_read_only): no lock, no file
+    /// changed, so a writer may keep the store open), with the embedding models of that
+    /// position, named after the store's location
+    /// ([`StoreDir::location`](crate::persist::StoreDir::location): its path, a `MemDir`'s
+    /// name). Every open of the same commit has the same [`Self::base_ref`], and so has a
+    /// `.gsnap` export of that commit's snapshot ([`Self::from_snapshot_file`]): a layer store
+    /// or layer snapshot made over one opens over the others, and a host can pool its bases by
+    /// [`BaseRef`] (book page "Layered Graphs" for developers).
+    ///
+    /// # Errors
+    ///
+    /// As [`Store::open_read_only`](crate::persist::Store::open_read_only) (a layer store is
+    /// no base: it is refused as a plain read-only open of it is).
+    ///
+    /// A pool of bases keyed by identity (see the type's docs):
+    ///
+    /// ```
+    /// use std::collections::HashMap;
+    /// use graphersal::persist::{MemDir, RecoveryTarget, Store, StoreOptions};
+    /// use graphersal::prelude::*;
+    /// use graphersal::storage::{BaseRef, LayerBase};
+    ///
+    /// let dir = MemDir::named("acme");
+    /// Store::create_with(&dir, TraversalGraph::tinkerpop_modern(), StoreOptions::new())
+    ///     .unwrap()
+    ///     .close()
+    ///     .unwrap();
+    ///
+    /// let mut pool: HashMap<BaseRef, LayerBase> = HashMap::new();
+    /// let mut base_of = |dir: &MemDir| -> LayerBase {
+    ///     let loaded = LayerBase::from_store_read_only(dir, RecoveryTarget::Latest).unwrap();
+    ///     let key = *loaded.base_ref().unwrap();
+    ///     pool.entry(key).or_insert(loaded).clone()
+    /// };
+    /// let first = base_of(&dir);
+    /// let second = base_of(&dir); // the same commit: the pooled base
+    /// assert!(std::sync::Arc::ptr_eq(first.graph(), second.graph()));
+    /// assert_eq!(first.name(), "acme");
+    /// let (a, b) = (first.new_layer().unwrap(), second.new_layer().unwrap());
+    /// assert_eq!(a.read().base_ref(), b.read().base_ref());
+    /// assert_eq!(a.read().vertex_count().unwrap(), 6);
+    /// assert_eq!(pool.len(), 1);
+    /// ```
+    #[cfg(feature = "persist")]
+    pub fn from_store_read_only(
+        dir: impl crate::persist::IntoStoreDir,
+        target: crate::persist::RecoveryTarget,
+    ) -> Result<Self, crate::persist::PersistError> {
+        let dir = dir.into_store_dir();
+        let name = dir.location();
+        let recovered = crate::persist::Store::open_read_only(dir, target)?;
+        Ok(Self::from_graph(recovered.into_graph())?.with_name(name))
+    }
+
+    /// The base of the packed snapshot (`.gsnap`) at `path`
+    /// ([`read_snapshot_file`](crate::persist::read_snapshot_file), native only), with the
+    /// embedding models the file carries, named after the path, and the report of what the
+    /// load found (its notes are worth showing). The identity ([`Self::base_ref`]) is the one
+    /// the file recorded: a `.gsnap` exported from a Store's snapshot of commit N is the same
+    /// base as the Store opened read-only at commit N ([`Self::from_store_read_only`]).
+    ///
+    /// # Errors
+    ///
+    /// As [`read_snapshot_file`](crate::persist::read_snapshot_file) (a layer snapshot is no
+    /// base: `PersistError::SnapshotKindMismatch`).
+    #[cfg(all(feature = "persist", not(target_arch = "wasm32")))]
+    pub fn from_snapshot_file(
+        path: impl AsRef<std::path::Path>,
+        options: &crate::persist::ReadOptions,
+    ) -> Result<(Self, crate::persist::SnapshotLoadReport), crate::persist::PersistError> {
+        let path = path.as_ref();
+        let (graph, report) = crate::persist::read_snapshot_file(path, options)?;
+        let base = Self::from_graph(graph)?.with_name(path.display().to_string());
+        Ok((base, report))
     }
 
     fn of(graph: Arc<TraversalGraph>, models: Option<Arc<ModelRegistry>>) -> Self {
