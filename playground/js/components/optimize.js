@@ -24,7 +24,7 @@ import {
   recommendationGroups, pruneSelection, groupSelected, toggleGroup, toggleRecommendation, selectionSummary,
   changesCompressionRules, checkpointDue,
   chartGeometry, formatMicros, memoryRows, labelRows, memoryTotals, memoryOmitted, memoryReportSpec,
-  memoryComponents,
+  memoryComponents, memoryScopeNote,
 } from '../optimize.js';
 import { formatBytes } from '../statistics.js';
 import { MemoryBar } from './memory-bar.js';
@@ -50,7 +50,9 @@ export const OptimizePanel = {
       selected: null, detailTier: 'minutes', detail: null, detailLoading: false,
     });
     // `stats`: the `statistics()` answer for the process memory bar (MemoryBar).
-    const memory = reactive({ report: null, stats: null, loading: false, error: null });
+    // `delta`: a layer's "Delta only" toggle (the report's scope `delta`; only shown on a layer).
+    const memory = reactive({ report: null, stats: null, loading: false, error: null, delta: false });
+    const isLayer = computed(() => !!(state.graph && state.graph.layer));
 
     const engine = () => state.engine;
     const spec = () => (advice.everything ? { everything: true } : {});
@@ -105,7 +107,7 @@ export const OptimizePanel = {
           }
         }
         // Bounded: at most MEMORY_LIST_LIMIT rows per list (largest first), the rest counted.
-        const answer = await engine().memoryReport(memoryReportSpec());
+        const answer = await engine().memoryReport(memoryReportSpec(memory.delta && isLayer.value));
         if (answer && answer.ok) memory.report = answer.report;
         else memory.error = (answer && answer.error) || 'The memory report failed.';
       } catch (err) {
@@ -315,13 +317,18 @@ export const OptimizePanel = {
     const memComponents = computed(() => memoryComponents(memory.report));
     const memRowsOmitted = computed(() => memoryOmitted(memory.report, 'properties', formatBytes));
     const memLabelsOmitted = computed(() => memoryOmitted(memory.report, 'labels', formatBytes));
+    const memScope = computed(() => memoryScopeNote(memory.report, formatBytes));
+    function toggleDelta() {
+      memory.delta = !memory.delta;
+      loadMemory();
+    }
 
     return {
       state, dlg, tab, advice, work, memory, open, close, refresh,
       recRows, summary, apply, writeSnapshot, copy, dismiss, restore, dismissed, applied, SNOOZE_DAYS,
       groups, selection, isSelected, isGroupSelected, toggle, toggleAll, clearSelection, applySelected,
       WINDOWS, TIERS, LISTS, MIN_TIMES, sortBy, sortClass, channelList, rows, listCounts, spark, select, formatMicros, formatBytes,
-      memRows, memLabels, memTotals, memComponents, memRowsOmitted, memLabelsOmitted,
+      memRows, memLabels, memTotals, memComponents, memRowsOmitted, memLabelsOmitted, memScope, isLayer, toggleDelta,
       SPARK_W, SPARK_H, CHART_W, CHART_H,
     };
   },
@@ -489,6 +496,12 @@ export const OptimizePanel = {
         <p v-else-if="memory.loading && !memory.report" class="muted">Measuring…</p>
         <template v-else-if="memory.report">
           <memory-bar :stats="memory.stats"></memory-bar>
+          <div v-if="isLayer" class="layer-filters">
+            <label title="A layer's memory report over its own added and modified elements only (scope delta); off: the whole visible graph, base included">
+              <input type="checkbox" :checked="memory.delta" :disabled="memory.loading" @change="toggleDelta"> Delta only
+            </label>
+            <span v-if="memScope" class="muted sq-note">{{ memScope.text }}</span>
+          </div>
           <div class="op-totals">
             <div v-for="t in memTotals" :key="t.label" class="op-total"><span class="muted">{{ t.label }}</span><strong>{{ formatBytes(t.bytes) }}</strong></div>
           </div>

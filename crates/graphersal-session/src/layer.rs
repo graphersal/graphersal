@@ -202,8 +202,10 @@ impl Session {
                 self.graph.storage_type_name()
             )));
         }
-        // The store in memory holds the graph too: close it, so the session owns the graph.
+        // The store in memory holds the graph too: close it, so the session owns the graph; the
+        // store's job scheduler (built by the first job tick) holds it through its system jobs.
         self.stores = None;
+        self.release_scheduler();
         if Arc::strong_count(&self.graph) != 1 {
             return Err(SessionError::invalid(
                 "a layer cannot start over this graph: it is shared with another owner",

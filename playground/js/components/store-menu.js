@@ -25,8 +25,9 @@ import { StoreCalendar } from './store-calendar.js';
 import { StoreTaskLabel } from './store-task-label.js';
 import {
   state, toast, saveCurrentSnapshot, openStoreView, backToLiveGraph, restoreAtticEntry, switchDatabase,
-  closeDatabase, downloadStoredSnapshot, runStoreTask,
+  closeDatabase, downloadStoredSnapshot, runStoreTask, can, isServerMode, switchLayer,
 } from '../store.js';
+import { layerActions } from '../layer-diff.js';
 import {
   EXPLAIN, actionsFor, commitTarget, markTarget, parseCommit, parseTime, atticRows, viewBanner,
   storeWhere, databaseRows, backupBanner, compactionModel, actionDisabled, storeTask, taskButton,
@@ -235,7 +236,19 @@ export const StoreMenu = {
     watch(() => state.storeVersion, refresh);
 
     const memory = computed(() => !!(info.value && info.value.memory));
+    // Start a layer over this graph (WebAssembly only; js/layer-diff.js `layerActions`).
+    const layerAction = computed(() => layerActions({
+      server: isServerMode(),
+      engineLayers: !!(state.engineInfo && state.engineInfo.layers),
+      graph: state.graph,
+      storeView: state.storeView,
+      allowed: can('layerDiff'),
+      running: state.running,
+    }));
+    const layerOffered = computed(() => !isServerMode() && !!(state.engineInfo && state.engineInfo.layers) && can('layerDiff'));
+    const startLayer = () => switchLayer('start');
     return {
+      layerAction, layerOffered, startLayer,
       catalogCountsText, formatCount,
       state, info, error, refreshing, menu, lastVerify,
       task: (id, title, key) => taskButton(state.storeTask, id, title, key),
@@ -488,6 +501,13 @@ export const StoreMenu = {
       </div>
       <button class="menu-item" :disabled="state.saving || state.running" @click="saveSnapshot"
               title="Download the state shown now (the live graph, or the read-only view) as one packed file (.gsnap); a store that keeps embedding models asks whether they go with it">Download current state (.gsnap)</button>
+      <template v-if="memory && layerOffered">
+        <div class="menu-sep"></div>
+        <div class="menu-title">Layer</div>
+        <div class="store-explain">Freezes this graph as a base and continues on an empty layer over it: writes go to the layer, the base stays unchanged, and the layer badge shows what changed (Drop layer discards it). The layer has no store; Stop restores the graph as loaded.</div>
+        <button class="menu-item" :disabled="!layerAction.start || locked || state.layerBusy" @click="startLayer"
+                :title="layerAction.start ? 'Start a layer over this graph' : 'Not now: ' + layerAction.reason">{{ state.layerBusy ? 'Starting the layer…' : 'Start a layer over this graph' }}</button>
+      </template>
     </template>
   </drop-menu>
   <div class="sr-only" role="status" aria-live="polite">{{ state.storeAnnounce }}</div>

@@ -574,6 +574,11 @@ export class HttpEngine extends Engine {
     return this.request('GET', history ? `workload?history=${encodeURIComponent(history)}` : 'workload');
   }
 
+  /** A layer's diff (`POST /api/layer/diff`; the layer comes from the server's --layer flags). */
+  async layerDiff(spec) {
+    return this.request('POST', 'layer/diff', JSON.stringify(spec || {}));
+  }
+
   async advise(spec) {
     return this.request('POST', 'advise', JSON.stringify(spec || {}));
   }

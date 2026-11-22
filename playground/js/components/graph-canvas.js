@@ -51,6 +51,7 @@ import { ElementEditor } from './element-editor.js';
 import { ValueText } from './value-text.js';
 import { EDIT_TUNING, carryEditPositions, deleteConfirmText } from '../graph/edit-mode.js';
 import { isClearKey } from '../graph/highlight.js';
+import { originLegend } from '../graph/origin-style.js';
 
 const pick4 = (e) => ({ key: e.key, altKey: e.altKey, ctrlKey: e.ctrlKey, metaKey: e.metaKey, shiftKey: e.shiftKey });
 
@@ -152,6 +153,16 @@ export const GraphCanvas = {
       return out;
     });
 
+    // A layer's drawing: the origin entries of the legend (none on a plain graph).
+    const originEntries = computed(() => (isSchema() ? [] : originLegend(props.elements, state.graph && state.graph.layer)));
+
+    /** Whether `els` (a data drawing) holds element `{kind, id}`. */
+    function drawnIn(els, { kind, id }) {
+      if (!els || isSchema()) return false;
+      const ids = kind === 'vertex' ? els.vertexIds : els.edgeIds;
+      return !!ids && Array.prototype.some.call(ids, (x) => String(x) === String(id));
+    }
+
     function counts() {
       const els = props.elements;
       if (!els) return [0, 0];
@@ -188,7 +199,10 @@ export const GraphCanvas = {
     function show() {
       if (!controller) return;
       const was = nextInspect || (selected.value && selected.value.id !== undefined && !isSchema() ? selected.value : null);
-      nextInspect = null;
+      // An element asked for from outside (`inspectNext`) waits for the drawing that holds it:
+      // the panel may pass through an intermediate drawing first (a source switch).
+      const waiting = nextInspect && nextInspect.until && Date.now() <= nextInspect.until && !drawnIn(props.elements, nextInspect);
+      if (!waiting) nextInspect = null;
       confirmDel.value = null;
       const kept = carried(props.elements);
       shown = props.elements;
@@ -663,6 +677,8 @@ export const GraphCanvas = {
       keepPositions: () => beginCommit(),
       /** The drawing's positions (`x, y` per vertex), or null before it is laid out. */
       positions: () => (renderer ? renderer.getPositions() : null),
+      /** Opens element `{kind, id}` in the inspector after the next drawing (when it is drawn). */
+      inspectNext: (kind, id) => { nextInspect = { kind, id: String(id), until: Date.now() + EDIT_TUNING.carryMs }; },
       /** The vertex indices of the double-click selection (null: none). */
       focusIndices: () => (focus ? focus.indices.slice() : null),
       /** Clears the double-click selection (the drawing shows the panel's highlight, or none). */
@@ -672,7 +688,7 @@ export const GraphCanvas = {
     const isEmpty = computed(() => counts()[0] === 0);
 
     return {
-      host, editor, selected, legend, failed, isEmpty, close: () => { selected.value = null; confirmDel.value = null; inspectSeq++; }, isDark,
+      host, editor, selected, legend, originEntries, failed, isEmpty, close: () => { selected.value = null; confirmDel.value = null; inspectSeq++; }, isDark,
       edit, editState, onSaved, onCreated, onCommitting, deleteState, askDelete, confirmDelete, confirmDel, editNote, onKey, focusCanvas,
       editing: computed(() => props.editMode && props.kind !== 'schema'), isSchemaKind: computed(() => props.kind === 'schema'),
     };
@@ -683,8 +699,9 @@ export const GraphCanvas = {
          :aria-label="(editing ? 'Graph drawing, edit mode' : 'Graph drawing') + (highlight ? ' (result highlighted: Esc shows the graph normally)' : '')"></div>
     <div v-if="failed" class="graph-empty">{{ failed }}</div>
     <div v-else-if="isEmpty" class="graph-empty">{{ emptyText }}</div>
-    <div class="graph-legend" v-if="legend.length && !isEmpty">
+    <div class="graph-legend" v-if="(legend.length || originEntries.length) && !isEmpty">
       <span v-for="l in legend" :key="l.label" class="legend-item"><span class="legend-swatch" :style="{ background: l.color }"></span>{{ l.label }}</span>
+      <span v-for="o in originEntries" :key="'origin-' + o.origin" class="legend-item legend-origin" :title="o.text + ' (' + o.cue + ')'"><span :class="['legend-ring', 'origin-' + o.origin]" aria-hidden="true"></span>{{ o.origin }}</span>
     </div>
     <div v-if="selected" class="inspector" @keydown.esc="close">
       <div class="inspector-head">

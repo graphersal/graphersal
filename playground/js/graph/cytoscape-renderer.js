@@ -6,7 +6,8 @@
 // edges, labels without outline drawn only when readable, and a texture instead of the edges
 // while the view moves; above the confirmation size haystack edges without arrows. Colours come
 // from the page's label palette (js/graph/palette.js): every node has the class of its slot, the
-// style colours the slots in the current theme.
+// style colours the slots in the current theme. A layer's drawing marks added and modified
+// elements (js/graph/origin-style.js: outline solid / dashed, edges in the origin colours).
 //
 // Elements are added lazily: `setData` keeps the data, the first `setPositions` adds them AT
 // their positions in one batch (no layout pass, one paint), the first `setLayout` adds them and
@@ -23,6 +24,7 @@ import { PALETTE_SIZE, slotColor } from './palette.js';
 import { TIER_CAPABILITIES } from './renderer.js';
 import { ConnectGesture } from './edit-mode.js';
 import { SIZE_RANGE, sizeOf } from './size-by.js';
+import { cyOriginRules, originColors } from './origin-style.js';
 
 const FIT_PADDING = 36;
 
@@ -115,6 +117,9 @@ function buildStyle(kind, plan, dark) {
         opacity: 'data(opacity)',
       },
     }]),
+    // A layer's elements by origin (js/graph/origin-style.js: added = solid outline, modified =
+    // dashed; graph-data.js `toCyElements` sets the classes only on a layer's drawings).
+    ...(schema ? [] : cyOriginRules(originColors(dark, cssVar), { arrows: plan.arrows })),
     { selector: 'edge.no-label', style: { label: '' } },
     { selector: '.faded', style: { opacity: 0.22 } },
     // A label the Graph panel's filter hides, in the label overview (a schema drawing).

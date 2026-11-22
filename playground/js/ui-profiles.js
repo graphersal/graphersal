@@ -62,6 +62,7 @@ export const CAN_GROUPS = Object.freeze({
     'settings', // ⚙ Settings
     'theme', // the theme switch
     'help', // ? Help and keyboard shortcuts
+    'layerDiff', // a layer's top-bar badge and its Layer changes dialog; Start / Drop layer (WebAssembly)
   ]),
   // The workspace's panels (a profile without the workspace tab shows none of them).
   panels: Object.freeze(['panel.editor', 'panel.results', 'panel.graph', 'panel.schema', 'panel.profile']),

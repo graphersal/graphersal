@@ -156,6 +156,41 @@ graphersal --graph modern --layer \
   and with `--read-only` (the layer is the part that takes the writes), with exit code 2. A
   base the layer cannot carry yet (see below) is refused with exit code 2 too.
 
+## In the playground
+
+The [playground](web_playground.md) shows where each element of a layer comes from. Nothing of
+this appears for a plain graph.
+
+- **The layer badge.** The top bar shows "Layer over *base*" after the graph's counts, with the
+  change counts `+added ~modified −removed`. Its tooltip names the base commit and splits the
+  memory into the layer's own bytes and the shared base. A click opens the Layer changes dialog.
+- **The drawing.** In the Graph panel, an added vertex has a solid outline and a modified vertex
+  a dashed outline. An added edge is solid and wider, a modified edge dashed. The colours are a
+  colour-blind-safe pair (blue for added, reddish purple for modified), with light and dark
+  variants. Base elements look exactly as on a plain graph. The legend adds the entries `added`,
+  `modified` and `base`, and the inspector shows an `origin` row.
+- **The Layer changes dialog** lists what `g.layer_diff()` returns: Added, Modified and Removed,
+  vertices before edges. A modified element shows each changed property as *base → layer*, a
+  property only one side has as `(absent)` on the other, and a label change as the row `labels`.
+  You can filter by kind and label and choose a limit. When more changes match than the limit
+  shows, a "Truncated" notice says so. A click on an added or modified entry draws its
+  neighbourhood in the Graph panel (for an edge, the neighbourhood of its out vertex) and opens
+  the element in the inspector. Removed elements are listed only.
+- **Memory.** The process memory bar (Profile → Statistics, Optimize → Memory) gets a striped
+  "Shared base" track below the layer's own segments. It is shared with every other layer over
+  the base. In the tracked process heap it is part of `other`. Optimize → Memory has a **Delta
+  only** switch: the memory report then walks only the layer's added and modified elements
+  (`scope: "delta"`), and the base stays the single figure `shared_bytes`.
+- **Starting a layer in the browser.** The WebAssembly playground can make a layer without a
+  server. Load a graph, then choose **Store ▸ Start a layer over this graph**. Writes now go to
+  the layer and the badge shows them. **Drop layer** in the Layer changes dialog discards the
+  layer and brings the base back unchanged. The layer has no Store menu. Stop restarts the
+  engine and restores the graph as it was loaded or last saved, so the layer is lost. On the
+  dev server the layer comes from `--layer` / `--layer-store`, and neither action is offered.
+
+The UI profile key `layerDiff` turns the badge, the dialog and the two actions on or off
+(the built-in `full` profile has it on).
+
 ## Keeping a layer durably: `--layer-store`
 
 `graphersal --graph <base> --layer-store <dir>` runs the session on the layer kept in the
@@ -377,7 +412,7 @@ code written for layers already run.
   order matters.
 - **Not in GQL yet.** GQL queries run on a layer like on any graph, but GQL has no function
   for an element's origin or the diff yet. Use the DSL for those.
-- **No playground view of the difference yet.** The playground shows a layer like any graph;
-  styling added, modified and removed elements is planned. The data for it is served already:
-  the dev server's graph info, drawings and `POST /api/layer/diff` carry the layer's counts,
-  each element's origin and the diff ([dev server API](../persistence/dev_server.md)).
+- **The playground cannot draw removed elements.** They are no longer in the graph, so the
+  Layer changes dialog lists them as text only (see [In the playground](#in-the-playground)).
+  The Fast drawing tier draws edge origins by colour and width only (WebGL has no dashed
+  lines); the edge's hover label names its origin.

@@ -96,6 +96,10 @@ const JSON_METHODS = {
   jobHistory: (name, tier) => playground.jobHistory(name, tier || 'minutes'),
   // The Optimize panel: the memory report, the workload statistics, the storage advisor.
   memoryReport: (spec) => playground.memoryReport(JSON.stringify(spec || {})),
+  // Layers (graphersal_session::layer): the diff, and Start / Drop layer over the loaded graph.
+  layerDiff: (spec) => playground.layerDiff(JSON.stringify(spec || {})),
+  startLayer: () => playground.startLayer(),
+  dropLayer: () => playground.dropLayer(),
   workloadReport: (history) => playground.workloadReport(history || undefined),
   // The System journal panel (graphersal_session::journal).
   journal: (spec) => playground.journal(JSON.stringify(spec || {})),

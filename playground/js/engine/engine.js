@@ -782,6 +782,30 @@ export class Engine {
   async memoryReport(spec) { throw notImplemented('memoryReport'); }
 
   /**
+   * A LAYER's changes against its base (graphersal_session's `layer_diff`; dev server `POST
+   * /api/layer/diff`): `spec` = `{kinds?: 'vertex'|'edge'|[..], labels?: string|[string],
+   * limit?: n}`; answers `{ok: true, diff: {added: [entry], removed: [entry], modified: [change],
+   * truncated}}` or `{ok: false, error}` (entry `{kind, id, labels, properties, out?, in?}`,
+   * change `{kind, id, base_labels, labels, out?, in?, properties: {name: {base?, layer?}}}`).
+   * A plain graph answers an empty diff. Read-only. Model: js/layer-diff.js.
+   */
+  async layerDiff(spec) { throw notImplemented('layerDiff'); }
+
+  /**
+   * WebAssembly only (`engineInfo.layers`): freezes the loaded graph as the base and continues on
+   * a layer over it: `{ok: true, info}` (the new graph info, with `layer`) or `{ok: false, error}`.
+   * The memory store is closed (a layer has no store). The dev server's layer comes from its
+   * command line.
+   */
+  async startLayer() { throw notImplemented('startLayer'); }
+
+  /**
+   * WebAssembly only: discards the layer `startLayer` started and continues on its base (kept as a
+   * memory store again): `{ok: true, info}` or `{ok: false, error}`.
+   */
+  async dropLayer() { throw notImplemented('dropLayer'); }
+
+  /**
    * The workload statistics of the graph: `{level, queries, properties, locks, jobs}`; with
    * `history` (`minutes`, `hours`, `days`) every row has `history: [{start, count, failed,
    * items, total_micros, max_micros}]` of that tier (chart data). Read-only.

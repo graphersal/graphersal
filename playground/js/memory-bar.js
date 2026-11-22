@@ -10,6 +10,12 @@
 // `compression?: {plainBytes, storedBytes}`. This model only renders them; it never recomputes a
 // segment.
 //
+// A LAYER (a layered graph over a shared base) owns only its delta: the segments are the layer's
+// own bytes, and the base it shares with every other layer over it is `statistics().memory
+// .shared_bytes` (the graph's `memory_usage`; also `info.layer.sharedBytes`). The bar shows it as
+// `shared`, a striped track of its own beside the segments, never as one of them: the base is not
+// the layer's, and in the tracked process heap it is already part of `other`.
+//
 // The per-query peak of a PROFILE (`query_memory`, against `traversal.max_materialized_bytes`)
 // is a different figure against a different limit: see `queryPeakModel`. The two limits are
 // never mixed.
@@ -44,6 +50,29 @@ export function partLines(parts) {
   return [...parts]
     .sort((a, b) => (b.bytes || 0) - (a.bytes || 0))
     .map((p) => `${p.name} ${formatBytes(p.bytes || 0)}${p.detail ? ` (${p.detail})` : ''}`);
+}
+
+/** The hint of a layer's shared base (its tooltip). */
+export const SHARED_HINT = 'the base graph this layer reads through: shared with every other layer over it, not the layer\'s own memory (in the process heap it is part of "other" when the heap is tracked)';
+
+/**
+ * A layer's shared base for the bar: `{bytes, text, share, hint, label}` (share: of the same
+ * whole as the segments, at most 100), or null when the graph shares nothing (`shared_bytes`
+ * absent or 0: every plain graph).
+ * @param {Object|null} raw  The engine's `statistics()` answer.
+ * @param {number} whole     The bytes the bar's full width stands for.
+ */
+export function sharedSegment(raw, whole) {
+  const bytes = raw && raw.memory && typeof raw.memory.shared_bytes === 'number' ? raw.memory.shared_bytes : 0;
+  if (!(bytes > 0)) return null;
+  const text = formatBytes(bytes);
+  return {
+    bytes,
+    text,
+    share: Math.min(100, (bytes / Math.max(whole, 1)) * 100),
+    hint: SHARED_HINT,
+    label: `shared base ${text}, shared with other layers`,
+  };
 }
 
 /** The words for a ceiling's source (`MemoryLimitSource`). */
@@ -87,6 +116,7 @@ export function percentText(percent) {
  * @returns {null|{usedText:string, limitText:string|null, sourceText:string, percent:number|null,
  *   percentText:string, level:'normal'|'amber'|'red'|null,
  *   segments:Array<{name:string, bytes:number, text:string, share:number, colour:string, hint:string}>,
+ *   shared:null|{bytes:number, text:string, share:number, hint:string, label:string},
  *   label:string, savingText:string|null, notTracked:boolean, noCeiling:boolean,
  *   estimateAboveHeap:boolean, error:string|null}}
  */
@@ -121,11 +151,13 @@ export function memoryBarModel(raw) {
       savingText = `compression saves nothing (plain ${formatBytes(c.plainBytes)} → ${formatBytes(c.storedBytes)})`;
     }
   }
+  const shared = sharedSegment(raw, whole);
   const usedText = `${formatBytes(used)}${notTracked ? ' known' : ''}`;
   const limitText = limit !== null ? formatBytes(limit) : null;
   const label = [
     noCeiling ? `Process memory ${usedText}, no ceiling` : `Process memory ${usedText} of ${limitText}, ${percentText(percent)}`,
     ...segments.map((s) => `${s.name} ${s.text}`),
+    ...(shared ? [shared.label] : []),
   ].join('; ');
   return {
     usedText,
@@ -135,6 +167,7 @@ export function memoryBarModel(raw) {
     percentText: percentText(percent),
     level: memoryLevel(percent),
     segments,
+    shared,
     label,
     savingText,
     notTracked,

@@ -47,6 +47,10 @@
   --mem-store: #b5651d;
   --mem-engine: #4f6d8a;
   --mem-other: #9aa3b2;
+  --mem-shared: #6b7a90; /* a layer's shared base (outside the process bar's segments) */
+  /* A layer's element origins (js/graph/origin-style.js; Okabe-Ito blue / reddish purple). */
+  --origin-added: #0072b2;
+  --origin-modified: #b5508a;
   --radius: 6px;
   --font-ui: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
   --font-mono: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
@@ -101,6 +105,9 @@
     --mem-store: #e09552;
     --mem-engine: #8fb0cf;
     --mem-other: #5d6879;
+    --mem-shared: #8d9bb0;
+    --origin-added: #56b4e9;
+    --origin-modified: #e69ac4;
     color-scheme: dark;
   }
 }
@@ -150,6 +157,9 @@
   --mem-store: #e09552;
   --mem-engine: #8fb0cf;
   --mem-other: #5d6879;
+  --mem-shared: #8d9bb0;
+  --origin-added: #56b4e9;
+  --origin-modified: #e69ac4;
   color-scheme: dark;
 }
 
@@ -1371,6 +1381,11 @@ pre.code-view.wrap { white-space: pre-wrap; word-break: break-word; }
   font-size: 11.5px;
 }
 .legend-swatch { width: 9px; height: 9px; border-radius: 50%; }
+/* A layer's origins (js/graph/origin-style.js): a ring like the drawing's outline. */
+.legend-ring { width: 10px; height: 10px; border-radius: 50%; border: 2px solid var(--graph-edge); box-sizing: border-box; }
+.legend-ring.origin-added { border-color: var(--origin-added); border-style: solid; }
+.legend-ring.origin-modified { border-color: var(--origin-modified); border-style: dashed; }
+.legend-ring.origin-base { border-color: transparent; background: var(--graph-edge); }
 .inspector {
   position: absolute;
   right: 8px;
@@ -2137,3 +2152,36 @@ input.ve-null { color: var(--text-muted); }
 .mem-bar-note { margin: 2px 0; font-size: 12px; }
 .profile-peak.mem-amber b { color: var(--warn); }
 .profile-peak.mem-red b { color: var(--danger); }
+
+/* The shared base of a layer beside the process memory bar (components/memory-bar.js): striped,
+   so it does not read as one of the bar's segments. */
+.mem-bar-shared { display: flex; align-items: center; gap: 8px; margin: 2px 0 4px; font-size: 12.5px; }
+.mem-bar-shared-track { flex: 1; height: 8px; border: 1px dashed var(--border); border-radius: 4px; background: var(--surface-2); overflow: hidden; min-width: 60px; }
+.mem-bar-shared-fill, .mem-bar-swatch.shared { background: repeating-linear-gradient(135deg, var(--mem-shared) 0 3px, transparent 3px 6px); }
+.mem-bar-shared-fill { display: block; height: 100%; }
+
+/* Layered graphs: the top-bar badge (components/layer-diff.js) and the Layer changes dialog. */
+.layer-badge { cursor: pointer; border: 1px solid var(--origin-added); color: var(--text); background: var(--surface); font: inherit; font-size: 12px; }
+.layer-badge:hover { background: var(--surface-2); }
+.layer-counts { font-variant-numeric: tabular-nums; }
+.layer-count.added { color: var(--origin-added); }
+.layer-count.modified { color: var(--origin-modified); }
+.layer-dialog { width: min(760px, calc(100vw - 32px)); max-height: calc(100vh - 48px); }
+.layer-filters { display: flex; flex-wrap: wrap; gap: 6px 12px; align-items: center; margin: 6px 0 10px; }
+.layer-filters label { display: inline-flex; gap: 5px; align-items: center; font-size: 13px; }
+.layer-filters input[type="text"] { min-width: 0; width: 180px; }
+.layer-group h3 { display: flex; align-items: center; gap: 8px; margin: 12px 0 4px; font-size: 14px; }
+.layer-mark { display: inline-block; width: 10px; height: 10px; border-radius: 50%; border: 2px solid var(--graph-edge); box-sizing: border-box; }
+.layer-mark.added { border-color: var(--origin-added); }
+.layer-mark.modified { border-color: var(--origin-modified); border-style: dashed; }
+.layer-mark.removed { border-color: var(--danger); background: linear-gradient(135deg, transparent 40%, var(--danger) 40% 60%, transparent 60%); }
+.layer-entries { list-style: none; margin: 0; padding: 0; }
+.layer-entry { padding: 4px 6px; border-bottom: 1px solid var(--border); min-width: 0; }
+.layer-entry-head { display: flex; flex-wrap: wrap; gap: 4px 8px; align-items: baseline; }
+.layer-entry-head button.link { background: none; border: 0; padding: 0; color: var(--accent); cursor: pointer; font: inherit; text-align: left; }
+.layer-entry-head button.link:hover { text-decoration: underline; }
+.layer-props { display: grid; grid-template-columns: minmax(80px, max-content) 1fr; gap: 1px 10px; margin: 3px 0 0; font-size: 12.5px; }
+.layer-props dt { color: var(--text-muted); font-family: var(--font-mono); overflow-wrap: anywhere; }
+.layer-props dd { margin: 0; overflow-wrap: anywhere; min-width: 0; }
+.layer-props .was { color: var(--text-muted); text-decoration: line-through; }
+.layer-foot { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-top: 10px; }
