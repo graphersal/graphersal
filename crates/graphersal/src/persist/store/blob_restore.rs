@@ -112,6 +112,7 @@ impl RestoreBlobsReport {
 #[non_exhaustive]
 pub struct ConvertOptions {
     pub(crate) fill_from: Option<BlobSource>,
+    pub(crate) skip_missing_blobs: bool,
 }
 
 impl ConvertOptions {
@@ -128,6 +129,24 @@ impl ConvertOptions {
     /// copy; the source is only read.
     pub fn with_fill_missing_blobs(mut self, source: BlobSource) -> Self {
         self.fill_from = Some(source);
+        self
+    }
+
+    /// Completes the conversion when blobs the copy references are missing from `from` (and
+    /// from the fill source of [`Self::with_fill_missing_blobs`], when one is given): the copy
+    /// is made without them and [`ConvertReport::blobs_missing`] names each one. Without it
+    /// (the default) such a blob fails the conversion. No placeholder is written: the copy is
+    /// in the state of a store whose blob was lost (format spec 4.6), which is not damage. A
+    /// model whose blob is missing is listed with [`ModelState::Missing`](super::ModelState)
+    /// ([`Store::models_dir`]); while the schema names it as an `embedder` every open refuses
+    /// with [`StoreFailure::ModelUnavailable`](crate::persist::StoreFailure), otherwise the
+    /// store opens and only the calls that run the model fail. Fill the blobs later with
+    /// [`Store::restore_blobs_from`] (or import the model again: [`Store::import_model_dir`]).
+    /// The copy's verification still checks everything else; a blob present but damaged still
+    /// fails it, and so does a fill source holding a blob with other bytes
+    /// ([`StoreFailure::BlobDamaged`](crate::persist::StoreFailure)).
+    pub fn with_skip_missing_blobs(mut self) -> Self {
+        self.skip_missing_blobs = true;
         self
     }
 }
@@ -148,6 +167,11 @@ pub struct ConvertReport {
     pub blobs_filled: Vec<String>,
     /// Their bytes.
     pub bytes_filled: u64,
+    /// The blobs the copy references but holds neither from `from` nor from the fill source
+    /// (relative names `blobs/..`), left out by [`ConvertOptions::with_skip_missing_blobs`];
+    /// always empty without it. [`Store::models_dir`] of the copy lists the models they belong
+    /// to as [`ModelState::Missing`](super::ModelState).
+    pub blobs_missing: Vec<String>,
 }
 
 /// The outcome of one blob read from the source.

@@ -93,6 +93,17 @@ to a healthy state:
   (`StoreFailure::BlobUnavailable` / `BlobDamaged`, naming it) and leaves no copy; the report
   (`ConvertReport`) lists the blobs filled, and each is a `blob.repaired` record in the copy's
   journal.
+- **Copy without them**, to fill them later: `ConvertOptions::with_skip_missing_blobs()` (with or
+  without a fill source; Rust only, no CLI flag) completes the conversion when a referenced blob
+  is missing from the source store (and from the fill source): the copy is made without it, no
+  placeholder is written, and `ConvertReport::blobs_missing` names each one. The copy is in the
+  same state as a store whose blob was lost, which is not damage: `Store::models_dir` lists its
+  model as `ModelState::Missing`, an open is refused with `StoreFailure::ModelUnavailable` while
+  the schema names the model as an `embedder` (otherwise the store opens and only the calls that
+  run the model fail), and `Store::verify` reports the absent blob until it is filled with
+  `restore-blobs` (`Store::restore_blobs_from`). The copy's verification still checks everything
+  else: a blob that is present but damaged, or one the fill source holds with other bytes, still
+  fails the conversion.
 
 By hand, copying the file `blobs/<2 hex>/<hash>` from another copy works too, and writing the
 content again (`Store::write_blob`) replaces a damaged blob.

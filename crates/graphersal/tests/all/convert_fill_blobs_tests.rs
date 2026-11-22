@@ -3,7 +3,9 @@
 //! directory laid out as `blobs/<2 hex>/<hash>`) holds the blob; a blob with other bytes in the
 //! source, or missing from both, is refused with the named error and no copy is left; nothing of
 //! the source store or the fill directory changes; `Store::convert` without options behaves as
-//! before.
+//! before. `ConvertOptions::with_skip_missing_blobs`: the conversion completes without a blob
+//! missing from both, lists it in `ConvertReport::blobs_missing`, and `Store::restore_blobs_from`
+//! fills it later; a damaged blob is still refused.
 #![cfg(all(feature = "persist", not(target_arch = "wasm32")))]
 
 use std::collections::BTreeMap;
@@ -208,4 +210,251 @@ fn convert_without_options_is_unchanged() {
     }
     assert!(!temp.join("c").exists() || fs::read_dir(temp.join("c")).unwrap().next().is_none());
     assert!(!temp.join("d").exists() || fs::read_dir(temp.join("d")).unwrap().next().is_none());
+}
+
+// ---------------------------------------------------------------------------------------------
+// `ConvertOptions::with_skip_missing_blobs`: the conversion completes without the blob.
+// ---------------------------------------------------------------------------------------------
+
+/// A closed directory store at `temp/<name>` holding the tiny model without its blob (removed
+/// from `blobs/`); with `needed` its schema names the model as an `embedder`. Returns the
+/// store path, the blob's relative name (`blobs/..`) and a directory laid out as a store's
+/// `blobs/` holding the blob (a host's shared model directory, filled later).
+fn store_lacking_its_blob(temp: &Temp, name: &str, needed: bool) -> (PathBuf, String, PathBuf) {
+    let path = temp.join(name);
+    let store = Store::create(&path, options()).unwrap();
+    add_person(&store, "ann");
+    let model = import(&store, 1, "acme/tiny").model;
+    if needed {
+        set_schema(&store, &model.identity);
+    }
+    let blob = blob_path(&path, &store, &model.identity);
+    store.close().unwrap();
+    let relative = blob.strip_prefix(&path).unwrap().to_path_buf();
+    let blob_name = relative
+        .components()
+        .map(|c| c.as_os_str().to_string_lossy().into_owned())
+        .collect::<Vec<_>>()
+        .join("/");
+    let models = temp.join(&format!("{name}-models"));
+    let mut shared = models.clone();
+    for part in relative.components() {
+        shared = shared.join(part.as_os_str());
+    }
+    fs::create_dir_all(shared.parent().unwrap()).unwrap();
+    fs::rename(&blob, &shared).unwrap();
+    (path, blob_name, models)
+}
+
+/// The creation parameters `Store::inspect` reports (rule 22), without the store id.
+fn creation_parameters(path: &Path) -> (u32, u128, i64, u32, String) {
+    let info = Store::inspect(path).unwrap();
+    (
+        info.format_version,
+        info.graph_id,
+        info.created_at,
+        info.chunk_bytes,
+        format!("{:?}", info.damage_policy),
+    )
+}
+
+#[test]
+fn the_default_still_refuses_a_blob_missing_from_both() {
+    let temp = Temp::new("convert-skip-default");
+    let (path, name, _) = store_lacking_its_blob(&temp, "s", true);
+    let empty = temp.join("empty-models");
+    fs::create_dir_all(&empty).unwrap();
+    let err = Store::convert_with(
+        &path,
+        temp.join("copy"),
+        ConvertOptions::new().with_fill_missing_blobs(BlobSource::store(&empty)),
+    )
+    .unwrap_err();
+    let PersistError::Store { cause, reason, .. } = &err else {
+        panic!("{err}");
+    };
+    assert_eq!(*cause, StoreFailure::BlobUnavailable);
+    assert!(reason.contains(&name), "{reason}");
+    let err = Store::convert_with(&path, temp.join("copy2"), ConvertOptions::new()).unwrap_err();
+    assert!(
+        matches!(
+            err,
+            PersistError::Store {
+                cause: StoreFailure::CopyDoesNotVerify,
+                ..
+            }
+        ),
+        "{err}"
+    );
+}
+
+#[test]
+fn a_needed_model_blob_missing_from_both_is_skipped_listed_and_filled_later() {
+    let temp = Temp::new("convert-skip-needed");
+    let (path, name, models) = store_lacking_its_blob(&temp, "s", true);
+    let empty = temp.join("empty-models");
+    fs::create_dir_all(&empty).unwrap();
+    let source_before = files_of(&path);
+
+    let to = temp.join("copy.gstore");
+    let report = Store::convert_with(
+        &path,
+        &to,
+        ConvertOptions::new()
+            .with_fill_missing_blobs(BlobSource::store(&empty))
+            .with_skip_missing_blobs(),
+    )
+    .unwrap();
+    assert_eq!(report.blobs_missing, vec![name.clone()]);
+    assert!(report.blobs_filled.is_empty());
+    assert!(report.files_copied > 0);
+    assert_eq!(files_of(&path), source_before);
+
+    // Rule 22: the copy carries the creation parameters, with a new store id.
+    assert_eq!(creation_parameters(&to), creation_parameters(&path));
+    assert_ne!(
+        Store::inspect(&to).unwrap().store_id,
+        Store::inspect(&path).unwrap().store_id
+    );
+
+    // The copy lists the model as missing; no placeholder blob was written.
+    let listed = Store::models_dir(&to).unwrap();
+    assert_eq!(listed.len(), 1, "{listed:?}");
+    assert_eq!(listed[0].repo, "acme/tiny");
+    assert_eq!(listed[0].state, ModelState::Missing);
+    let verified = Store::verify_dir(&to).unwrap();
+    assert_eq!(verified.problems.len(), 1, "{:?}", verified.problems);
+    assert_eq!(verified.problems[0].path, name);
+
+    // The schema needs the model: the open is refused (not damage), naming it.
+    let err = Store::open(&to, options()).map(|_| ()).unwrap_err();
+    let PersistError::Store { cause, .. } = &err else {
+        panic!("{err}");
+    };
+    assert_eq!(*cause, StoreFailure::ModelUnavailable, "{err}");
+
+    // A later fill from the models directory makes it whole.
+    let filled = Store::restore_blobs_from(&to, BlobSource::store(&models)).unwrap();
+    assert_eq!(filled.restored, vec![name.clone()]);
+    assert!(filled.is_complete());
+    let verified = Store::verify_dir(&to).unwrap();
+    assert!(verified.is_ok(), "{:?}", verified.problems);
+    let store = Store::open(&to, options()).unwrap();
+    assert_ne!(store.models().unwrap()[0].state, ModelState::Missing);
+    let people = store
+        .graph()
+        .read()
+        .traversal()
+        .v(None)
+        .has_label("person")
+        .count()
+        .next()
+        .unwrap();
+    assert_eq!(people, Some(ElementProperty::from(1)));
+    store.close().unwrap();
+}
+
+#[test]
+fn a_store_with_a_model_nothing_needs_opens_and_queries_without_its_blob() {
+    let temp = Temp::new("convert-skip-not-needed");
+    let (path, name, models) = store_lacking_its_blob(&temp, "s", false);
+    let to = temp.join("copy");
+    // Without a fill source too.
+    let report =
+        Store::convert_with(&path, &to, ConvertOptions::new().with_skip_missing_blobs()).unwrap();
+    assert_eq!(report.blobs_missing, vec![name.clone()]);
+    assert_eq!(report.fill_source, None);
+
+    let store = Store::open(&to, options()).unwrap();
+    assert!(store.read_only_reason().unwrap().is_none());
+    assert_eq!(store.models().unwrap()[0].state, ModelState::Missing);
+    add_person(&store, "bob");
+    let people = store
+        .graph()
+        .read()
+        .traversal()
+        .v(None)
+        .has_label("person")
+        .count()
+        .next()
+        .unwrap();
+    assert_eq!(people, Some(ElementProperty::from(2)));
+    // A call running the model fails with an error naming it.
+    let err = store
+        .graph()
+        .read()
+        .traversal()
+        .inject(vec!["graph"])
+        .embed_value(Some("acme/tiny"))
+        .to_list()
+        .unwrap_err();
+    let text = graphersal::error::format_diagnostic(&*err);
+    assert!(text.contains("acme/tiny"), "{text}");
+    store.close().unwrap();
+
+    let filled = Store::restore_blobs_from(&to, BlobSource::store(&models)).unwrap();
+    assert_eq!(filled.restored, vec![name]);
+    let store = Store::open(&to, options()).unwrap();
+    assert_ne!(store.models().unwrap()[0].state, ModelState::Missing);
+    #[cfg(feature = "model2vec")]
+    {
+        let vectors = store
+            .graph()
+            .read()
+            .traversal()
+            .inject(vec!["graph"])
+            .embed_value(Some("acme/tiny"))
+            .to_list()
+            .unwrap();
+        assert_eq!(vectors.len(), 1);
+    }
+    store.close().unwrap();
+}
+
+#[test]
+fn skipping_tolerates_only_absent_blobs() {
+    let temp = Temp::new("convert-skip-damaged");
+    // A blob present in the source but damaged still fails the copy's verification.
+    let path = temp.join("s");
+    let store = Store::create(&path, options()).unwrap();
+    let model = import(&store, 1, "acme/tiny").model;
+    let blob = blob_path(&path, &store, &model.identity);
+    store.close().unwrap();
+    flip_byte(&blob);
+    let to = temp.join("copy");
+    let err = Store::convert_with(&path, &to, ConvertOptions::new().with_skip_missing_blobs())
+        .unwrap_err();
+    assert!(
+        matches!(
+            err,
+            PersistError::Store {
+                cause: StoreFailure::CopyDoesNotVerify,
+                ..
+            }
+        ),
+        "{err}"
+    );
+    assert!(!to.exists() || fs::read_dir(&to).unwrap().next().is_none());
+
+    // A fill source holding the blob with other bytes is still refused.
+    let (path, name, models) = store_lacking_its_blob(&temp, "t", true);
+    let shared = name
+        .split('/')
+        .fold(models.clone(), |at, part| at.join(part));
+    flip_byte(&shared);
+    let to = temp.join("copy-t");
+    let err = Store::convert_with(
+        &path,
+        &to,
+        ConvertOptions::new()
+            .with_fill_missing_blobs(BlobSource::store(&models))
+            .with_skip_missing_blobs(),
+    )
+    .unwrap_err();
+    let PersistError::Store { cause, reason, .. } = &err else {
+        panic!("{err}");
+    };
+    assert_eq!(*cause, StoreFailure::BlobDamaged);
+    assert!(reason.contains(&name), "{reason}");
+    assert!(!to.exists() || fs::read_dir(&to).unwrap().next().is_none());
 }

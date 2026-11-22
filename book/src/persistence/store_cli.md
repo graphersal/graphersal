@@ -761,7 +761,8 @@ shared model directory, another store, a backup), a ZIP backup or a `.gsnap`, as
 [`store restore-blobs`](store_blobs.md#damage). `SOURCE` is only read; the note adds
 `blobs filled: <n> (<size>) from <SOURCE>`. A blob `SOURCE` lacks too, or holds with other bytes,
 fails the command (exit 1) and leaves no copy. Rust: `Store::convert_with` with
-`ConvertOptions::with_fill_missing_blobs`.
+`ConvertOptions::with_fill_missing_blobs`; `ConvertOptions::with_skip_missing_blobs` (Rust only)
+makes the copy without such a blob and lists it instead ([Blobs](store_blobs.md#damage)).
 
 ```text
 $ graphersal store convert data/ graph.gstore
