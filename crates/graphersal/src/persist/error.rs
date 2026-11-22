@@ -529,9 +529,10 @@ pub enum StoreFailure {
     AutoCheckpointFailed,
     /// The store is a LAYER store (format spec 7.5: it holds only a layer's changes to a frozen
     /// base) and the operation does not work on one: it opens only with
-    /// [`Store::open_layer`](super::Store::open_layer) and its base, and copies (fork, attic
-    /// fork, repair, convert, backups, restore, export, upgrade), verification, rollback,
-    /// maintenance mode and closed-store commits are not supported for layer stores yet.
+    /// [`Store::open_layer`](super::Store::open_layer) and its base; the plain forms that would
+    /// load it over no base (`open_read_only`, `open_backup`, `checkpoint_dir`, `fork_dir`,
+    /// `attic_fork_dir`) refuse it (their layer forms take the base), and the repair,
+    /// maintenance mode and the closed-store model commits do not work on layer stores.
     LayerStore,
 }
 
@@ -932,9 +933,12 @@ impl StoreFailure {
                 "This store holds only a layer's changes to a frozen base, by element id: it \
                  is read only over that very base. Open the base (the Store or .gsnap the \
                  layer was built on, at that commit) and the layer store with \
-                 Store::open_layer(dir, &base, options); the error names the base. Copies \
-                 (fork, backup, repair, convert, export, upgrade), verification, rollback and \
-                 closed-store commits do not work on layer stores yet.",
+                 Store::open_layer(dir, &base, options); the error names the base. What loads \
+                 the layer from a closed store takes the base too: Store::open_layer_read_only, \
+                 open_layer_backup, checkpoint_layer_dir, fork_layer_dir, \
+                 attic_fork_layer_dir. A repair and the closed-store model commits do not work \
+                 on layer stores: restore a backup of a damaged layer store, and change the \
+                 embedding models in the base.",
                 &[("show the store and its base", "graphersal store info <dir>")],
             ),
         }
@@ -1581,7 +1585,8 @@ mod tests {
     }
 
     /// A layer store (format spec 7.5) refused by an operation that does not work on one: the
-    /// help says how to open it and what is not supported yet, in the note layout.
+    /// help says how to open it, which layer forms take the base and what does not work on
+    /// one, in the note layout.
     #[test]
     fn a_layer_store_refusal_says_how_to_open_it() {
         let help = help_of(StoreFailure::LayerStore);
@@ -1589,7 +1594,8 @@ mod tests {
             help.contains("Store::open_layer(dir, &base, options)"),
             "{help}"
         );
-        assert!(help.contains("do not work on layer stores yet"), "{help}");
+        assert!(help.contains("do not work"), "{help}");
+        assert!(help.contains("fork_layer_dir"), "{help}");
         assert!(help.contains("graphersal store info <dir>"), "{help}");
         assert_note_layout(&help);
         assert_eq!(StoreFailure::LayerStore.name(), "layer_store");

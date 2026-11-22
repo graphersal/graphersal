@@ -20,7 +20,7 @@
 use super::super::error::PersistError;
 use super::super::manifest::is_element_kind;
 use super::super::recover::{Recovery, RecoveryTarget};
-use super::super::snapshot::{SnapshotInfo, WriteOptions};
+use super::super::snapshot::SnapshotInfo;
 use super::super::wal::{JournalReader, JournalRecord, WAL_HEADER_BYTES, WalHeader};
 use super::files::{
     self, DirPath, GraphFile, Intent, LineageEntry, SNAPSHOTS_DIR, WAL_DIR, list_snapshots,
@@ -1197,6 +1197,17 @@ pub(super) fn attic_state(
     id: &str,
     read: &super::super::snapshot::ReadOptions,
 ) -> Result<(AtticEntry, GraphFile, crate::graph::TraversalGraph), PersistError> {
+    attic_state_in(dir, id, read, crate::graph::TraversalGraph::new())
+}
+
+/// [`attic_state`] loaded into `empty`, an empty storage of any type (a layer over its base
+/// for a layer store's entry: format spec 7.5).
+pub(super) fn attic_state_in<S: PersistentStorage>(
+    dir: &DirPath,
+    id: &str,
+    read: &super::super::snapshot::ReadOptions,
+    empty: S,
+) -> Result<(AtticEntry, GraphFile, S), PersistError> {
     let (entry, attic_segments) = attic_segments(dir, id)?;
     let entry_dir = entry_path(dir, id)?;
     let graph_file = read_graph_file(dir)?.file;
@@ -1255,7 +1266,7 @@ pub(super) fn attic_state(
                 .map(|(_, p)| p.clone()),
         );
     }
-    let mut recovery = Recovery::new()
+    let mut recovery = Recovery::new_in(empty)
         .snapshot(DirSnapshotReader::open(&path)?)
         .options(read.clone())
         .target(RecoveryTarget::Latest)
@@ -1268,57 +1279,64 @@ pub(super) fn attic_state(
 }
 
 /// A new store in `new_dir` from the end of attic entry `id`: a new lineage whose parent is
-/// the entry's lineage at its last commit.
+/// the entry's lineage at its last commit. A layer store's entry (`layer`: its base) is loaded
+/// over its base and its copy is a layer store over the same base (format spec 7.5; another
+/// base: [`PersistError::LayerBaseMismatch`], nothing written).
 pub(super) fn attic_fork(
     dir: &DirPath,
     id: &str,
     new_dir: &DirPath,
+    layer: Option<&crate::graph::LayerBase>,
 ) -> Result<ForkReport, PersistError> {
-    super::files::refuse_other_version(dir)?;
+    let kind = match layer.map(|base| base.base_ref()) {
+        Some(Some(base)) => super::files::StoreKind::Layer(*base),
+        Some(None) => {
+            return Err(PersistError::Graph(crate::error::GraphError::unsupported(
+                "a layer store over a base without an identity",
+            )));
+        }
+        None => super::files::StoreKind::Plain,
+    };
+    super::files::refuse_other_version_as(dir, kind)?;
     let options = super::StoreOptions::new();
-    let (entry, old, graph) = attic_state(dir, id, &options.read)?;
-    // The creation-time parameters of the store carry over (a fork is the same data under a
-    // new lineage, not a new decision).
+    let marks =
+        |entry: AtticEntry| move |dir: &DirPath, up_to: u64| attic_marks(dir, &entry, up_to);
+    match layer {
+        Some(base) => {
+            let empty = crate::graph::LayeredGraph::over_base(base)?;
+            let (entry, old, graph) = attic_state_in(dir, id, &options.read, empty)?;
+            fork_source(dir, &old, new_dir, &options, |source| {
+                source.write(graph, marks(entry), true)
+            })
+        }
+        None => {
+            let (entry, old, graph) = attic_state(dir, id, &options.read)?;
+            fork_source(dir, &old, new_dir, &options, |source| {
+                source.write(graph, marks(entry), false)
+            })
+        }
+    }
+}
+
+/// Runs `write` with the fork source of an attic fork: the creation-time parameters of the
+/// store carry over (a fork is the same data under a new lineage, not a new decision).
+fn fork_source(
+    dir: &DirPath,
+    old: &GraphFile,
+    new_dir: &DirPath,
+    options: &super::StoreOptions,
+    write: impl FnOnce(&super::ForkSource<'_>) -> Result<ForkReport, PersistError>,
+) -> Result<ForkReport, PersistError> {
     let options = options
+        .clone()
         .with_chunk_bytes(old.chunk_bytes)
         .with_damage_policy(old.damage_policy);
-    let branched_at = graph.last_commit_seq();
-    // Listed before anything is written: a fork that cannot report them writes nothing.
-    let marks_not_carried = attic_marks(dir, &entry, branched_at)?;
-    let parent_id = graph.graph_id();
-    let graph = graph.with_graph_id(crate::value::uuid::new_v7());
-    let mut lineage = vec![LineageEntry {
-        graph_id: graph.graph_id(),
-        branched_at,
-        time: crate::graph::undo::now_micros(),
-    }];
-    lineage.extend(old.lineage.iter().copied());
-    let existed = new_dir.exists();
-    super::StoreCore::create_lineage(
+    write(&super::ForkSource {
+        dir,
+        parent: old,
+        options: &options,
         new_dir,
-        &graph,
-        lineage,
-        WriteOptions::new().with_parent(parent_id, branched_at),
-        &options,
-        ("attic_fork", Some((old.store_id, branched_at))),
-    )?;
-    super::models::carry_into_new(dir, new_dir, existed)?;
-    let (blobs, blobs_not_carried) = super::blobs::carry_state(dir, new_dir, false)
-        .inspect_err(|_| files::undo_new_dir(new_dir, existed))?;
-    let models = super::model_catalog::infos_in_files(new_dir)?;
-    let (_, path) = list_snapshots(new_dir)?.pop().ok_or_else(|| {
-        PersistError::store(
-            "fork the attic entry",
-            StoreFailure::ChangedConcurrently,
-            "the new store has no snapshot",
-        )
-    })?;
-    Ok(ForkReport {
-        snapshot: super::snapshot_dir::read_listing(&path)?,
-        marks_not_carried,
-        models,
-        blobs,
-        blobs_not_carried,
+        created: "attic_fork",
     })
 }
 

@@ -702,7 +702,30 @@ pub(crate) fn layer_store_refused(
         format!(
             "the store {} is a layer store over the base {base}: it holds only a layer's \
              changes to that base, so it opens only with Store::open_layer and that base; \
-             this operation is not supported for layer stores yet",
+             this operation does not work on a layer store (where a layer form exists, it \
+             takes the base: open_layer_read_only, open_layer_backup, checkpoint_layer_dir, \
+             fork_layer_dir, attic_fork_layer_dir)",
+            dir.display()
+        ),
+    )
+}
+
+/// The refusal of a repair of a LAYER store (format spec 7.5, 13): a repair rebuilds a whole
+/// graph from the salvaged snapshots and WAL (chunk donors, placeholders for lost elements,
+/// diverged elements against before images), which a layer store does not hold: its snapshots
+/// hold only the layer's changes to a base the salvage does not read.
+pub(crate) fn layer_store_not_repaired(
+    dir: &DirPath,
+    base: &crate::graph::BaseRef,
+) -> PersistError {
+    PersistError::store(
+        "repair the store",
+        StoreFailure::LayerStore,
+        format!(
+            "the store {} is a layer store over the base {base}: a repair salvages whole \
+             graphs, and a layer store holds only a layer's changes to that base, so it is \
+             not repaired; restore a backup of the layer store, or rebuild the layer over \
+             its base",
             dir.display()
         ),
     )
