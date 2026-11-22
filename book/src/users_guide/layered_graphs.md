@@ -146,7 +146,10 @@ graphersal --graph modern --layer \
   serve the layer: `embed()`, text `nearest` and vector rules on the layer use them.
 - The REPL (`graphersal --layer`) and the dev server (`graphersal --graph <src> --layer
   --server`) run on the layer too. The server's start banner has a `layer` row; the playground
-  pages and the server's MCP endpoint query the layer. "Save to file" is refused (409, "the
+  pages and the server's MCP endpoint query the layer (MCP `graph_info` shows a `layer` block:
+  the base's name and identity, what the layer added, modified and removed, its own and the
+  shared bytes; the instructions of `initialize` name `layer()`, `has_layer()` and
+  `g.layer_diff()`, on a layer only). "Save to file" is refused (409, "the
   graph is a layer kept in memory over its base"): it would write the layer's graph over the
   base's file.
 - The layer lives as long as the process: nothing is saved when it ends. To keep it, use a

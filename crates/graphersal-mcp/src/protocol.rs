@@ -173,9 +173,10 @@ impl Mcp {
         &self.profile.config
     }
 
-    /// The instructions `initialize` answers under the default profile.
+    /// The instructions `initialize` answers under the default profile for a graph without
+    /// layers (on a layered graph `initialize` adds a note on the layer steps).
     pub fn instructions_text(&self) -> String {
-        instructions_of(&self.profile)
+        instructions_of(&self.profile, false)
     }
 
     /// The caller of the endpoint's tools.
@@ -584,7 +585,11 @@ impl Mcp {
         if let Ok(mut last) = self.client.lock() {
             *last = Some(client);
         }
-        let instructions = instructions_of(peer.profile);
+        let instructions = match &peer.profile.config.instructions {
+            // The operator's own text is answered as it is: no graph is asked.
+            Instructions::Replace(_) => instructions_of(peer.profile, false),
+            _ => instructions_of(peer.profile, peer.host.serves_layer()),
+        };
         let list_changed = peer.stream.is_some() && lists_change(peer.profile);
         Ok((
             json!({
@@ -715,12 +720,16 @@ fn lists_change(profile: &Profile) -> bool {
     profile.config.has_saved_query_tools()
 }
 
-/// The instructions `initialize` answers under `profile`.
-fn instructions_of(profile: &Profile) -> String {
+/// The instructions `initialize` answers under `profile`, with the note on the layer steps
+/// when the graph is `layered` (never added to an operator's replacing text).
+fn instructions_of(profile: &Profile, layered: bool) -> String {
     let mut instructions = match &profile.config.instructions {
         Instructions::Replace(text) => return text.clone(),
         Instructions::Builtin | Instructions::Append(_) => INSTRUCTIONS.to_string(),
     };
+    if layered {
+        instructions.push_str(LAYER_NOTE);
+    }
     if profile.read_only {
         instructions.push_str(READ_ONLY_NOTE);
     }
@@ -903,6 +912,16 @@ Persistence \
 (checkpoints, history, views of past states) is the user's, in the browser: when the user opens \
 a read-only view of a past state, `graph_info` says so and writes are refused until they go \
 back to the live graph.";
+
+/// Added to the instructions when the served graph is a layer (and only then, so the
+/// instructions of a plain graph stay as they are).
+pub(crate) const LAYER_NOTE: &str = " This graph is a LAYER over a frozen base graph: writes \
+go to the layer and the base never changes; `graph_info` shows `layer` (the base's name and \
+identity, what the layer added, modified and removed, its own and the shared bytes). In a \
+query, `layer()` yields an element's origin (\"base\", \"added\" or \"modified\"), \
+`has_layer(\"added\", \"modified\")` keeps elements by origin, and `g.layer_diff()` lists \
+what the layer changed against its base (`#{kinds, labels, limit}`; base and layer values side \
+by side).";
 
 /// The heading above the `--mcp-instructions` text.
 const OPERATOR_HEADING: &str = "Notes from the operator of this server about this graph:";

@@ -89,6 +89,21 @@ that registry, a display name and the base's identity:
   (`BaseRef::of`): its lineage id, last commit sequence number and that commit's time (always
   `Some` in this version). `LayeredGraph::base_ref()` answers the same for a bare layer. A
   layer snapshot records it and is loaded only over a base of the same identity (below).
+- `LayerBase::from_store_read_only(dir, target)` (feature `persist`) opens a Store read-only
+  at `target` (no lock, no file changed) and keeps the models of that position;
+  `LayerBase::from_snapshot_file(path, &options)` (feature `persist`, native only) reads a
+  `.gsnap` and returns the load report beside the base. Both name the base after its location
+  (the path, a `MemDir`'s name).
+- The identity is stable across loads: every read-only open of the same commit and a `.gsnap`
+  export of that commit's snapshot have equal `BaseRef`s (the snapshot records the lineage id,
+  commit sequence number and commit time; the WAL replay restores the last two). A commit to
+  the base store makes a new identity. `.gsnap` exports copy the store's newest *snapshot*, so
+  commits still only in the WAL are not in the export: checkpoint first to export the latest
+  commit. Samples and GraphSON/GraphML files get a new lineage id at every load, so they are
+  never the same base twice.
+- `BaseRef` is `Copy + Hash + Eq`: a host serving many layers pools its bases in a
+  `HashMap<BaseRef, LayerBase>` (or `Weak` handles) and drops a second load of a pooled commit.
+  The `LayerBase` rustdoc has a pool example; the pool's lifetime and eviction stay the host's.
 
 ```rust
 use std::sync::Arc;

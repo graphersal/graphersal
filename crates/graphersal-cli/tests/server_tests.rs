@@ -9018,3 +9018,41 @@ fn a_layer_server_answers_its_layer_info_origins_and_diff() {
     let diff = post(plain.port, "/api/layer/diff", "{}").json();
     assert_eq!(diff["diff"]["added"], serde_json::json!([]), "{diff}");
 }
+
+/// MCP on `--layer` (layered-graph plan S5.4): `initialize`'s instructions name the layer steps
+/// at once (the CLI tells the context the graph is a layer: no job at `initialize`) and
+/// `graph_info` carries the `layer` block; on a plain graph neither.
+#[test]
+fn mcp_on_a_layer_shows_the_layer() {
+    let init = |port: u16| -> String {
+        mcp_post(
+            port,
+            &[],
+            r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"x","version":"1"}}}"#,
+        )
+        .json()["result"]["instructions"]
+            .as_str()
+            .unwrap()
+            .to_string()
+    };
+    let server = start(&["--graph", "modern", "--layer", "--mcp"]);
+    let instructions = init(server.port);
+    assert!(
+        instructions.contains("This graph is a LAYER") && instructions.contains("`g.layer_diff()`"),
+        "{instructions}"
+    );
+    let mut mcp = McpClient::connect(server.port, &[]);
+    let (error, text) = mcp.call("graph_info", serde_json::json!({}));
+    assert!(!error, "{text}");
+    let info: Value = serde_json::from_str(&text).unwrap();
+    assert_eq!(info["layer"]["base"], "modern", "{info}");
+    assert!(info["layer"]["baseRef"]["graphId"].is_string(), "{info}");
+    drop(server);
+
+    let server = start(&["--graph", "modern", "--mcp"]);
+    assert!(!init(server.port).contains("layer_diff"));
+    let mut mcp = McpClient::connect(server.port, &[]);
+    let (_, text) = mcp.call("graph_info", serde_json::json!({}));
+    let info: Value = serde_json::from_str(&text).unwrap();
+    assert!(info.get("layer").is_none(), "{info}");
+}
