@@ -17,6 +17,8 @@ share one base in the same process.
 > CLI, the dev server and Python keep layers in memory only for now (see
 > [Limitations](#limitations)). How the storage works inside, its capabilities and memory
 > figures are on the developer page [Layered Graphs](../for_developers/layered_graphs.md).
+> A server that serves many customers' layers over shared product versions, one MCP endpoint
+> per name, is described in [Serving Layers](../for_developers/serving_layers.md).
 
 ## Where an element comes from
 
