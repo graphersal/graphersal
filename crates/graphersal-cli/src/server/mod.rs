@@ -42,14 +42,11 @@
 use std::io::Cursor;
 use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::mpsc::Sender;
 use std::sync::{Arc, OnceLock};
 
-use graphersal::GraphSource;
-use graphersal::exec::CancelToken;
-use graphersal::persist::Store;
 use graphersal_serve::{
-    Busy, BusyReason, Context, Hooks, HttpError, Job, JobQueue, Runner, SESSION_STACK_BYTES,
+    Busy, BusyReason, Context, Hooks, HttpError, Job, JobQueue, Launched, Runner,
+    SESSION_STACK_BYTES, ServedSource,
 };
 use graphersal_session::{Session, SessionPresets};
 use serde_json::{Value, json};
@@ -283,14 +280,23 @@ pub fn run(cli: &Cli) -> i32 {
     // A layer store (`--layer-store`) is not the session's Store (the Store panel serves plain
     // stores): its graph is preloaded, and the server keeps the store to close it.
     let mut layer_store = None;
-    let (store, preloaded) = if opens {
+    let served = if opens {
         match cli.open_graph() {
-            Ok(opened) => match opened.store {
-                Some(store) => (Some(store), None),
-                None => {
-                    layer_store = opened.layer_store;
-                    (None, Some((opened.graph, graph_title(&cli.graph))))
+            Ok(opened) => match (opened.store, opened.layer_store) {
+                (Some(store), _) => ServedSource::Store(store),
+                (None, Some(opened_layer)) => {
+                    layer_store = Some(opened_layer.clone());
+                    ServedSource::layer_store(
+                        opened_layer,
+                        graph_title(&cli.graph),
+                        graph_kind(&cli.graph),
+                    )
                 }
+                (None, None) => ServedSource::graph(
+                    opened.graph,
+                    graph_title(&cli.graph),
+                    graph_kind(&cli.graph),
+                ),
             },
             Err(err) => {
                 errln!("{}", err.message);
@@ -298,7 +304,17 @@ pub fn run(cli: &Cli) -> i32 {
             }
         }
     } else {
-        (None, None)
+        match served_source(&cli.graph, source.as_deref()) {
+            Ok(served) => served,
+            Err(message) => {
+                errln!("{message}");
+                return EXIT_USAGE_ERROR;
+            }
+        }
+    };
+    let store = match &served {
+        ServedSource::Store(store) => Some(store.clone()),
+        _ => None,
     };
     // The whole server refuses writes: --read-only, or a Store opened read-only.
     // A layer over a Store base is writable: the Store itself was opened read-only.
@@ -306,18 +322,8 @@ pub fn run(cli: &Cli) -> i32 {
         || (matches!(cli.graph, GraphSpec::Store(_)) && store.is_none() && !cli.layer);
     let presets = session_presets(cli);
     let presets_json = presets.to_value();
-    let shared = store
-        .as_ref()
-        .map(|store| (store.clone(), store.location()));
-    let (jobs, cancel, commit_seq, statistics, layered) = match start_session(
-        &cli.graph,
-        source.as_deref(),
-        presets,
-        shared,
-        preloaded,
-        pool.clone(),
-    ) {
-        Ok(started) => started,
+    let launched = match start_session(served, presets, pool.clone()) {
+        Ok(launched) => launched,
         Err(message) => {
             errln!("{message}");
             return EXIT_USAGE_ERROR;
@@ -335,7 +341,7 @@ pub fn run(cli: &Cli) -> i32 {
     let runs = Arc::new(graphersal_serve::Runs::default());
     match &pool {
         None => {
-            stop.set_cancel(cancel.clone());
+            stop.set_cancel(launched.cancel.clone());
             let runs = runs.clone();
             stop.set_on_stop(Arc::new(move || {
                 if let Err(err) = runs.cancel_all() {
@@ -532,7 +538,7 @@ pub fn run(cli: &Cli) -> i32 {
         );
     }
     graph_section.rows(start_stats::rows(
-        &statistics,
+        &launched.statistics,
         graphersal::alloc_tracking::global_live_bytes(),
     ));
     let mut models_section = crate::sections::Section::new("Embedding models");
@@ -642,13 +648,15 @@ pub fn run(cli: &Cli) -> i32 {
     let url = plan.url(port);
     let runner = match &pool {
         Some(pool) => Runner::Queue(pool.clone()),
-        None => Runner::Session(jobs),
+        None => Runner::Session(launched.jobs.clone()),
     };
     let hooks = Arc::new(CliHooks {
         #[cfg(feature = "ai")]
         ai: ai.clone(),
     });
-    let context = Context::builder(runner, plan.host_check(port))
+    // The launch filled in the presets, the Store, the commit position and the layer state.
+    let context = launched
+        .context_builder_with(runner, plan.host_check(port))
         // This binary installs the counting allocator (`alloc-tracking`).
         .memory_tracked(true)
         .runs(runs)
@@ -656,11 +664,7 @@ pub fn run(cli: &Cli) -> i32 {
         .source(source)
         .save_refusal(save_refusal(cli))
         .schema_source(schema_source)
-        .presets(presets_json)
         .read_only(read_only)
-        .store(store)
-        .commit_seq(commit_seq)
-        .layered(layered)
         .mcp(mcp)
         .hooks(hooks);
     // `--ui-profile`: what the playground pages show (`GET /api/info` `uiProfile`).
@@ -1102,94 +1106,48 @@ fn presets_summary(presets: &Value) -> String {
     }
 }
 
-/// Starts the session thread with the graph of `spec` loaded and `presets` applied (or the
-/// Store `shared`, or the graph `preloaded` with its title); returns its job queue, its
-/// cancellation token, the commit position of the loaded graph, its statistics
-/// ([`Session::statistics`] with `process.memory` added, printed at start) and whether it is a
-/// layer (`--layer`, `--layer-store`: the MCP instructions name the layer steps), or the
-/// diagnostic of a graph that could not be loaded.
+/// Starts the session thread serving `served` with `presets` applied
+/// ([`graphersal_serve::launch`]): its job queue, its cancellation token, the commit position of
+/// the loaded graph, its statistics ([`Session::statistics`] with `process.memory` added,
+/// printed at start) and whether it is a layer (`--layer`, `--layer-store`: the MCP instructions
+/// name the layer steps), or the diagnostic of a graph that could not be loaded. What the load
+/// of a file or sample reported is printed as `note:` lines.
 ///
 /// With a `pool` (the read-only serving mode) the thread loads the graph, then serves as the
 /// pool's first worker; the other workers start here, each with a session of its own over the
 /// same graph ([`Session::template`]).
 fn start_session(
-    spec: &GraphSpec,
-    source: Option<&Path>,
+    served: ServedSource,
     presets: SessionPresets,
-    shared: Option<(Arc<Store>, String)>,
-    preloaded: Option<(Arc<dyn graphersal_session::storage::SessionGraph>, String)>,
     pool: Option<Arc<pool::Pool>>,
-) -> Result<(Sender<Job>, CancelToken, u64, Value, bool), String> {
-    type Started = (
-        CancelToken,
-        u64,
-        Value,
-        bool,
-        Option<graphersal_session::SessionTemplate>,
-    );
-    let spec = spec.clone();
-    let source = source.map(Path::to_path_buf);
+) -> Result<Launched, String> {
     let first_worker = pool.clone();
-    let setup = move |session: &mut Session| -> Result<Started, String> {
-        match (shared, preloaded) {
-            (Some((store, name)), _) => session
-                .attach_store(store, &name)
-                .map(|_| ())
-                .map_err(|err| err.to_string()),
-            (None, Some((graph, name))) => {
-                let kind = match &spec {
-                    GraphSpec::File(_) => "file",
-                    GraphSpec::Modern => "modern",
-                    GraphSpec::Empty => "empty",
-                    GraphSpec::Large => "large",
-                    GraphSpec::FileTree => "tree",
-                    GraphSpec::Store(_) => "store",
-                };
-                session
-                    .load_shared(graph, &name, kind)
-                    .map(|_| ())
-                    .map_err(|err| err.to_string())
-            }
-            (None, None) => load_graph(session, &spec, source.as_deref()),
-        }?;
-        let seq = session
-            .graph()
-            .last_commit_seq()
-            .map_err(|err| err.to_string())?;
-        // The banner's memory row shows the process against its ceiling.
-        let statistics = session
-            .statistics_with_process()
-            .map_err(|err| err.to_string())?;
-        // The pool's other workers serve the same graph; the force-layout jobs are shared by
-        // every page.
-        let template = match &first_worker {
-            None => None,
-            Some(pool) => {
-                // The graph refuses every write (--read-only): runs need no whole-run unit,
-                // which would let one run at a time.
-                session
-                    .set_read_only_runs(true)
-                    .map_err(|err| err.to_string())?;
-                let template = session.template().map_err(|err| err.to_string())?;
-                session
-                    .set_layout_job_limit(SHARED_LAYOUT_JOBS.max(pool.config().workers))
-                    .map_err(|err| err.to_string())?;
-                Some(template)
-            }
+    // The pool's other workers serve the same graph; the force-layout jobs are shared by
+    // every page.
+    let extra = move |session: &mut Session| -> Result<_, String> {
+        let Some(pool) = &first_worker else {
+            return Ok(None);
         };
-        let layered = session
-            .graph()
-            .capabilities()
-            .map_err(|err| err.to_string())?
-            .layered;
-        Ok((session.cancel_token(), seq, statistics, layered, template))
+        // The graph refuses every write (--read-only): runs need no whole-run unit, which
+        // would let one run at a time.
+        session
+            .set_read_only_runs(true)
+            .map_err(|err| err.to_string())?;
+        let template = session.template().map_err(|err| err.to_string())?;
+        session
+            .set_layout_job_limit(SHARED_LAYOUT_JOBS.max(pool.config().workers))
+            .map_err(|err| err.to_string())?;
+        Ok(Some(template))
     };
     // The pool's first worker is the session thread itself, once the graph is loaded.
     let takeover = pool
         .clone()
         .map(|pool| Box::new(move |session: &mut Session| pool.work(session)) as Job);
-    let (jobs, (cancel, commit_seq, statistics, layered, template)) =
-        graphersal_serve::spawn_session(presets, setup, takeover).map_err(|err| err.to_string())?;
+    let (launched, template) = graphersal_serve::launch(served, presets, extra, takeover)
+        .map_err(|err| err.to_string())?;
+    for warning in &launched.warnings {
+        errln!("note: {warning}");
+    }
     if let (Some(pool), Some(template)) = (pool, template) {
         for worker in 1..pool.config().workers {
             let pool = pool.clone();
@@ -1210,7 +1168,34 @@ fn start_session(
                 .map_err(|err| format!("Error: cannot start a worker thread: {err}"))?;
         }
     }
-    Ok((jobs, cancel, commit_seq, statistics, layered))
+    Ok(launched)
+}
+
+/// What the session loads itself for the `--graph` `spec` (`source`: the canonical path of a
+/// file): a sample or a graph file. A Store and everything `Cli::open_graph` opens never come
+/// here.
+fn served_source(spec: &GraphSpec, source: Option<&Path>) -> Result<ServedSource, String> {
+    match (spec, source) {
+        (GraphSpec::File(_), Some(path)) => Ok(ServedSource::File(path.to_path_buf())),
+        (GraphSpec::File(path), None) => Err(format!("Error: cannot open '{path}'")),
+        (GraphSpec::Store(path), _) => Err(format!("Error: the store '{path}' was not opened")),
+        (GraphSpec::Modern | GraphSpec::Empty | GraphSpec::Large | GraphSpec::FileTree, _) => {
+            Ok(ServedSource::Sample(graph_kind(spec).to_string()))
+        }
+    }
+}
+
+/// The graph kind of `spec` (`GET /api/info` `kind`; the sample kinds of
+/// [`Session::sample_graphs`]).
+fn graph_kind(spec: &GraphSpec) -> &'static str {
+    match spec {
+        GraphSpec::File(_) => "file",
+        GraphSpec::Modern => "modern",
+        GraphSpec::Empty => "empty",
+        GraphSpec::Large => "large",
+        GraphSpec::FileTree => "tree",
+        GraphSpec::Store(_) => "store",
+    }
 }
 
 /// Force-layout jobs the pages of the read-only serving mode share (at least one per worker).
@@ -1239,45 +1224,6 @@ fn graph_title(spec: &GraphSpec) -> String {
         .and_then(|sample| sample["title"].as_str())
         .unwrap_or(kind)
         .to_string()
-}
-
-/// Loads the `--graph` of the server into `session`.
-fn load_graph(
-    session: &mut Session,
-    spec: &GraphSpec,
-    source: Option<&Path>,
-) -> Result<(), String> {
-    let info = match (spec, source) {
-        (GraphSpec::File(_), Some(path)) => {
-            let bytes = std::fs::read(path)
-                .map_err(|err| format!("Error: cannot read '{}': {err}", path.display()))?;
-            let name = path
-                .file_name()
-                .map(|n| n.to_string_lossy().into_owned())
-                .unwrap_or_else(|| path.display().to_string());
-            if GraphSource::is_snapshot_path(path) {
-                session.load_snapshot(&bytes, &name)?
-            } else if GraphSource::is_graphson_path(path) {
-                session.load_graphson(&bytes, &name, None)?
-            } else {
-                session.load_graphml(&bytes, &name, None)?
-            }
-        }
-        (GraphSpec::Modern, _) => session.load_sample("modern")?,
-        (GraphSpec::Empty, _) => session.load_sample("empty")?,
-        (GraphSpec::Large, _) => session.load_sample("large")?,
-        (GraphSpec::FileTree, _) => session.load_sample("tree")?,
-        (GraphSpec::File(path), None) => return Err(format!("Error: cannot open '{path}'")),
-        (GraphSpec::Store(path), _) => {
-            return Err(format!("Error: the store '{path}' was not opened"));
-        }
-    };
-    if let Some(warnings) = info["warnings"].as_array() {
-        for warning in warnings {
-            errln!("note: {}", warning.as_str().unwrap_or_default());
-        }
-    }
-    Ok(())
 }
 
 /// Largest declared body (`Content-Length`) a request may name. `tiny_http` 0.12 skips an

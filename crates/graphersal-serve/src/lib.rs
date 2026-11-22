@@ -20,6 +20,13 @@
 //! - the glue that implements `graphersal-mcp`'s `Host`/`Executor` over the runtime and serves
 //!   `POST /mcp` (feature `mcp`).
 //!
+//! Two EXPERIMENTAL helpers start a hosted graph: [`launch`] loads a [`ServedSource`] (a
+//! sample, a graph file, a Store, a layer store, a graph the host loaded) into a new session
+//! thread and answers a [`Launched`] whose [`Launched::context_builder`] is pre-filled for the
+//! [`Context`]; [`open_store`], [`layer_base_of_store`] and [`open_layer_store`] open the
+//! databases of a host serving several (each [`Context`] is still one graph), answering what
+//! they found as data ([`OpenNote`]) and the embedding models per database.
+//!
 //! # Extension points
 //!
 //! What a host adds goes through these points; each has the core default a host gets without
@@ -65,13 +72,17 @@ mod context;
 mod host_check;
 mod http;
 mod job_workers;
+mod launch;
 mod mcp;
+mod open;
 mod runs;
 mod server;
 mod ui;
 
 #[cfg(test)]
 mod extension_tests;
+#[cfg(test)]
+mod launch_tests;
 
 pub use api::{SERVER_ID, handle};
 pub use context::{
@@ -81,8 +92,13 @@ pub use context::{
 };
 pub use host_check::{Exposure, HostCheck, HostRules};
 pub use http::{HttpError, MAX_BODY_BYTES, Method, Request, Response};
+pub use launch::{Launched, ServedSource, launch};
 #[cfg(feature = "mcp")]
 pub use mcp::current_client;
+pub use open::{
+    NoteLevel, OpenError, OpenErrorKind, OpenNote, OpenStore, OpenedBase, OpenedLayerStore,
+    OpenedStore, layer_base_of_store, open_layer_store, open_store,
+};
 pub use runs::{RUN_TEXT_HEAD_CHARS, Registered, RunHandle, RunInfo, RunKind, RunObserver, Runs};
 pub use server::{GraphResolver, Lifecycle, LifecycleHooks, OneGraph, Server};
 pub use ui::Ui;
