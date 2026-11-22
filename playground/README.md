@@ -451,7 +451,8 @@ panel no longer infers after a change (`js/schema/panel-sync.js` `SchemaPanelSyn
 script derives the playground root from the address, so `/reset` served directly works too) does
 not load Vue, CodeMirror, the CDN scripts or the WebAssembly. Its inline script removes every
 `graphersal.playground.*` key from `localStorage` (and `sessionStorage`) **except**
-`graphersal.playground.history`, deletes Cache Storage entries and IndexedDB databases named
+`graphersal.playground.history` (served by a multi-database server, every mount's keys
+`graphersal.playground.@<mount>#<key>` go too, each mount's `...#history` is kept), deletes Cache Storage entries and IndexedDB databases named
 `graphersal*` (the playground uses none today), writes `lastGraph = "modern"` and redirects to
 `<root>#/play`, which rebuilds the Modern sample graph. It shows what it removed and a fallback link
 in case the redirect is blocked. The start page, the Settings and the Help dialog point to it.

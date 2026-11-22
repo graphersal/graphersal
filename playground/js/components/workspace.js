@@ -19,6 +19,7 @@ import { reactive, ref, computed, watch, nextTick, onMounted, onBeforeUnmount } 
 import { state, reveal, cycleTheme, saveGraph, saveCurrentSnapshot, registerSnapshotChoice, saveSchema, saveToSource, isServerMode, can, onWorkspaceTab, backToLiveGraph, runStoreTask, toast, refreshSavedQueries, refreshCompressions, refreshIndexes, registerShareDialog, openShareDialog, openOptimize } from '../store.js';
 import { viewBanner, backupBanner } from '../store-model.js';
 import { mcpBadgeTitle } from '../change-feed.js';
+import { databaseName, rootHref, serverReadOnlyReason } from '../server-mode.js';
 import { navigate, navigateTab, hashOf } from '../router.js';
 import { storage, debounce, splitGraphName } from '../util.js';
 import { formatCount } from '../statistics.js';
@@ -332,6 +333,12 @@ export const Workspace = {
       schemaRef: panelRefs.schema, profileRef: panelRefs.profile,
       toggleCollapse, hide, show, toggleVisible, resetLayout, showAll, cycleTheme, maximized, isShown, isCollapsed, toggleMaximize, saveGraph, saveSchema, saveToSource,
       serverMode: computed(isServerMode),
+      // Served under a mount of a multi-database server: its database name (js/server-mode.js),
+      // the link back to the server's landing view (when it announces `admin`) and the read-only
+      // flag, which follows the change feed (`/api/changes` `readOnly`).
+      database: computed(() => databaseName(state.engineInfo)),
+      databaseHome: computed(() => (state.engineInfo && state.engineInfo.admin ? rootHref(state.engineInfo.mountPath) : '')),
+      serverReadOnly: computed(() => serverReadOnlyReason(state.engineInfo)),
       changeGraph: () => navigate('start'),
       location: window.location,
       openHelp: () => emit('help'),
@@ -356,10 +363,12 @@ export const Workspace = {
       <a v-if="ui.name === 'full'" class="brand" href="#/" title="Back to the start page">Graphersal <small class="hide-narrow">Playground</small></a>
       <a v-else class="brand" :href="hashOf(serverMode ? 'play' : 'start')" :title="serverMode ? ui.title : 'Back to the start page'">{{ ui.title }}</a>
       <span v-if="state.versionLabel" class="version-label hide-narrow" :title="state.versionLabel.title">{{ state.versionLabel.text }}</span>
+      <span v-if="database" class="badge accent db-badge" :title="'Database ' + database + ' (served under ' + state.engineInfo.mountPath + ')'"><a v-if="databaseHome" :href="databaseHome" title="All databases of this server">{{ database }}</a><template v-else>{{ database }}</template></span>
+      <span v-if="database && serverReadOnly" class="badge warn ro-badge" :title="'Read-only: ' + serverReadOnly + '; every write is refused'">read-only</span>
       <span v-if="can('devBadge')" class="badge danger dev-badge"
             :title="'Connected to the dev server (graphersal --server) on ' + location.host + ': DEV mode, unstable, local only, not for production. ' + (state.engineInfo.store ? 'Queries run in that process on the graph of the Store directory ' + state.engineInfo.store + ': every commit is persisted and survives a restart.' : 'Queries run in that process on its in-memory graph' + (state.engineInfo.source ? ' (from ' + state.engineInfo.source + ')' : '') + '; nothing is saved unless you save it.')">DEV SERVER · unstable</span>
       <button v-if="can('mcp') && state.engineInfo.mcp" type="button" class="badge accent mcp-badge" @click="openMcpStats"
-            :title="mcpBadgeTitle(state.engineInfo.mcp, location.host) + '. Click: MCP usage statistics.'">MCP<template v-if="state.engineInfo.mcp.readOnly"> · read-only</template></button>
+            :title="mcpBadgeTitle(state.engineInfo.mcp, location.host, location.protocol) + '. Click: MCP usage statistics.'">MCP<template v-if="state.engineInfo.mcp.readOnly"> · read-only</template></button>
       <template v-if="state.graph">
         <span class="graph-name" :title="state.graph.name"><span v-if="graphName.dir" class="graph-name-dir"><bdi>{{ graphName.dir }}</bdi></span><span class="graph-name-base">{{ graphName.base }}</span></span>
         <span class="badge" :title="state.graph.vertexCount + ' vertices, ' + state.graph.edgeCount + ' edges'">
