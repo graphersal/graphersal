@@ -39,6 +39,7 @@
 
 import { ref, computed, watch, onMounted, onBeforeUnmount, nextTick, markRaw, toRaw } from 'vue';
 import { state, saveSettings, newTab, reveal, isDark } from '../store.js';
+import { serverReadOnlyReason } from '../server-mode.js';
 import { labelPalette, labelSwatch, paletteLabels } from '../graph/palette.js';
 import { PanelFrame, PanelTabs, FitButton, ExportMenu } from './panel-frame.js';
 import { DropMenu } from './drop-menu.js';
@@ -686,7 +687,7 @@ export const GraphPanel = {
     onMounted(loadReadOnly);
     watch([() => state.graphVersion, () => state.storeVersion, () => state.graph && state.graph.name], loadReadOnly);
     const edit = computed(() => editModeState({
-      caps: caps.value, kind: kind.value, readOnly: readOnlyReason.value, running: state.running, held: !!held.value, on: editOn.value,
+      caps: caps.value, kind: kind.value, readOnly: serverReadOnlyReason(state.engineInfo) || readOnlyReason.value, running: state.running, held: !!held.value, on: editOn.value,
     }));
     const editTitle = computed(() => edit.value.reason || (editOn.value
       ? 'Leave edit mode'

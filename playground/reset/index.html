@@ -10,7 +10,9 @@
     The playground's escape hatch. This page deliberately loads NOTHING of the playground (no Vue,
     no WebAssembly, no CDN script): when a saved state makes the playground freeze (for example a
     huge graph drawing restored after every reload), this page still opens. It removes every
-    `graphersal.playground.*` localStorage key except the query history (`...history`), clears
+    `graphersal.playground.*` localStorage key except the query history (`...history`), of every
+    mount of a multi-database server too (keys `graphersal.playground.@<mount>#<key>`, js/util.js
+    `setStorageNamespace`; each mount's history is kept as well), clears
     session storage keys with that prefix and any Cache Storage / IndexedDB entry named
     `graphersal*` (the playground uses none today; this keeps the page correct if it ever does),
     then opens the playground with the Modern sample graph.
@@ -52,7 +54,8 @@
   (function () {
     'use strict';
     var PREFIX = 'graphersal.playground.';
-    var KEEP = [PREFIX + 'history']; // the query history survives a reset
+    // The query history survives a reset: the root's and every mount's (`@<mount>#history`).
+    var KEEP = /^graphersal\.playground\.(@[^#]*#)?history$/;
     var REDIRECT_MS = 900;
 
     var statusEl = document.getElementById('status');
@@ -66,14 +69,14 @@
       return window.location.origin + path;
     }
 
-    /** Removes the prefixed keys of one Storage (except KEEP); returns how many were removed. */
+    /** Removes the prefixed keys of one Storage (except KEEP), of every mount; returns how many were removed. */
     function clearStorage(store) {
       var removed = 0;
       try {
         var keys = [];
         for (var i = 0; i < store.length; i++) {
           var k = store.key(i);
-          if (k && k.indexOf(PREFIX) === 0 && KEEP.indexOf(k) < 0) keys.push(k);
+          if (k && k.indexOf(PREFIX) === 0 && !KEEP.test(k)) keys.push(k);
         }
         keys.forEach(function (k) { store.removeItem(k); removed++; });
       } catch (e) {

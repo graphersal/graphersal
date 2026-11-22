@@ -128,13 +128,14 @@ export class HttpEngine extends Engine {
   }
 
   /**
-   * Asks the serving origin whether it is a Graphersal dev server. Resolves to an HttpEngine,
-   * or null when it is not (a static file server answers 404 or HTML; the WebAssembly playground
-   * is used then).
+   * Fetches `GET api/info` of the serving origin once: `{info, fetch, headers}` (`info` the
+   * parsed JSON object, whatever server sent it), or null when there is no JSON answer (a static
+   * file server answers 404 or HTML). `detect` builds the engine from it; js/engine/index.js also
+   * looks for the landing view of a multi-database server (js/server-mode.js `isLanding`).
    * @param {{base?: URL|string, fetch?: Function, headers?: Object<string,string>}} [options]
-   * @returns {Promise<HttpEngine|null>}
+   * @returns {Promise<{info: Object, fetch: Function, headers: Object<string,string>}|null>}
    */
-  static async detect(options = {}) {
+  static async probe(options = {}) {
     const fetchImpl = options.fetch || (typeof fetch === 'function' ? fetch.bind(globalThis) : null);
     if (!fetchImpl) return null;
     const headers = options.headers !== undefined
@@ -145,11 +146,31 @@ export class HttpEngine extends Engine {
       const r = await fetchImpl(url, { cache: 'no-store', headers: { ...headers, Accept: 'application/json' } });
       if (!r.ok) return null;
       const info = JSON.parse(await r.text());
-      if (!info || info.server !== SERVER_ID) return null;
-      return new HttpEngine(info, { ...options, fetch: fetchImpl, headers });
+      if (!info || typeof info !== 'object') return null;
+      return { info, fetch: fetchImpl, headers };
     } catch (err) {
       return null;
     }
+  }
+
+  /**
+   * The engine of a `probe` answer when it is a Graphersal dev server (`server` = `SERVER_ID`),
+   * else null.
+   */
+  static fromProbe(probe, options = {}) {
+    if (!probe || probe.info.server !== SERVER_ID) return null;
+    return new HttpEngine(probe.info, { ...options, fetch: probe.fetch, headers: probe.headers });
+  }
+
+  /**
+   * Asks the serving origin whether it is a Graphersal dev server. Resolves to an HttpEngine,
+   * or null when it is not (a static file server answers 404 or HTML; the WebAssembly playground
+   * is used then).
+   * @param {{base?: URL|string, fetch?: Function, headers?: Object<string,string>}} [options]
+   * @returns {Promise<HttpEngine|null>}
+   */
+  static async detect(options = {}) {
+    return HttpEngine.fromProbe(await HttpEngine.probe(options), options);
   }
 
   /** The headers of a request: the host's, then `own`, then this page's client id. */
@@ -219,6 +240,13 @@ export class HttpEngine extends Engine {
       // 'allow-list' (`ContextBuilder::api_allow_list`): the server answers only `info`,
       // `changes` and `query` (runSavedQuery) of its selected saved queries; else 'full'.
       apiMode: i.apiMode === 'allow-list' ? 'allow-list' : 'full',
+      // The URL prefix a multi-database server serves this graph under (`/db/<name>`), or null
+      // at the root (the dev server): it namespaces the page's storage (js/util.js).
+      mountPath: typeof i.mountPath === 'string' && i.mountPath ? i.mountPath : null,
+      // The database name that server gives (optional; js/server-mode.js `databaseName`).
+      database: typeof i.database === 'string' && i.database ? i.database : null,
+      // The server announces its admin API (the landing view at its root; js/server-mode.js).
+      admin: i.admin === true,
     };
   }
 
