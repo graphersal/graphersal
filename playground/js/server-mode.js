@@ -16,7 +16,9 @@
 //   "base"?, "created"?, "aliasOf"?, "reason"?, "model"?}], "aliases": {alias: database},
 //   "problems": [text]}` with `state` one of `DATABASE_STATES`. Checked by `databaseRows`; a
 //   malformed entry is skipped and counted, never shown half. The optional byte counts
-//   `sizeBytes` (on disk) and `memoryBytes` (when loaded) are shown when a server sends them.
+//   `sizeBytes` (on disk) and `memoryBytes` (when loaded) are shown when a server sends them;
+//   `pooled` + `pooledBy` (a base held in the shared pool by its loaded layers) and
+//   `linkWarning` (model blobs copied, not hard-linked) are optional too.
 //   The admin actions are js/admin-api.js.
 
 import { normalizeMountPath } from './util.js';
@@ -89,7 +91,8 @@ export function databaseHref(name) {
 /**
  * The landing view's rows from a `GET /api/admin/databases` answer:
  * `{rows: [{name, href, state, stateText, tone, kind, role, readOnly, autoLoad, description,
- * base, created, aliasOf, reason, model, sizeBytes, memoryBytes}], skipped, aliases: [{alias,
+ * base, created, aliasOf, reason, model, sizeBytes, memoryBytes, pooled, pooledBy, linkWarning}],
+ * skipped, aliases: [{alias,
  * target}], problems: [text]}`, sorted by name; `skipped` counts the malformed entries. An unknown `state` is shown
  * as it is (a newer server). Throws an Error when the answer has no `databases` list.
  */
@@ -122,6 +125,9 @@ export function databaseRows(answer) {
       model: typeof d.model === 'string' ? d.model : '',
       sizeBytes: byteCount(d.sizeBytes),
       memoryBytes: byteCount(d.memoryBytes),
+      pooled: d.pooled === true,
+      pooledBy: Array.isArray(d.pooledBy) ? d.pooledBy.filter((x) => typeof x === 'string' && x) : [],
+      linkWarning: typeof d.linkWarning === 'string' ? d.linkWarning : '',
     });
   }
   rows.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));

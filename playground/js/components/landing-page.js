@@ -5,15 +5,23 @@
 // `db/<name>/`), the row actions (load with a poll until it ends, unload, clone, delete), create
 // (plain, base, or a layer over a base; optional description and schema) and the aliases (set,
 // flip, remove). Requests and rules: the pure model js/admin-api.js. Errors show the server's
-// `error` and `help` verbatim. The list reloads while a database is loading.
+// `error` and `help` verbatim. The list reloads while a database is loading. The transfers live in
+// sub-components: backups and restore (admin-backups.js), export download (admin-export.js),
+// import by upload or server path (admin-import.js) and the models section (admin-models.js).
+// A `needs-model` row carries the hint to add its model; a base held by loaded layers reads
+// "in pool"; a database holding copied model blobs shows the server's link warning.
 
 import { ref, reactive, computed, nextTick, onMounted, onBeforeUnmount } from 'vue';
 import { state } from '../store.js';
 import { fetchDatabases, anyLoading, databaseRows, LANDING_POLL_MS } from '../server-mode.js';
 import {
   createAdmin, createBody, nameProblem, rowActions, confirmText, outcomeText, loadAndWatch,
-  baseNames, realRows, bytesText,
+  baseNames, realRows, bytesText, transferActions, needsModelHint, poolText,
 } from '../admin-api.js';
+import { AdminBackups } from './admin-backups.js';
+import { AdminExport } from './admin-export.js';
+import { AdminImport } from './admin-import.js';
+import { AdminModels } from './admin-models.js';
 
 /** The server root: the directory of index.html. */
 const ROOT = new URL('../../', import.meta.url);
@@ -28,6 +36,7 @@ const emptyCreate = () => ({ name: '', kind: 'plain', role: 'normal', base: '', 
 const freshDialog = () => ({ mode: null, source: '', form: emptyCreate(), alias: '', target: '', existing: false, problems: [], error: null, busy: false });
 
 export const LandingPage = {
+  components: { AdminBackups, AdminExport, AdminImport, AdminModels },
   setup() {
     const rows = ref([]);
     const aliases = ref([]);
@@ -40,6 +49,10 @@ export const LandingPage = {
     const notice = ref(null);
     const dlg = ref(null);
     const dialog = reactive(freshDialog());
+    const backupsDlg = ref(null);
+    const exportDlg = ref(null);
+    const importDlg = ref(null);
+    const modelsVersion = ref(0);
     let timer = null;
     let alive = true;
 
@@ -63,6 +76,7 @@ export const LandingPage = {
         loading.value = false;
         loaded.value = true;
       }
+      if (!anyLoading(rows.value)) modelsVersion.value++;
       clearTimeout(timer);
       if (alive && anyLoading(rows.value)) timer = setTimeout(load, LANDING_POLL_MS);
     }
@@ -95,6 +109,12 @@ export const LandingPage = {
 
     const aliasTargets = computed(() => aliases.value.map((a) => a.target));
     const acts = (row) => rowActions(row, { busy: !!busy[row.name], aliasTargets: aliasTargets.value });
+    const more = (row) => transferActions(row, { busy: !!busy[row.name] });
+    /** A notice from a sub-component (backup, restore, export, import, models), then a reload. */
+    async function subDone(n) {
+      notice.value = n;
+      await load();
+    }
     const databaseNames = computed(() => realRows(rows.value).map((r) => r.name));
     const bases = computed(() => baseNames(rows.value));
     const showSize = computed(() => rows.value.some((r) => r.sizeBytes !== null));
@@ -193,6 +213,11 @@ export const LandingPage = {
 
     const info = (state.landing && state.landing.info) || {};
     return {
+      admin, headers, info, ROOT, backupsDlg, exportDlg, importDlg, modelsVersion, more, subDone, needsModelHint, poolText,
+      noticeClass: (n) => (n.tone === 'ok' ? 'info' : n.tone === 'warn' ? 'admin-warn-notice' : 'admin-error'),
+      openBackups: (name) => backupsDlg.value && backupsDlg.value.open(name),
+      openExport: (row) => exportDlg.value && exportDlg.value.open(row),
+      openImport: () => importDlg.value && importDlg.value.open(),
       rows, aliases, problems, skipped, error, loading, loaded, load, busy, notice, dlg, dialog,
       acts, bases, databaseNames, showSize, showMemory, bytesText,
       loadDb, unloadDb, deleteDb, setFlag, openCreate, openClone, openAlias, closeDialog, submitDialog, removeAlias,
@@ -218,9 +243,11 @@ export const LandingPage = {
       <div class="landing-head">
         <h1>Databases</h1>
         <span class="spacer"></span>
+        <button class="btn" type="button" @click="openBackups('')" :disabled="!loaded || !!error" title="The backups of any database, also of a deleted one">Backups…</button>
+        <button class="btn" type="button" @click="openImport" :disabled="!loaded || !!error">Import…</button>
         <button class="btn primary" type="button" @click="openCreate" :disabled="!loaded || !!error">New database…</button>
       </div>
-      <div v-if="notice" class="notice admin-notice" :class="notice.tone === 'ok' ? 'info' : 'admin-error'" :role="notice.tone === 'ok' ? 'status' : 'alert'">
+      <div v-if="notice" class="notice admin-notice" :class="noticeClass(notice)" :role="notice.tone === 'ok' ? 'status' : 'alert'">
         <div class="admin-notice-text"><span>{{ notice.text }}</span>
           <p v-if="notice.help" class="admin-help">{{ notice.help }}</p></div>
         <button type="button" class="icon-btn" @click="notice = null" aria-label="Dismiss">×</button>
@@ -247,9 +274,11 @@ export const LandingPage = {
             <td><a :href="href(row)" class="mono">{{ row.name }}</a>
               <span v-if="row.aliasOf" class="muted"> → {{ row.aliasOf }}</span>
               <div v-if="row.description" class="muted landing-sub">{{ row.description }}</div></td>
-            <td><span class="badge" :class="row.tone" :title="row.reason || row.stateText">{{ busy[row.name] === 'unload' ? 'unloading…' : row.stateText }}</span>
+            <td><span class="badge" :class="row.pooled && row.state !== 'loaded' ? 'accent' : row.tone" :title="row.reason || poolText(row)">{{ busy[row.name] === 'unload' ? 'unloading…' : poolText(row) }}</span>
               <div v-if="row.reason" class="muted landing-sub">{{ row.reason }}</div>
-              <div v-if="row.model" class="muted landing-sub mono">{{ row.model }}</div></td>
+              <div v-if="row.model" class="muted landing-sub mono">{{ row.model }}</div>
+              <div v-if="needsModelHint(row)" class="landing-sub admin-hint" :title="needsModelHint(row)">Add the model under Models below.</div>
+              <div v-if="row.linkWarning" class="landing-sub admin-warn" :title="row.linkWarning">{{ row.linkWarning }}</div></td>
             <td>{{ kindText(row) }}<div v-if="row.base" class="muted landing-sub">over {{ row.base }}</div></td>
             <td><input type="checkbox" :checked="row.readOnly" :disabled="!acts(row).readOnly.enabled" :title="acts(row).readOnly.title"
                        :aria-label="'Read-only: ' + row.name" @change="setFlag(row, 'readOnly', $event)"></td>
@@ -262,6 +291,8 @@ export const LandingPage = {
                 <button v-if="row.state === 'loaded'" type="button" class="btn small" :disabled="!acts(row).unload.enabled" :title="acts(row).unload.title" @click="unloadDb(row)">Unload…</button>
                 <button v-else type="button" class="btn small" :disabled="!acts(row).load.enabled" :title="acts(row).load.title" @click="loadDb(row)">{{ busy[row.name] === 'load' || row.state === 'loading' ? 'Loading…' : 'Load' }}</button>
                 <button type="button" class="btn small" :disabled="!acts(row).clone.enabled" :title="acts(row).clone.title" @click="openClone(row)">Clone…</button>
+                <button type="button" class="btn small" :disabled="!more(row).backups.enabled" :title="more(row).backups.title" @click="openBackups(row.name)">Backups…</button>
+                <button type="button" class="btn small" :disabled="!more(row).export.enabled" :title="more(row).export.title" @click="openExport(row)">Export…</button>
                 <button type="button" class="btn small danger" :disabled="!acts(row).delete.enabled" :title="acts(row).delete.title" @click="deleteDb(row)">Delete…</button>
               </template>
             </td>
@@ -292,7 +323,13 @@ export const LandingPage = {
         </tbody>
       </table>
       </div>
+
+      <admin-models :admin="admin" :version="modelsVersion" @done="subDone"></admin-models>
     </div>
+
+    <admin-backups ref="backupsDlg" :admin="admin" :rows="rows" @done="subDone"></admin-backups>
+    <admin-export ref="exportDlg" :base="ROOT" :headers="headers" @done="subDone"></admin-export>
+    <admin-import ref="importDlg" :admin="admin" :base="ROOT" :headers="headers" :info="info" :bases="bases" @done="subDone"></admin-import>
 
     <dialog ref="dlg" class="store-dialog admin-dialog" aria-labelledby="admin-dialog-title" @cancel.prevent="closeDialog" @click.self="closeDialog">
       <form v-if="dialog.mode" @submit.prevent="submitDialog">
