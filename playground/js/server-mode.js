@@ -12,11 +12,15 @@
 //   true}` without `mountPath`: the page shows the landing view (`isLanding`) and creates no
 //   engine. `admin` absent or not `true`: the page is the ordinary playground.
 // - `GET api/admin/databases` (only read when `isLanding`):
-//   `{"databases": [{"name", "state", "kind", "readOnly", "description", "aliasOf"?}]}` with
-//   `state` one of `DATABASE_STATES` (`failed` may carry `"reason"`). Checked by
-//   `databaseRows`; a malformed entry is skipped and counted, never shown half.
+//   `{"databases": [{"name", "state", "kind", "role", "readOnly", "autoLoad", "description",
+//   "base"?, "created"?, "aliasOf"?, "reason"?, "model"?}], "aliases": {alias: database},
+//   "problems": [text]}` with `state` one of `DATABASE_STATES`. Checked by `databaseRows`; a
+//   malformed entry is skipped and counted, never shown half. The optional byte counts
+//   `sizeBytes` (on disk) and `memoryBytes` (when loaded) are shown when a server sends them.
+//   The admin actions are js/admin-api.js.
 
 import { normalizeMountPath } from './util.js';
+import { aliasRows } from './admin-api.js';
 
 /** The database states of a multi-database server, in the words the landing view shows. */
 export const DATABASE_STATES = Object.freeze({
@@ -84,8 +88,9 @@ export function databaseHref(name) {
 
 /**
  * The landing view's rows from a `GET /api/admin/databases` answer:
- * `{rows: [{name, href, state, stateText, tone, kind, readOnly, description, aliasOf, reason}],
- * skipped}`, sorted by name; `skipped` counts the malformed entries. An unknown `state` is shown
+ * `{rows: [{name, href, state, stateText, tone, kind, role, readOnly, autoLoad, description,
+ * base, created, aliasOf, reason, model, sizeBytes, memoryBytes}], skipped, aliases: [{alias,
+ * target}], problems: [text]}`, sorted by name; `skipped` counts the malformed entries. An unknown `state` is shown
  * as it is (a newer server). Throws an Error when the answer has no `databases` list.
  */
 export function databaseRows(answer) {
@@ -106,14 +111,26 @@ export function databaseRows(answer) {
       stateText: Object.prototype.hasOwnProperty.call(DATABASE_STATES, d.state) ? DATABASE_STATES[d.state] : d.state,
       tone: Object.prototype.hasOwnProperty.call(STATE_TONES, d.state) ? STATE_TONES[d.state] : '',
       kind: typeof d.kind === 'string' ? d.kind : '',
+      role: typeof d.role === 'string' ? d.role : '',
       readOnly: d.readOnly === true,
+      autoLoad: d.autoLoad === true,
       description: typeof d.description === 'string' ? d.description : '',
+      base: typeof d.base === 'string' && d.base ? d.base : null,
+      created: typeof d.created === 'string' ? d.created : '',
       aliasOf: typeof d.aliasOf === 'string' && d.aliasOf ? d.aliasOf : null,
       reason: typeof d.reason === 'string' ? d.reason : '',
+      model: typeof d.model === 'string' ? d.model : '',
+      sizeBytes: byteCount(d.sizeBytes),
+      memoryBytes: byteCount(d.memoryBytes),
     });
   }
   rows.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
-  return { rows, skipped };
+  const problems = Array.isArray(answer.problems) ? answer.problems.filter((p) => typeof p === 'string' && p) : [];
+  return { rows, skipped, aliases: aliasRows(answer), problems };
+}
+
+function byteCount(n) {
+  return typeof n === 'number' && Number.isFinite(n) && n >= 0 ? n : null;
 }
 
 /** Whether the list should be reloaded soon (a database is loading). */
@@ -123,7 +140,8 @@ export function anyLoading(rows) {
 
 /**
  * Fetches the database list: `GET <base>api/admin/databases` with the host's headers; resolves
- * to `databaseRows`' answer, rejects with the server's error text.
+ * to `databaseRows`' answer, rejects with the server's error text (an Error whose `help` is the
+ * server's `help`, when it sent one).
  * @param {{base: URL|string, fetch: Function, headers?: Object<string,string>}} options
  */
 export async function fetchDatabases({ base, fetch, headers = {} }) {
@@ -138,7 +156,11 @@ export async function fetchDatabases({ base, fetch, headers = {} }) {
   } catch (e) {
     throw new Error(`The server sent no JSON (HTTP ${r.status})`);
   }
-  if (!r.ok) throw new Error((data && data.error) || `HTTP ${r.status}`);
+  if (!r.ok) {
+    const err = new Error((data && data.error) || `HTTP ${r.status}`);
+    err.help = data && typeof data.help === 'string' ? data.help : '';
+    throw err;
+  }
   return databaseRows(data);
 }
 
