@@ -7238,8 +7238,20 @@ fn store_info_names_the_base_of_a_layer_store() {
     let d = dir.to_str().unwrap();
     let res = run(&["store", "info", d], "");
     assert_eq!(res.code, 0, "{}", res.stderr);
-    let expected = format!("layer       over the base {}", base.base_ref().unwrap());
+    // S3.5: the base is listed once, among the parameters fixed at creation (no top line).
+    let expected = format!("  base          {}", base.base_ref().unwrap());
     assert!(res.stdout.contains(&expected), "{}", res.stdout);
+    assert!(
+        !res.stdout.contains("layer       over the base"),
+        "{}",
+        res.stdout
+    );
+    assert!(
+        res.stdout
+            .contains(&format!("graphersal --graph <BASE> --layer-store {d}")),
+        "{}",
+        res.stdout
+    );
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -7302,4 +7314,589 @@ fn store_info_lists_the_base_of_a_layer_store_as_fixed_at_creation() {
     assert_eq!(res.code, 0, "{}{}", res.stdout, res.stderr);
     let _ = std::fs::remove_dir_all(&dir);
     let _ = std::fs::remove_dir_all(&backup);
+}
+
+/// A base Store made from the modern sample in `dir/base` (`store create --from modern`).
+fn layer_test_base(dir: &std::path::Path) -> PathBuf {
+    let base = dir.join("base");
+    let res = run(
+        &[
+            "store",
+            "create",
+            base.to_str().unwrap(),
+            "--from",
+            "modern",
+        ],
+        "",
+    );
+    assert_eq!(res.code, 0, "{}", res.stderr);
+    base
+}
+
+/// Runs `script` on the layer store `layer` over `base` (`--layer-store`); asserts exit 0 and
+/// answers stdout trimmed.
+fn on_layer_store(base: &std::path::Path, layer: &std::path::Path, script: &str) -> String {
+    let res = run(
+        &[
+            "--graph",
+            base.to_str().unwrap(),
+            "--layer-store",
+            layer.to_str().unwrap(),
+            "-e",
+            script,
+        ],
+        "",
+    );
+    assert_eq!(res.code, 0, "{}", res.stderr);
+    res.stdout.trim().to_string()
+}
+
+/// S3.5: `--layer-store` with `--create-store` creates a layer store over a Store base, the
+/// commits are durable (a new process sees them, as layer elements), the base is never
+/// written, `--read-only` loads it without writing, and the layer store alone is refused.
+#[test]
+fn layer_store_keeps_the_layer_durably_over_a_store_base() {
+    let dir = temp_path("layer_store_durable");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let base = layer_test_base(&dir);
+    let layer = dir.join("layer");
+    let base_before = tree_bytes(&base);
+    let (b, l) = (base.to_str().unwrap(), layer.to_str().unwrap());
+
+    let res = run(
+        &[
+            "--graph",
+            b,
+            "--layer-store",
+            l,
+            "--create-store",
+            "-e",
+            r#"g.add_v("person").property("name", "zed").iterate(); g.v().count().next()"#,
+        ],
+        "",
+    );
+    assert_eq!(res.code, 0, "{}", res.stderr);
+    assert_eq!(res.stdout.trim(), "7");
+    assert!(
+        res.stderr.contains("created the layer store") && res.stderr.contains("base identity"),
+        "{}",
+        res.stderr
+    );
+    // A new process: the commit is there, a layer element; the base's are base elements.
+    assert_eq!(
+        on_layer_store(
+            &base,
+            &layer,
+            r#"[g.v().has("name", "zed").layer().next(), g.v().has_layer("base").count().next()]"#
+        )
+        .split_whitespace()
+        .collect::<String>(),
+        r#""added"6"#
+    );
+    assert_eq!(tree_bytes(&base), base_before, "the base store was written");
+    let res = run(&["--graph", b, "-e", "g.v().count().next()"], "");
+    assert_eq!(res.stdout.trim(), "6", "{}", res.stderr);
+    // A second --create-store opens the existing layer store (as for a --graph store).
+    let res = run(
+        &[
+            "--graph",
+            b,
+            "--layer-store",
+            l,
+            "--create-store",
+            "-e",
+            "g.v().count().next()",
+        ],
+        "",
+    );
+    assert_eq!((res.code, res.stdout.trim()), (0, "7"), "{}", res.stderr);
+
+    // Read-only: reads the layer, refuses writes, writes nothing.
+    let layer_before = tree_bytes(&layer);
+    let res = run(
+        &[
+            "--graph",
+            b,
+            "--layer-store",
+            l,
+            "--read-only",
+            "-e",
+            "g.v().count().next()",
+            "-e",
+            r#"g.add_v("x").iterate()"#,
+        ],
+        "",
+    );
+    assert_eq!(res.code, 1, "{}", res.stderr);
+    assert_eq!(res.stdout.trim(), "7");
+    assert!(res.stderr.contains("served read-only"), "{}", res.stderr);
+    assert_eq!(tree_bytes(&layer), layer_before, "a read-only open wrote");
+
+    // The layer store without its base: the LayerStore refusal (exit 1).
+    let res = run(&["--graph", l, "-e", "1"], "");
+    assert_eq!(res.code, 1, "{}", res.stderr);
+    assert!(res.stderr.contains("layer store"), "{}", res.stderr);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// S3.5: a `.gsnap` base carries a layer store too (its identity is the snapshot's); another
+/// base (an export of the same data, a new lineage) is refused with `LayerBaseMismatch`'s text
+/// (exit 1, a store that cannot be opened), and so is a plain store given as the layer store.
+#[test]
+fn layer_store_over_a_gsnap_base_and_a_mismatched_base() {
+    let dir = temp_path("layer_store_gsnap");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let gsnap = dir.join("base.gsnap");
+    let other = dir.join("other.gsnap");
+    // Two processes: each load of the sample gets a lineage id of its own.
+    for file in [&gsnap, &other] {
+        let res = run(
+            &[
+                "-e",
+                &format!(r#"g.export_snapshot("{}")"#, script_path(file)),
+            ],
+            "",
+        );
+        assert_eq!(res.code, 0, "{}", res.stderr);
+    }
+    let layer = dir.join("layer.gstore");
+    let (g, l) = (gsnap.to_str().unwrap(), layer.to_str().unwrap());
+    let snapshot_before = std::fs::read(&gsnap).unwrap();
+    let res = run(
+        &[
+            "--graph",
+            g,
+            "--layer-store",
+            l,
+            "--create-store",
+            "-e",
+            r#"g.v().has("name", "josh").drop().iterate()"#,
+        ],
+        "",
+    );
+    assert_eq!(res.code, 0, "{}", res.stderr);
+    assert_eq!(on_layer_store(&gsnap, &layer, "g.v().count().next()"), "5");
+    assert_eq!(std::fs::read(&gsnap).unwrap(), snapshot_before);
+
+    let res = run(
+        &[
+            "--graph",
+            other.to_str().unwrap(),
+            "--layer-store",
+            l,
+            "-e",
+            "1",
+        ],
+        "",
+    );
+    assert_eq!(res.code, 1, "{}", res.stderr);
+    assert!(
+        res.stderr.contains("This layer was built over base") && res.stdout.is_empty(),
+        "{}",
+        res.stderr
+    );
+    // A plain store given as the layer store.
+    let plain = layer_test_base(&dir);
+    let res = run(
+        &[
+            "--graph",
+            g,
+            "--layer-store",
+            plain.to_str().unwrap(),
+            "-e",
+            "1",
+        ],
+        "",
+    );
+    assert_eq!(res.code, 1, "{}", res.stderr);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// S3.5: what `--layer-store` refuses: a base without a lasting identity (a sample, a GraphSON
+/// file: exit 2, naming how to make it a Store), a missing layer store without --create-store
+/// (exit 1, naming --create-store), --read-only with --create-store (exit 2); --layer alone
+/// with --create-store points to --layer-store; --layer with --layer-store is the same layer;
+/// the args file knows the key.
+#[test]
+fn layer_store_refuses_contradictions() {
+    let dir = temp_path("layer_store_refusals");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let base = layer_test_base(&dir);
+    let json = dir.join("modern.json");
+    let res = run(
+        &[
+            "-e",
+            &format!(r#"g.export_graphson("{}")"#, script_path(&json)),
+        ],
+        "",
+    );
+    assert_eq!(res.code, 0, "{}", res.stderr);
+    let layer = dir.join("layer");
+    let (b, l) = (base.to_str().unwrap(), layer.to_str().unwrap());
+
+    for source in ["modern", json.to_str().unwrap()] {
+        let res = run(
+            &[
+                "--graph",
+                source,
+                "--layer-store",
+                l,
+                "--create-store",
+                "-e",
+                "1",
+            ],
+            "",
+        );
+        assert_eq!(res.code, 2, "{source}: {}", res.stderr);
+        assert!(
+            res.stderr.contains("lasting identity")
+                && res
+                    .stderr
+                    .contains("graphersal store create <base_dir> --from <graph>"),
+            "{source}: {}",
+            res.stderr
+        );
+        assert!(!layer.exists(), "{source}: nothing created");
+    }
+    let res = run(&["--graph", b, "--layer-store", l, "-e", "1"], "");
+    assert_eq!(res.code, 1, "{}", res.stderr);
+    assert!(
+        res.stderr.contains("is not a Graphersal store") && res.stderr.contains("--create-store"),
+        "{}",
+        res.stderr
+    );
+    let res = run(
+        &[
+            "--graph",
+            b,
+            "--layer-store",
+            l,
+            "--create-store",
+            "--read-only",
+            "-e",
+            "1",
+        ],
+        "",
+    );
+    assert_eq!(res.code, 2, "{}", res.stderr);
+    assert!(!layer.exists());
+    let res = run(&["--graph", b, "--layer", "--create-store", "-e", "1"], "");
+    assert_eq!(res.code, 2, "{}", res.stderr);
+    assert!(
+        res.stderr.contains("--layer-store <dir> --create-store"),
+        "{}",
+        res.stderr
+    );
+
+    // --layer with --layer-store: the same durable layer; the args-file key.
+    let res = run(
+        &[
+            "--graph",
+            b,
+            "--layer",
+            "--layer-store",
+            l,
+            "--create-store",
+            "-e",
+            r#"g.add_v("t").iterate()"#,
+        ],
+        "",
+    );
+    assert_eq!(res.code, 0, "{}", res.stderr);
+    let args = dir.join("args.json");
+    std::fs::write(
+        &args,
+        serde_json::json!({"graph": b, "layer-store": "layer"}).to_string(),
+    )
+    .unwrap();
+    let res = run(
+        &[
+            "--args-file",
+            args.to_str().unwrap(),
+            "-e",
+            r#"g.v().has_label("t").count().next()"#,
+        ],
+        "",
+    );
+    assert_eq!((res.code, res.stdout.trim()), (0, "1"), "{}", res.stderr);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// S3.5: the store commands that load a layer store's graph take `--base`: verify, checkpoint,
+/// fork, rollback, the attic (restore, fork), materialize (a standalone `.gsnap` readable as a
+/// plain graph); without the base a refusal says how to give it. The model commands and the
+/// repair refuse a layer store with the `LayerStore` reasons.
+#[test]
+fn store_commands_take_the_base_of_a_layer_store() {
+    let dir = temp_path("layer_store_commands");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let base = layer_test_base(&dir);
+    let layer = dir.join("layer");
+    let (b, l) = (base.to_str().unwrap(), layer.to_str().unwrap());
+    let res = run(
+        &[
+            "--graph",
+            b,
+            "--layer-store",
+            l,
+            "--create-store",
+            "-e",
+            r#"g.add_v("t").iterate()"#,
+        ],
+        "",
+    );
+    assert_eq!(res.code, 0, "{}", res.stderr);
+    let store = |args: &[&str]| run(&[&["store"], args].concat(), "");
+
+    // verify: without the base a structural check and a hint, with it a full one.
+    let res = store(&["verify", l]);
+    assert_eq!(res.code, 0, "{}", res.stderr);
+    assert!(res.stdout.contains("--base <BASE>"), "{}", res.stdout);
+    let res = store(&["verify", l, "--base", b]);
+    assert_eq!(res.code, 0, "{}", res.stderr);
+    assert!(res.stdout.contains("ok: no damage found"), "{}", res.stdout);
+    // A base that is not a store or a .gsnap: a usage error.
+    let res = store(&["verify", l, "--base", "modern"]);
+    assert_eq!(res.code, 2, "{}", res.stderr);
+
+    // checkpoint
+    let res = store(&["checkpoint", l]);
+    assert_eq!(res.code, 1, "{}", res.stderr);
+    assert!(
+        res.stderr.contains("layer store") && res.stderr.contains("--base <SOURCE>"),
+        "{}",
+        res.stderr
+    );
+    let res = store(&["checkpoint", l, "--base", b]);
+    assert_eq!(res.code, 0, "{}", res.stderr);
+    assert!(
+        res.stdout.contains("Snapshot at commit 1"),
+        "{}",
+        res.stdout
+    );
+
+    // fork
+    let fork = dir.join("fork");
+    let f = fork.to_str().unwrap();
+    let res = store(&["fork", l, f]);
+    assert_eq!(res.code, 1, "{}", res.stderr);
+    assert!(!fork.exists());
+    let res = store(&["fork", l, f, "--base", b]);
+    assert_eq!(res.code, 0, "{}", res.stderr);
+    assert!(
+        res.stdout
+            .contains(&format!("graphersal --graph {b} --layer-store {f}")),
+        "{}",
+        res.stdout
+    );
+    assert_eq!(
+        on_layer_store(&base, &fork, r#"g.v().has_label("t").count().next()"#),
+        "1"
+    );
+
+    // rollback and the attic
+    let res = store(&["rollback", l, "--at-commit", "0"]);
+    assert_eq!(res.code, 1, "{}", res.stderr);
+    let res = store(&["rollback", l, "--at-commit", "0", "--base", b]);
+    assert_eq!(res.code, 0, "{}", res.stderr);
+    assert!(
+        res.stdout.contains(&format!("--base {b}")),
+        "{}",
+        res.stdout
+    );
+    assert_eq!(on_layer_store(&base, &layer, "g.v().count().next()"), "6");
+    let res = store(&["attic", l]);
+    assert_eq!(res.code, 0, "{}", res.stderr);
+    let id = res
+        .stdout
+        .lines()
+        .find_map(|line| line.trim().strip_prefix("id:"))
+        .map(|id| id.trim().to_string())
+        .unwrap_or_else(|| panic!("{}", res.stdout));
+    let res = store(&["attic", l, "changes", &id]);
+    assert_eq!(res.code, 0, "{}", res.stderr);
+    let attic_fork = dir.join("attic-fork");
+    let res = store(&[
+        "attic",
+        l,
+        "fork",
+        &id,
+        attic_fork.to_str().unwrap(),
+        "--base",
+        b,
+    ]);
+    assert_eq!(res.code, 0, "{}", res.stderr);
+    assert_eq!(
+        on_layer_store(&base, &attic_fork, r#"g.v().has_label("t").count().next()"#),
+        "1"
+    );
+    let res = store(&["attic", l, "restore", &id]);
+    assert_eq!(res.code, 1, "{}", res.stderr);
+    let res = store(&["attic", l, "restore", &id, "--base", b]);
+    assert_eq!(res.code, 0, "{}", res.stderr);
+    assert_eq!(on_layer_store(&base, &layer, "g.v().count().next()"), "7");
+
+    // materialize: a standalone .gsnap of the whole visible graph.
+    let gsnap = dir.join("whole.gsnap");
+    let g = gsnap.to_str().unwrap();
+    let res = store(&["materialize", l, g]);
+    assert_eq!(res.code, 2, "{}", res.stderr);
+    let res = store(&["materialize", l, g, "--base", b]);
+    assert_eq!(res.code, 0, "{}", res.stderr);
+    assert!(res.stdout.contains("vertices: 7"), "{}", res.stdout);
+    let res = run(
+        &[
+            "--graph",
+            g,
+            "-e",
+            r#"[g.v().count().next(), g.v().has_layer("base").count().next()]"#,
+        ],
+        "",
+    );
+    assert_eq!(res.code, 0, "{}", res.stderr);
+    assert_eq!(res.stdout.split_whitespace().collect::<String>(), "77");
+    let plain = dir.join("plain");
+    let res = store(&["create", plain.to_str().unwrap(), "--from", g]);
+    assert_eq!(res.code, 0, "{}", res.stderr);
+    let res = store(&["info", plain.to_str().unwrap()]);
+    assert!(!res.stdout.contains("  base "), "{}", res.stdout);
+    // At a target, and refused for a plain store.
+    let res = store(&[
+        "materialize",
+        l,
+        dir.join("at0.gsnap").to_str().unwrap(),
+        "--base",
+        b,
+        "--at-commit",
+        "0",
+    ]);
+    assert_eq!(res.code, 0, "{}", res.stderr);
+    assert!(res.stdout.contains("vertices: 6"), "{}", res.stdout);
+    let res = store(&[
+        "materialize",
+        b,
+        dir.join("p.gsnap").to_str().unwrap(),
+        "--base",
+        b,
+    ]);
+    assert_eq!(res.code, 1, "{}", res.stderr);
+    assert!(
+        res.stderr.contains("is not a layer store"),
+        "{}",
+        res.stderr
+    );
+
+    // The model commands and the repair: the LayerStore reasons.
+    let res = store(&["models", l]);
+    assert_eq!(res.code, 0, "{}", res.stderr);
+    assert!(
+        res.stdout.contains("keeps no embedding model"),
+        "{}",
+        res.stdout
+    );
+    for args in [
+        vec!["models", "remove", l, "acme/tiny"],
+        vec!["models", "default", l, "--none"],
+    ] {
+        let res = store(&args);
+        assert_eq!(res.code, 1, "{args:?}: {}", res.stderr);
+        assert!(
+            res.stderr.contains("keeps no embedding model"),
+            "{args:?}: {}",
+            res.stderr
+        );
+    }
+    let res = store(&["repair", l, "--to", dir.join("repaired").to_str().unwrap()]);
+    assert_eq!(res.code, 1, "{}", res.stderr);
+    assert!(res.stderr.contains("is not repaired"), "{}", res.stderr);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// S3.5: the file-level store commands work on a layer store without a base, and each copy
+/// opens over the same base: convert (into a single file), upgrade (already current), backup
+/// and restore (directory, in place), ZIP backup and restore into a new directory.
+#[test]
+fn file_level_store_commands_work_on_a_layer_store() {
+    let dir = temp_path("layer_store_files");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let base = layer_test_base(&dir);
+    let layer = dir.join("layer");
+    let (b, l) = (base.to_str().unwrap(), layer.to_str().unwrap());
+    let res = run(
+        &[
+            "--graph",
+            b,
+            "--layer-store",
+            l,
+            "--create-store",
+            "-e",
+            r#"g.add_v("t").iterate()"#,
+        ],
+        "",
+    );
+    assert_eq!(res.code, 0, "{}", res.stderr);
+    let store = |args: &[&str]| run(&[&["store"], args].concat(), "");
+    let count = r#"g.v().has_label("t").count().next()"#;
+
+    let single = dir.join("single.gstore");
+    let res = store(&["convert", l, single.to_str().unwrap()]);
+    assert_eq!(res.code, 0, "{}", res.stderr);
+    assert!(res.stdout.contains("--layer-store"), "{}", res.stdout);
+    assert_eq!(on_layer_store(&base, &single, count), "1");
+
+    let res = store(&["upgrade", l, "--in-place"]);
+    assert_eq!(res.code, 0, "{}", res.stderr);
+    assert!(res.stdout.contains("nothing to do"), "{}", res.stdout);
+
+    let backup = dir.join("backup");
+    let res = store(&["backup", l, backup.to_str().unwrap()]);
+    assert_eq!(res.code, 0, "{}", res.stderr);
+    assert!(
+        res.stderr.contains("backup of a layer store"),
+        "{}",
+        res.stderr
+    );
+    assert!(res.stdout.contains("--layer-store"), "{}", res.stdout);
+    // The backup opens read-only over the base, then becomes the live layer store.
+    let res = run(
+        &[
+            "--graph",
+            b,
+            "--layer-store",
+            backup.to_str().unwrap(),
+            "-e",
+            count,
+        ],
+        "",
+    );
+    assert_eq!((res.code, res.stdout.trim()), (0, "1"), "{}", res.stderr);
+    assert!(
+        res.stderr.contains("BACKUP of a layer store"),
+        "{}",
+        res.stderr
+    );
+    let res = store(&["restore", backup.to_str().unwrap()]);
+    assert_eq!(res.code, 0, "{}", res.stderr);
+    assert_eq!(
+        on_layer_store(
+            &base,
+            &backup,
+            r#"g.add_v("t").iterate(); g.v().has_label("t").count().next()"#
+        ),
+        "2"
+    );
+
+    let zip = dir.join("backup.zip");
+    let res = store(&["backup", l, zip.to_str().unwrap(), "--zip"]);
+    assert_eq!(res.code, 0, "{}", res.stderr);
+    let unzipped = dir.join("unzipped");
+    let res = store(&["restore", zip.to_str().unwrap(), unzipped.to_str().unwrap()]);
+    assert_eq!(res.code, 0, "{}", res.stderr);
+    assert_eq!(on_layer_store(&base, &unzipped, count), "1");
+    let _ = std::fs::remove_dir_all(&dir);
 }

@@ -623,13 +623,6 @@ pub(crate) fn decode_graph_copies(dir: &DirPath) -> Result<(Decoded, Decoded), P
     Ok((main, copy))
 }
 
-/// Refuses a store of an older format ([`PersistError::OlderFormat`]) before an operation that
-/// does not read `GRAPH` itself (listing snapshots, marks, attic entries, an export); anything
-/// else about `GRAPH` is left to that operation.
-pub(crate) fn refuse_older_format(dir: &DirPath) -> Result<(), PersistError> {
-    refuse_other_version(dir)
-}
-
 /// The refusal of a store whose `GRAPH` is of a newer store format version `found`.
 pub(crate) fn newer_store(dir: &DirPath, found: u32) -> PersistError {
     PersistError::UnsupportedVersion {
@@ -646,6 +639,9 @@ pub(crate) fn newer_store(dir: &DirPath, found: u32) -> PersistError {
 /// wrong with `GRAPH`, and a header that cannot be read (a read failure, a damaged or short
 /// header), is left to the operation, which reports it as before (damage reporting and
 /// maintenance mode are unchanged).
+/// (Every operation names its kind through [`refuse_other_version_as`] now; this plain form is
+/// the guard's reference, kept for the unit tests.)
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn refuse_other_version(dir: &DirPath) -> Result<(), PersistError> {
     refuse_other_version_as(dir, StoreKind::Plain)
 }

@@ -573,8 +573,10 @@ fn route(context: &Arc<Context>, request: &mut Request) -> Result<Response, Http
             let Some(path) = context.source.clone() else {
                 return Err(HttpError(
                     409,
-                    "the graph did not come from a file (--graph <file>): download it with Save graph"
-                        .into(),
+                    context.save_refusal.clone().unwrap_or_else(|| {
+                        "the graph did not come from a file (--graph <file>): download it with Save graph"
+                            .into()
+                    }),
                 ));
             };
             value(save_to_source(context, path)?)
