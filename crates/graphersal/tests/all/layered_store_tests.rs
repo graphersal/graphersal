@@ -1951,3 +1951,111 @@ fn rollback_of_a_layer_over_a_base_with_models() {
     );
     assert_eq!(mem_files(&closed), before);
 }
+
+/// S3.5: the model changes of an OPEN layer store (`import_model`, `set_default_model`,
+/// `remove_model`) refuse with `StoreFailure::LayerStore` before anything is read or written:
+/// no blob is left in the layer store's files, no commit, the base's models unchanged.
+#[test]
+fn model_changes_on_an_open_layer_store_are_refused_up_front() {
+    use graphersal::persist::{ImportModelOptions, ModelSource};
+
+    let temp = Temp::new("open-model-changes");
+    let base_dir = temp.join("base");
+    let base_graph = Arc::try_unwrap(base()).unwrap_or_else(|_| unreachable!());
+    let base_store = Store::create_with(&base_dir, base_graph, options()).unwrap();
+    base_store
+        .import_model(
+            ModelSource::Files(crate::model_fixture::tiny_model(1, "acme/tiny")),
+            ImportModelOptions::new(),
+        )
+        .unwrap();
+    base_store.close().unwrap();
+    let view = Store::open_read_only(&base_dir, RecoveryTarget::Latest).unwrap();
+    let base = LayerBase::from_graph(view.into_graph()).unwrap();
+    let base_ref = *base.base_ref().unwrap();
+
+    let dir = MemDir::new();
+    let store = LayerStore::create_layer(&dir, &base, options()).unwrap();
+    commit_units(&store, 0, 2);
+    let expected = state(&store.graph().read());
+    let seq = store.graph().read().last_commit_seq().unwrap();
+    let before = mem_files(&dir);
+
+    let refusals: Vec<(&str, Result<String, PersistError>)> = vec![
+        (
+            "import_model",
+            store
+                .import_model(
+                    ModelSource::Files(crate::model_fixture::tiny_model(2, "acme/other")),
+                    ImportModelOptions::new().with_default(true),
+                )
+                .map(|r| format!("{r:?}")),
+        ),
+        (
+            "set_default_model",
+            store
+                .set_default_model(Some("acme/tiny"))
+                .map(|r| format!("{r:?}")),
+        ),
+        (
+            "set_default_model(None)",
+            store.set_default_model(None).map(|r| format!("{r:?}")),
+        ),
+        (
+            "remove_model",
+            store.remove_model("acme/tiny").map(|r| format!("{r:?}")),
+        ),
+    ];
+    for (what, result) in refusals {
+        let text = result
+            .as_ref()
+            .err()
+            .map(ToString::to_string)
+            .unwrap_or_default();
+        assert_layer_store_refused(result, what);
+        assert!(
+            text.contains("keeps no embedding model") && text.contains(&base_ref.to_string()),
+            "{what}: the reason names the base and says why: {text}"
+        );
+        assert_eq!(mem_files(&dir), before, "{what}: nothing written");
+    }
+    assert_eq!(store.graph().read().last_commit_seq().unwrap(), seq);
+    assert_eq!(state(&store.graph().read()), expected);
+    store.close().unwrap();
+    let store = LayerStore::open_layer(&dir, &base, options()).unwrap();
+    assert_eq!(
+        state(&store.graph().read()),
+        expected,
+        "the reopen: no commit"
+    );
+    store.close().unwrap();
+}
+
+/// S3.5: the attic listings of a CLOSED layer store (`attic_list_dir`, `attic_changes_dir`) read
+/// its files and need no base, like the other listings (`snapshots_dir`, `marks_dir`).
+#[test]
+fn the_attic_listings_of_a_closed_layer_store_need_no_base() {
+    let base = layer_base();
+    let dir = MemDir::new();
+    let store = LayerStore::create_layer(&dir, &base, options()).unwrap();
+    commit_units(&store, 0, 2);
+    let report = store
+        .rollback_to(RecoveryTarget::CommitSeq(1), RollbackMode::Move)
+        .unwrap();
+    let entry = report.attic.clone().expect("an attic entry");
+    let open_changes: Vec<u64> = store
+        .attic_changes(&entry)
+        .unwrap()
+        .map(|c| c.unwrap().commit_seq())
+        .collect();
+    store.close().unwrap();
+    let listed = Store::attic_list_dir(&dir).unwrap();
+    assert_eq!(listed.len(), 1);
+    assert_eq!(listed[0].id, entry);
+    let closed_changes: Vec<u64> = Store::attic_changes_dir(&dir, &entry)
+        .unwrap()
+        .map(|c| c.unwrap().commit_seq())
+        .collect();
+    assert_eq!(closed_changes, open_changes);
+    assert!(!closed_changes.is_empty());
+}

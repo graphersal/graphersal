@@ -146,12 +146,98 @@ graphersal --graph modern --layer \
   serve the layer: `embed()`, text `nearest` and vector rules on the layer use them.
 - The REPL (`graphersal --layer`) and the dev server (`graphersal --graph <src> --layer
   --server`) run on the layer too. The server's start banner has a `layer` row; the playground
-  pages and the server's MCP endpoint query the layer. "Save to file" is refused: it would
-  write the layer's graph over the base's file.
-- The layer lives as long as the process: nothing is saved when it ends.
+  pages and the server's MCP endpoint query the layer. "Save to file" is refused (409, "the
+  graph is a layer kept in memory over its base"): it would write the layer's graph over the
+  base's file.
+- The layer lives as long as the process: nothing is saved when it ends. To keep it, use a
+  layer store (next section).
 - `--layer` is refused with `--create-store` (a layer never writes its base, so it cannot
-  create a store) and with `--read-only` (the layer is the part that takes the writes), with
-  exit code 2. A base the layer cannot carry yet (see below) is refused with exit code 2 too.
+  create a store; `--layer-store <dir> --create-store` keeps the layer in a new layer store)
+  and with `--read-only` (the layer is the part that takes the writes), with exit code 2. A
+  base the layer cannot carry yet (see below) is refused with exit code 2 too.
+
+## Keeping a layer durably: `--layer-store`
+
+`graphersal --graph <base> --layer-store <dir>` runs the session on the layer kept in the
+layer store `<dir>` over the base: every commit goes to the layer store's write-ahead log
+before the query answers, exactly as with a `--graph <store>`, and the base is never written.
+`--create-store` creates the layer store (with `--on-damage`, as for a plain store); later
+runs open it over the same base.
+
+```bash
+graphersal store create product --from modern          # the base: a Store
+graphersal --graph product --layer-store project --create-store \
+  -e 'g.add_v("person").property("name", "ada").iterate()'
+graphersal --graph product --layer-store project \
+  -e 'g.v().group_count().by(__.layer()).next()'
+```
+
+```text
+note: created the layer store project
+  base: product
+  base identity: graph 01a200ad-0cec-7d75-8f50-725adf107e99 at commit 0 (commit time 0)
+  damage policy: maintenance
+"added": 1
+"base": 6
+```
+
+- The base must keep its identity from one run to the next: a Store (opened read-only,
+  without its lock, so another process may have it open) or a packed snapshot (`.gsnap`). A
+  sample graph or a GraphSON/GraphML file gets a new identity at every load, so it is refused
+  (exit 2) with the commands that make it a Store first (`graphersal store create <base_dir>
+  --from <graph>`).
+- A layer store opens only over the base it was created over. Another base exits 1 with the
+  message naming both (`LayerBaseMismatch`); so does a plain store given as `--layer-store`.
+  `--graph <layer store>` alone is refused too: it names the base to give.
+- `--layer-store` implies `--layer`; both together are the same durable layer. `--read-only`
+  loads the layer store read-only (no lock, nothing written, every write refused); with
+  `--create-store` it is refused (exit 2). A backup of a layer store opens read-only over the
+  base the same way.
+- The REPL and the dev server (`--server`) run on it. The server commits to the layer store,
+  its start banner shows a Store section with the layer store's path, its base and its commit
+  position, and Ctrl+C closes it cleanly. "Save to file" answers 409 ("every commit is already
+  durable in it"); the server's Store panel serves plain stores only, so it is not offered for
+  a layer store: use `graphersal store ...` on it.
+
+### Store commands on a layer store
+
+The `graphersal store` commands that read or copy files work on a layer store without the
+base: `info` (its base is a row of the "fixed at creation" block), `list`, `marks`, `journal`,
+`attic` (the listing and `changes`), `backup` (it warns that the backup is useless without the
+base), `restore`, `export` (a layer snapshot), `convert` and `upgrade`. The commands that load
+the layer take `--base <SOURCE>`, the base it was created over (a store or a `.gsnap`):
+
+| Command | With `--base` |
+|---|---|
+| `store verify <dir> --base <src>` | also loads every snapshot over the base (without `--base`: every checksum, plus a note) |
+| `store checkpoint <dir> --base <src>` | encodes the layer over the base: a snapshot the size of its changes |
+| `store fork <dir> <new> [TARGET] --base <src>` | a new layer store over the same base |
+| `store rollback <dir> TARGET --base <src>` | rolls the layer back in place; the attic keeps the rest |
+| `store attic <dir> restore\|remove\|fork ... --base <src>` | as for a plain store |
+| `store materialize <dir> <file.gsnap> --base <src> [TARGET]` | the whole graph the layer shows, as a standalone packed snapshot |
+
+Without `--base` these commands are refused (exit 1) with the `LayerStore` reason and the
+command to run instead. `store materialize` writes the base's elements with the layer's
+changes applied, the layer's schema and catalog (format version 4, the base's embedding models
+it uses unless `--without-models`); the file needs no base, so any Graphersal reads it
+(`--graph whole.gsnap`, `store create <dir> --from whole.gsnap`):
+
+```bash
+graphersal store materialize project whole.gsnap --base product
+```
+
+```text
+Materialized the layer store project at commit 1 into whole.gsnap
+  vertices: 7
+  edges: 6
+  standalone: yes: the whole graph (base and layer), it needs no base
+  # open it in the REPL
+  graphersal --graph whole.gsnap
+```
+
+`store repair` refuses a layer store (a repair salvages whole graphs: restore a backup of it),
+and so do `store models remove|default` (a layer store keeps no embedding model; `store
+models <dir>` says its graph serves the base's).
 
 ## Rust
 
@@ -243,14 +329,16 @@ code written for layers already run.
 
 ## Limitations
 
-- **Rust only.** From Rust a layer can be saved as a layer snapshot (above) or kept in a
+- **Persistence.** From Rust a layer can be saved as a layer snapshot (above) or kept in a
   layer Store, which journals every commit and opens again only over the same base
-  (`graphersal store info` shows a layer store's base). The CLI's `--layer`, the dev server
-  and Python keep it in memory for now. A layer store is backed up, restored, verified and
+  (`graphersal store info` shows a layer store's base); the CLI and the dev server keep it
+  there with `--layer-store` (above). `--layer` and Python keep it in memory. A layer store
+  is backed up, restored, verified and
   exported like any store; every copy holds the layer only, so **a backup of a layer store is
   useless without its base** (the backup's report and `graphersal store backup` say so): keep
   the base, or export a standalone copy of the whole graph the layer shows
-  (`Store::export_materialized`, a plain `.gsnap` that any Graphersal reads). Forks, rollback,
+  (`Store::export_materialized`, `graphersal store materialize`: a plain `.gsnap` that any
+  Graphersal reads). Forks, rollback,
   the attic and conversion to another backend work on a layer store and keep it a layer over
   the same base. A damaged layer store is not repaired (restore a backup of it, or rebuild
   the layer), and the embedding models of a layer store are changed in its base.

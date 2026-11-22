@@ -11,7 +11,7 @@ run on a `TraversalGraph`. The base never changes: each layer stores only its ow
 > supported yet (see [Limitations](#limitations)).
 
 What a layer is for and how queries see it (`layer()`, `has_layer()`, `g.layer_diff()`, the
-CLI's `--layer`, Python) is on the user page [Layers](../users_guide/layered_graphs.md). This
+CLI's `--layer` and `--layer-store`, the `store` commands' `--base`, Python) is on the user page [Layers](../users_guide/layered_graphs.md). This
 page describes the storage.
 
 ## When to use it

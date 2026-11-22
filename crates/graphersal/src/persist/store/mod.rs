@@ -1167,20 +1167,22 @@ impl Store {
         )?)
     }
 
-    /// [`Store::attic_list`] of the store in `dir`, without a lock.
+    /// [`Store::attic_list`] of the store in `dir`, without a lock. A listing of the files:
+    /// works on a layer store too.
     pub fn attic_list_dir(dir: impl IntoStoreDir) -> Result<Vec<AtticEntry>, PersistError> {
         let dir = DirPath::root(dir.into_store_dir());
-        files::refuse_older_format(&dir)?;
+        files::refuse_other_version_as(&dir, files::StoreKind::Any)?;
         rollback::attic_list(&dir)
     }
 
-    /// [`Store::attic_changes`] of the store in `dir`, without a lock.
+    /// [`Store::attic_changes`] of the store in `dir`, without a lock. The entry's journal
+    /// records: works on a layer store too.
     pub fn attic_changes_dir(
         dir: impl IntoStoreDir,
         id: &str,
     ) -> Result<ChangesSince, PersistError> {
         let dir = DirPath::root(dir.into_store_dir());
-        files::refuse_older_format(&dir)?;
+        files::refuse_other_version_as(&dir, files::StoreKind::Any)?;
         StoreCore::attic_changes_at(&dir, id)
     }
 

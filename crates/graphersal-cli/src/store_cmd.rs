@@ -15,6 +15,8 @@ use graphersal::persist::{
     RestoreBlobsReport, RollbackMode, SingleFileDir, Store, StoreDir, StoreOptions, store_dir_at,
 };
 
+use graphersal::storage::{LayerBase, LayeredGraph, PersistentStorage};
+
 use crate::cli::{EXIT_OK, EXIT_QUERY_ERROR, EXIT_USAGE_ERROR, GraphSpec};
 use crate::out::{Note, print_block, use_it};
 use graphersal::system_journal::{JournalQuery, Level};
@@ -46,8 +48,10 @@ USAGE:
     graphersal store list <DIR>      the snapshots (commit, time, counts, name)
     graphersal store marks <DIR>     the marks
     graphersal store mark <DIR> <NAME>              set a mark at the current position
-    graphersal store checkpoint <DIR> [--name <N>]  merge a snapshot of the current state
-    graphersal store verify <DIR>    scrub every checksum; exit 1 when damage is found
+    graphersal store checkpoint <DIR> [--name <N>] [--base <SOURCE>]
+                                     merge a snapshot of the current state
+    graphersal store verify <DIR> [--base <SOURCE>]
+                                     scrub every checksum; exit 1 when damage is found
     graphersal store journal <DIR> [--level <L>] [--since <TIME>] [--source <P>] [--kind <K>]
                                      [--after <SEQ> | --last <N>] [--limit <N>] [--follow] [--json]
                                      the system journal: what the store did (opens, backups,
@@ -56,7 +60,11 @@ USAGE:
                                      remove snapshots and WAL only needed for targets before
                                      COMMIT (the last two snapshots always stay); refused when
                                      marks would become unreachable, unless --drop-marks
-    graphersal store fork <DIR> <NEW_DIR> [TARGET]  a new store from the state at TARGET
+    graphersal store fork <DIR> <NEW_DIR> [TARGET] [--base <SOURCE>]
+                                     a new store from the state at TARGET
+    graphersal store materialize <DIR> <FILE.gsnap> --base <SOURCE> [TARGET] [--without-models]
+                                     a layer store's whole visible graph (base + layer) as a
+                                     standalone packed file that needs no base
     graphersal store backup <DIR> <BACKUP_DIR> [--full]
                                      a consistent copy (works while in use): full into an empty
                                      directory, INCREMENTAL into an existing backup of DIR;
@@ -79,7 +87,7 @@ USAGE:
     graphersal store restore-blobs <DIR> --from <SOURCE> [--json]
                                      copy missing or damaged blobs (models) back from a backup
                                      (directory or .zip), a .gsnap or another store
-    graphersal store rollback <DIR> TARGET [--delete]
+    graphersal store rollback <DIR> TARGET [--delete] [--base <SOURCE>]
                                      roll the store back IN PLACE: everything after TARGET moves
                                      to the attic (--delete: deleted); a new lineage continues
     graphersal store attic <DIR>                    the attic entries (rolled-back history)
@@ -87,6 +95,8 @@ USAGE:
     graphersal store attic <DIR> restore <ID>       undo its rollback (only while nothing was
                                      committed since)
     graphersal store attic <DIR> fork <ID> <NEW_DIR>  a new store from the end of the entry
+                                     (restore, remove and fork take --base <SOURCE> for a
+                                     layer store)
     graphersal store attic <DIR> remove <ID>        delete an attic entry for good
     graphersal store repair <DIR> --to <NEW_DIR> [--drop-damaged-blobs]
                                      build a repaired copy of a damaged store in a NEW directory
@@ -94,6 +104,12 @@ USAGE:
                                      leaves out definitions whose blobs are missing or damaged
 
 TARGET: --at-commit <N> | --at-time <TIME> | --at-mark <NAME> (fork: default the latest).
+LAYER STORE (holds only a layer's changes to a frozen base; `store info` names the base): the
+commands that load its graph take --base <SOURCE>, the base it was created over (a store
+directory or .gstore, opened read-only, or a .gsnap); another base exits 1 naming both. The
+file-level commands (info, list, marks, journal, backup, restore, export, convert, upgrade)
+need no base. repair and the model commands refuse a layer store (its models are the base's).
+Use it: graphersal --graph <SOURCE> --layer-store <DIR>.
 TIME: an RFC 3339 / ISO 8601 date-time with a zone (2026-10-08T02:43:00Z, 2026-10-08T02:43Z,
 2026-10-08T04:43:00+02:00) or microseconds since the Unix epoch; it covers the whole second
 (minute) it names, so a time copied from `store list` includes that commit. A bare date is
@@ -230,13 +246,16 @@ pub fn command_help(command: &str) -> Option<String> {
             false,
         ),
         "checkpoint" => (
-            "graphersal store checkpoint <DIR> [--name <NAME>]",
+            "graphersal store checkpoint <DIR> [--name <NAME>] [--base <SOURCE>]",
             "Writes a snapshot of the current state (shortens the replay at the next open):\n\
              merged from the last snapshot and the WAL after it, without loading the graph\n\
              (memory for the changes only; unchanged segment files are reused). The store must\n\
              be closed: fails with \"in use\" while a server has it open (use its Store menu,\n\
              which checkpoints the same way without stopping commits). Damage in what it reads\n\
-             stops it with nothing written; run `graphersal store verify <DIR>` then.",
+             stops it with nothing written; run `graphersal store verify <DIR>` then.\n\
+             A LAYER STORE needs --base <SOURCE> (the base it was created over: a store or a\n\
+             .gsnap): its layer is loaded over the base and encoded (never merged), a snapshot\n\
+             the size of the layer's changes.",
             false,
         ),
         "journal" => (
@@ -254,9 +273,11 @@ pub fn command_help(command: &str) -> Option<String> {
             false,
         ),
         "verify" => (
-            "graphersal store verify <DIR>",
+            "graphersal store verify <DIR> [--base <SOURCE>]",
             "Reads every checksum of the store (snapshots, WAL, GRAPH, marks). Exit 1 and a damage\n\
-             report with the donor of each damaged item when damage is found.",
+             report with the donor of each damaged item when damage is found. A LAYER STORE is\n\
+             checked file by file without a base (a note says so); with --base <SOURCE> (the\n\
+             base it was created over) every snapshot is also loaded over the base.",
             false,
         ),
         "prune" => (
@@ -271,10 +292,24 @@ pub fn command_help(command: &str) -> Option<String> {
             false,
         ),
         "fork" => (
-            "graphersal store fork <DIR> <NEW_DIR> [TARGET]",
+            "graphersal store fork <DIR> <NEW_DIR> [TARGET] [--base <SOURCE>]",
             "Makes a NEW store in NEW_DIR (it must not exist) from the state at TARGET (default:\n\
              the latest), with a new lineage that records DIR as its parent. DIR is not changed;\n\
-             to undo a fork, delete NEW_DIR. Works while a server has DIR open.",
+             to undo a fork, delete NEW_DIR. Works while a server has DIR open. A LAYER STORE\n\
+             needs --base <SOURCE> (the base it was created over): the fork is a new layer\n\
+             store over the same base.",
+            true,
+        ),
+        "materialize" => (
+            "graphersal store materialize <DIR> <FILE.gsnap> --base <SOURCE> [TARGET] [--without-models]",
+            "Writes the whole graph a LAYER STORE shows at TARGET (default: the latest) as one\n\
+             standalone packed file: the base's elements with the layer's changes applied, the\n\
+             layer's schema and catalog. Unlike `store export` (a layer snapshot, which loads only\n\
+             over its base) the file needs no base: --graph FILE.gsnap, `store create --from` and\n\
+             older Graphersal releases read it. Its size follows the whole graph. --base is the\n\
+             base the layer store was created over (a store or a .gsnap); the base's embedding\n\
+             models the layer's schema uses travel with it unless --without-models. Reads the\n\
+             files only (no lock): works while a server has DIR open.",
             true,
         ),
         "backup" => (
@@ -365,13 +400,14 @@ pub fn command_help(command: &str) -> Option<String> {
             false,
         ),
         "rollback" => (
-            "graphersal store rollback <DIR> TARGET [--delete]",
+            "graphersal store rollback <DIR> TARGET [--delete] [--base <SOURCE>]",
             "Rolls the store back IN PLACE to TARGET: everything after it (later snapshots and\n\
              WAL) moves to the attic, and the store continues from TARGET as a new lineage. Undo\n\
              it with `store attic <DIR> restore <ID>` as long as nothing new was committed or\n\
              marked; after that, `store attic <DIR> fork <ID> <NEW_DIR>` keeps the rolled-back\n\
              history as a new store. --delete deletes the history instead (no undo). Fails with\n\
-             \"in use\" while a server has the store open (use its Store menu then).",
+             \"in use\" while a server has the store open (use its Store menu then). A LAYER\n\
+             STORE needs --base <SOURCE> (the base it was created over).",
             true,
         ),
         "attic" => (
@@ -382,7 +418,8 @@ pub fn command_help(command: &str) -> Option<String> {
              graphersal store attic <DIR> remove <ID>           delete the entry for good",
             "The attic keeps the history a rollback moved aside (one entry per rollback). A\n\
              restore is possible only while nothing was committed or marked since that\n\
-             rollback; a fork always is.",
+             rollback; a fork always is. On a LAYER STORE restore, remove and fork need\n\
+             --base <SOURCE> (the base it was created over).",
             false,
         ),
         "repair" => (
@@ -486,7 +523,12 @@ pub fn backup_summary(report: &BackupReport, target: &str) -> String {
         Note::new(format!("The backup {target} is read-only"))
             .command(
                 "open it read-only in the REPL",
-                format!("graphersal --graph {target}"),
+                if report.layer_base.is_some() {
+                    // A layer store's backup opens over the same base.
+                    format!("graphersal --graph <BASE> --layer-store {target}")
+                } else {
+                    format!("graphersal --graph {target}")
+                },
             )
             .command(
                 "make it the live store",
@@ -883,6 +925,194 @@ fn fail(err: PersistError) -> i32 {
     EXIT_QUERY_ERROR
 }
 
+/// [`fail`] of a command that takes `--base` for a layer store: a refusal because `dir` is a
+/// layer store (`StoreFailure::LayerStore`) also says how to run it over the base.
+/// `command`: the command's words after `graphersal store` and before the options.
+fn fail_layer(err: PersistError, command: &str, dir: &str) -> i32 {
+    let layer = matches!(
+        &err,
+        PersistError::Store { cause, .. } if *cause == graphersal::persist::StoreFailure::LayerStore
+    );
+    let fails = fail(err);
+    if layer {
+        let words = if command.contains(dir) {
+            command.to_string()
+        } else {
+            format!("{command} {dir}")
+        };
+        crate::out::print_note(
+            "note",
+            &Note::new(format!(
+                "{dir} is a layer store: give the base it was created over"
+            ))
+            .command(
+                "run it over the layer store's base",
+                format!("graphersal store {words} ... --base <SOURCE>"),
+            )
+            .text(),
+        );
+    }
+    fails
+}
+
+/// The base `--base <SOURCE>` names, loaded as the frozen base of a layer store: a store
+/// (directory or `.gstore`, opened read-only without its lock) or a `.gsnap`, the sources
+/// whose identity lasts ([`GraphSpec::layer_base`]). Anything else is a usage error; a base
+/// that cannot be loaded fails (exit 1). The embedding models of the base are not listed: they
+/// are not this command's output.
+fn layer_base(source: &str) -> Result<LayerBase, i32> {
+    let spec = GraphSpec::parse(source);
+    let durable = match &spec {
+        GraphSpec::Store(_) => true,
+        GraphSpec::File(path) => graphersal::GraphSource::is_snapshot_path(path),
+        _ => false,
+    };
+    if !durable {
+        return Err(usage(&format!(
+            "--base {source}: the base of a layer store is a store (a directory or .gstore) or a \
+             .gsnap, the graph it was created over"
+        )));
+    }
+    crate::cli::defer_model_notes();
+    spec.layer_base(None, "--base").map_err(|err| {
+        errln!("{}", err.message);
+        err.code
+    })
+}
+
+/// The layer store in `path` opened read-write over `base` ([`Store::open_layer`]).
+fn open_rw_layer(path: &str, base: &LayerBase) -> Result<Store<LayeredGraph>, PersistError> {
+    Store::<LayeredGraph>::open_layer(path, base, StoreOptions::new())
+}
+
+/// `store rollback` on an open store (plain or layer), closed afterwards.
+fn rollback_and_close<S: PersistentStorage + Default>(
+    store: Store<S>,
+    target: RecoveryTarget,
+    mode: RollbackMode,
+) -> Result<graphersal::persist::RollbackReport, PersistError> {
+    let report = store.rollback_to(target, mode)?;
+    store.close()?;
+    Ok(report)
+}
+
+/// `store attic <DIR> restore|remove <ID>` on an open store (plain or layer), closed
+/// afterwards: the commit restored to, or `None` after a remove.
+fn attic_and_close<S: PersistentStorage + Default>(
+    store: Store<S>,
+    id: &str,
+    restore: bool,
+) -> Result<Option<u64>, PersistError> {
+    let done = if restore {
+        Some(store.attic_restore(id)?)
+    } else {
+        store.attic_remove(id)?;
+        None
+    };
+    store.close()?;
+    Ok(done)
+}
+
+/// [`use_it`] for the store in `path`: a layer store is opened over its base (`base`, the
+/// `--base` the command was given, else a placeholder) with `--layer-store`.
+fn use_store(note: Note, path: &str, base: Option<&str>) -> Note {
+    let layer = matches!(
+        Store::inspect(path).map(|info| info.layer_base.is_some()),
+        Ok(true)
+    );
+    if !layer {
+        return use_it(note, path);
+    }
+    let base = base.unwrap_or("<BASE>");
+    note.command(
+        "open it in the REPL, over its base",
+        format!("graphersal --graph {base} --layer-store {path}"),
+    )
+    .command(
+        "or serve it to the browser playground",
+        format!("graphersal --graph {base} --layer-store {path} --server"),
+    )
+}
+
+/// `store materialize`: the layer store `dir` loaded read-only at `target` over `base` (no
+/// lock), written as a standalone packed snapshot of the whole visible graph to `out`
+/// (`WriteOptions::with_materialize`, the store's chunk size; the base's models the catalog
+/// references carried unless `without_models`).
+fn materialize(
+    dir: &str,
+    out: &str,
+    base: &LayerBase,
+    target: RecoveryTarget,
+    without_models: bool,
+) -> i32 {
+    use graphersal::persist::WriteOptions;
+    let info = match Store::inspect(dir) {
+        Ok(info) => info,
+        Err(err) => return fail(err),
+    };
+    if info.layer_base.is_none() {
+        errln!(
+            "{}",
+            Note::new(format!(
+                "Error: {dir} is not a layer store: it holds the whole graph already"
+            ))
+            .command(
+                "write its snapshot as a packed file",
+                format!("graphersal store export {dir} {out}"),
+            )
+            .text()
+        );
+        return EXIT_QUERY_ERROR;
+    }
+    let graph = match Store::<LayeredGraph>::open_layer_read_only(dir, base, target) {
+        Ok(recovered) => recovered.into_graph(),
+        Err(err) => return fail(err),
+    };
+    let file = match std::fs::File::create(out) {
+        Ok(file) => file,
+        Err(err) => {
+            errln!("Error: cannot create '{out}': {err}");
+            return EXIT_USAGE_ERROR;
+        }
+    };
+    let models = if without_models {
+        ModelCopy::Exclude
+    } else {
+        ModelCopy::Include
+    };
+    let written = graphersal::persist::write_graph_snapshot(
+        &graph,
+        std::io::BufWriter::new(file),
+        &WriteOptions::new()
+            .with_chunk_bytes(info.chunk_bytes)
+            .with_materialize(true),
+        models,
+    );
+    match written {
+        Ok(snapshot) => {
+            print_block(
+                &Note::new(format!(
+                    "Materialized the layer store {dir} at commit {} into {out}",
+                    snapshot.commit_seq
+                ))
+                .detail("vertices", snapshot.vertex_count.to_string())
+                .detail("edges", snapshot.edge_count.to_string())
+                .detail(
+                    "standalone",
+                    "yes: the whole graph (base and layer), it needs no base",
+                )
+                .command("open it in the REPL", format!("graphersal --graph {out}"))
+                .text(),
+            );
+            EXIT_OK
+        }
+        Err(err) => {
+            let _ = std::fs::remove_file(out);
+            fail(err)
+        }
+    }
+}
+
 /// `store journal`: prints the pages of the journal (and, following, new records once a
 /// second until the process is interrupted). `last`: only the newest N matching records, read
 /// newest first from the end of the journal and printed oldest first.
@@ -996,6 +1226,7 @@ pub fn run(args: &[String]) -> i32 {
             let takes_value = matches!(
                 name.as_str(),
                 "from"
+                    | "base"
                     | "chunk-size"
                     | "on-damage"
                     | "name"
@@ -1045,10 +1276,13 @@ pub fn run(args: &[String]) -> i32 {
         "journal" => &[
             "level", "since", "source", "kind", "after", "last", "limit", "follow", "json",
         ],
-        "checkpoint" => &["name"],
+        "checkpoint" => &["name", "base"],
+        "verify" => &["base"],
+        "attic" => &["base"],
+        "materialize" => &["base", "at-commit", "at-time", "at-mark", "without-models"],
         "prune" => &["up-to", "drop-marks"],
         "compact" => &["drop-marks"],
-        "fork" | "rollback" => &["at-commit", "at-time", "at-mark", "delete"],
+        "fork" | "rollback" => &["at-commit", "at-time", "at-mark", "delete", "base"],
         "repair" => &["to", "drop-damaged-blobs"],
         "restore-blobs" => &["from", "json"],
         "backup" => &["zip", "full", "from-memory", "without-models"],
@@ -1199,11 +1433,6 @@ pub fn run(args: &[String]) -> i32 {
             match Store::inspect(&positional[0]) {
                 Ok(info) => {
                     outln!("store       {}", info.location);
-                    if let Some(base) = &info.layer_base {
-                        // A layer store (format spec 7.5): only a layer's changes to its base,
-                        // a creation parameter (listed under "fixed at creation" too).
-                        outln!("layer       over the base {base}");
-                    }
                     outln!("format      version {}", info.format_version);
                     outln!("graph id    {}", uuid_text(info.graph_id));
                     for entry in info.lineage.iter().skip(1) {
@@ -1353,8 +1582,12 @@ pub fn run(args: &[String]) -> i32 {
                         // The base a layer store was built over (book: Creation parameters).
                         outln!("  base          {base}");
                         outln!(
-                            "                # opens only over this base (Store::open_layer); \
-                             a backup is useless without it"
+                            "                # a layer store: opens only over this base, a \
+                             backup is useless without it"
+                        );
+                        outln!(
+                            "                graphersal --graph <BASE> --layer-store {}",
+                            positional[0]
                         );
                     }
                     if !info.attic.is_empty() {
@@ -1448,6 +1681,22 @@ pub fn run(args: &[String]) -> i32 {
                 };
             }
             try_code!(need(1));
+            if let Ok(info) = Store::inspect(positional[0].as_str())
+                && let Some(base) = info.layer_base
+            {
+                // A layer store keeps no model: its graph serves the base's.
+                print_block(
+                    &Note::new(format!(
+                        "{} is a layer store: it keeps no embedding model, its graph serves the \
+                         models of its base",
+                        positional[0]
+                    ))
+                    .detail("base", base.to_string())
+                    .command("list the base's models", "graphersal store models <BASE>")
+                    .text(),
+                );
+                return EXIT_OK;
+            }
             let used = Store::inspect(positional[0].as_str())
                 .map(|info| info.schema_models)
                 .unwrap_or_default();
@@ -1522,7 +1771,19 @@ pub fn run(args: &[String]) -> i32 {
         "checkpoint" => {
             try_code!(need(1));
             let name = flag("name");
-            match Store::checkpoint_dir(&positional[0], StoreOptions::new(), name.as_deref()) {
+            let checkpointed = match flag("base") {
+                Some(base) => {
+                    let base = try_code!(layer_base(&base));
+                    Store::<LayeredGraph>::checkpoint_layer_dir(
+                        positional[0].as_str(),
+                        &base,
+                        StoreOptions::new(),
+                        name.as_deref(),
+                    )
+                }
+                None => Store::checkpoint_dir(&positional[0], StoreOptions::new(), name.as_deref()),
+            };
+            match checkpointed {
                 Ok(report) => {
                     let info = &report.snapshot;
                     let note = Note::new(format!("Snapshot at commit {}", info.commit_seq))
@@ -1554,18 +1815,25 @@ pub fn run(args: &[String]) -> i32 {
                         note.detail(
                             "encoded from",
                             "the loaded graph (the WAL since the last snapshot is larger than \
-                             the merge bound)",
+                             the merge bound, or a layer store)",
                         )
                     };
                     print_block(&note.text());
                     EXIT_OK
                 }
-                Err(err) => fail(err),
+                Err(err) => fail_layer(err, "checkpoint", &positional[0]),
             }
         }
         "verify" => {
             try_code!(need(1));
-            match Store::verify_dir(&positional[0]) {
+            let verified = match flag("base") {
+                Some(base) => {
+                    let base = try_code!(layer_base(&base));
+                    Store::<LayeredGraph>::verify_layer_dir(positional[0].as_str(), &base)
+                }
+                None => Store::verify_dir(&positional[0]),
+            };
+            match verified {
                 Ok(report) => {
                     print_block(
                         &Note::new(format!("Checked the store {}", positional[0]))
@@ -1580,6 +1848,26 @@ pub fn run(args: &[String]) -> i32 {
                     );
                     for note in &report.notes {
                         outln!("note: {note}");
+                    }
+                    if flag("base").is_none()
+                        && matches!(
+                            Store::inspect(positional[0].as_str())
+                                .map(|info| info.layer_base.is_some()),
+                            Ok(true)
+                        )
+                    {
+                        // A layer store checked without its base: how to load it over it.
+                        print_block(
+                            &Note::new("a layer store: checked without its base")
+                                .command(
+                                    "also load every snapshot over the base",
+                                    format!(
+                                        "graphersal store verify {} --base <BASE>",
+                                        positional[0]
+                                    ),
+                                )
+                                .text(),
+                        );
                     }
                     for problem in &report.problems {
                         outln!(
@@ -1685,7 +1973,20 @@ pub fn run(args: &[String]) -> i32 {
         "fork" => {
             try_code!(need(2));
             let target = try_code!(target());
-            match Store::fork_dir(&positional[0], target, &positional[1]) {
+            let base_source = flag("base");
+            let forked = match &base_source {
+                Some(base) => {
+                    let base = try_code!(layer_base(base));
+                    Store::<LayeredGraph>::fork_layer_dir(
+                        positional[0].as_str(),
+                        &base,
+                        target,
+                        positional[1].as_str(),
+                    )
+                }
+                None => Store::fork_dir(&positional[0], target, &positional[1]),
+            };
+            match forked {
                 Ok(report) => {
                     let info = &report.snapshot;
                     let note =
@@ -1701,10 +2002,10 @@ pub fn run(args: &[String]) -> i32 {
                                 positional[1], positional[0]
                             ),
                         );
-                    print_block(&use_it(note, &positional[1]).text());
+                    print_block(&use_store(note, &positional[1], base_source.as_deref()).text());
                     EXIT_OK
                 }
-                Err(err) => fail(err),
+                Err(err) => fail_layer(err, "fork", &positional[0]),
             }
         }
         "backup" => {
@@ -1828,7 +2129,7 @@ pub fn run(args: &[String]) -> i32 {
                             .detail("backup", format!("up to commit {}", marker.commit_seq))
                             .detail("taken", format_time(marker.taken_at))
                             .detail("graph id", "the same");
-                        print_block(&use_it(note, dir).text());
+                        print_block(&use_store(note, dir, None).text());
                         EXIT_OK
                     }
                     Err(err) => fail(err),
@@ -1848,7 +2149,7 @@ pub fn run(args: &[String]) -> i32 {
                         "Restored {} into {}: it is the live store",
                         positional[0], positional[1]
                     ));
-                    print_block(&use_it(note, &positional[1]).text());
+                    print_block(&use_store(note, &positional[1], None).text());
                     EXIT_OK
                 }
                 Err(err) => fail(err),
@@ -1910,11 +2211,17 @@ pub fn run(args: &[String]) -> i32 {
             } else {
                 RollbackMode::Move
             };
-            match open_rw(&positional[0]).and_then(|store| {
-                let report = store.rollback_to(target, mode)?;
-                store.close()?;
-                Ok(report)
-            }) {
+            let base_source = flag("base");
+            let rolled_back = match &base_source {
+                Some(base) => {
+                    let base = try_code!(layer_base(base));
+                    open_rw_layer(&positional[0], &base)
+                        .and_then(|store| rollback_and_close(store, target, mode))
+                }
+                None => open_rw(&positional[0])
+                    .and_then(|store| rollback_and_close(store, target, mode)),
+            };
+            match rolled_back {
                 Ok(report) => {
                     let dir = &positional[0];
                     let note = Note::new(format!(
@@ -1932,30 +2239,55 @@ pub fn run(args: &[String]) -> i32 {
                             report.segments_moved
                         ),
                     );
+                    // A layer store's attic commands load over the same base.
+                    let with_base = base_source
+                        .as_ref()
+                        .map(|base| format!(" --base {base}"))
+                        .unwrap_or_default();
                     let note = match &report.attic {
                         Some(id) => note
                             .detail("kept", format!("in the attic as {id}"))
                             .command(
                                 "undo (only while nothing new is committed or marked)",
-                                format!("graphersal store attic {dir} restore {id}"),
+                                format!("graphersal store attic {dir} restore {id}{with_base}"),
                             )
                             .command(
                                 "or keep it as a new store",
-                                format!("graphersal store attic {dir} fork {id} <NEW_DIR>"),
+                                format!(
+                                    "graphersal store attic {dir} fork {id} <NEW_DIR>{with_base}"
+                                ),
                             )
                             .command(
                                 "or delete it",
-                                format!("graphersal store attic {dir} remove {id}"),
+                                format!("graphersal store attic {dir} remove {id}{with_base}"),
                             ),
                         None => note.detail("kept", "no: deleted, this cannot be undone"),
                     };
                     print_block(&note.text());
                     EXIT_OK
                 }
-                Err(err) => fail(err),
+                Err(err) => fail_layer(err, "rollback", &positional[0]),
             }
         }
-        "attic" => run_attic(&positional),
+        "attic" => run_attic(&positional, flag("base").as_deref()),
+        "materialize" => {
+            try_code!(need(2));
+            let Some(base) = flag("base") else {
+                return usage(
+                    "`store materialize` needs --base <SOURCE>: the base the layer store was \
+                     created over (a store or a .gsnap)",
+                );
+            };
+            let target = try_code!(target());
+            let base = try_code!(layer_base(&base));
+            materialize(
+                &positional[0],
+                &positional[1],
+                &base,
+                target,
+                flag("without-models").is_some(),
+            )
+        }
         "convert" => {
             try_code!(need(2));
             let (from, to) = (&positional[0], &positional[1]);
@@ -1983,7 +2315,7 @@ pub fn run(args: &[String]) -> i32 {
                     .detail("size", bytes_text(bytes))
                     .detail("verified", "yes")
                     .detail("source", format!("{from} is unchanged"));
-                    print_block(&use_it(note, to).text());
+                    print_block(&use_store(note, to, None).text());
                     EXIT_OK
                 }
                 Err(err) => fail(err),
@@ -2356,7 +2688,7 @@ fn run_upgrade(positional: &[String], in_place: bool, single_file: bool) -> i32 
                 .text(),
         );
     } else {
-        print_block(&use_it(Note::new(format!("Open {target}")), target).text());
+        print_block(&use_store(Note::new(format!("Open {target}")), target, None).text());
     }
     EXIT_OK
 }
@@ -2511,7 +2843,7 @@ fn marks_not_carried(note: Note, marks: &[graphersal::changes::Mark], source: &s
 
 /// `graphersal store attic <DIR> [list | changes <ID> | restore <ID> | fork <ID> <NEW_DIR> |
 /// remove <ID>]`.
-fn run_attic(positional: &[String]) -> i32 {
+fn run_attic(positional: &[String], base_source: Option<&str>) -> i32 {
     let Some(dir) = positional.first() else {
         return usage("`store attic` takes the store directory");
     };
@@ -2523,6 +2855,16 @@ fn run_attic(positional: &[String]) -> i32 {
                 .command("list the entries", format!("graphersal store attic {dir}"))
                 .text(),
         )
+    };
+    if base_source.is_some() && !matches!(action, "restore" | "remove" | "fork") {
+        return usage(&format!(
+            "--base belongs to `store attic <DIR> restore|remove|fork`, not `{action}`"
+        ));
+    }
+    let base = match base_source.map(layer_base) {
+        Some(Ok(base)) => Some(base),
+        Some(Err(code)) => return code,
+        None => None,
     };
     match action {
         "list" => match Store::attic_list_dir(dir) {
@@ -2579,16 +2921,14 @@ fn run_attic(positional: &[String]) -> i32 {
         }
         "restore" | "remove" => {
             let Some(id) = id else { return need_id() };
-            match open_rw(dir).and_then(|store| {
-                let done = if action == "restore" {
-                    Some(store.attic_restore(id)?)
-                } else {
-                    store.attic_remove(id)?;
-                    None
-                };
-                store.close()?;
-                Ok(done)
-            }) {
+            let restore = action == "restore";
+            let done = match &base {
+                Some(base) => {
+                    open_rw_layer(dir, base).and_then(|store| attic_and_close(store, id, restore))
+                }
+                None => open_rw(dir).and_then(|store| attic_and_close(store, id, restore)),
+            };
+            match done {
                 Ok(Some(commit)) => {
                     outln!("Restored {id}: the store is at commit {commit} again.");
                     EXIT_OK
@@ -2597,14 +2937,23 @@ fn run_attic(positional: &[String]) -> i32 {
                     outln!("Removed {id} from the attic.");
                     EXIT_OK
                 }
-                Err(err) => fail(err),
+                Err(err) => fail_layer(err, &format!("attic {dir} {action}"), dir),
             }
         }
         "fork" => {
             let (Some(id), Some(new_dir)) = (id, positional.get(3)) else {
                 return usage("`store attic <DIR> fork <ID> <NEW_DIR>`");
             };
-            match Store::attic_fork_dir(dir, id, new_dir) {
+            let forked = match &base {
+                Some(base) => Store::<LayeredGraph>::attic_fork_layer_dir(
+                    dir.as_str(),
+                    base,
+                    id,
+                    new_dir.as_str(),
+                ),
+                None => Store::attic_fork_dir(dir, id, new_dir),
+            };
+            match forked {
                 Ok(report) => {
                     let info = &report.snapshot;
                     let note = Note::new(format!("Forked the attic entry {id} into {new_dir}"))
@@ -2614,10 +2963,10 @@ fn run_attic(positional: &[String]) -> i32 {
                     let note = marks_not_carried(note, &report.marks_not_carried, dir)
                         .detail("attic entry", "stays")
                         .detail("undo", format!("delete the directory {new_dir}"));
-                    print_block(&use_it(note, new_dir).text());
+                    print_block(&use_store(note, new_dir, base_source).text());
                     EXIT_OK
                 }
-                Err(err) => fail(err),
+                Err(err) => fail_layer(err, &format!("attic {dir} fork"), dir),
             }
         }
         other => usage(&format!(

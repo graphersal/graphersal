@@ -488,6 +488,9 @@ pub struct Context {
     pub(crate) source: Option<PathBuf>,
     /// The `--schema` file the graph was loaded with, when one was given.
     pub(crate) schema_source: Option<PathBuf>,
+    /// Why "Save to file" saves nothing when the graph has no [`Self::source`] (the host's own
+    /// words, such as "a layer store keeps every commit"); `None`: the default answer.
+    pub(crate) save_refusal: Option<String>,
     /// The `Host`/`Origin` checks every request passes first.
     pub(crate) check: HostCheck,
     /// The host's request filter, run after the checks; `None`: none.
@@ -542,6 +545,7 @@ pub struct ContextBuilder {
     ui: Ui,
     source: Option<PathBuf>,
     schema_source: Option<PathBuf>,
+    save_refusal: Option<String>,
     presets: Value,
     read_only: bool,
     store: Option<Arc<Store>>,
@@ -579,6 +583,15 @@ impl ContextBuilder {
     /// The schema file the graph was loaded with ("Save to file" writes the schema to it).
     pub fn schema_source(mut self, schema_source: Option<PathBuf>) -> Self {
         self.schema_source = schema_source;
+        self
+    }
+
+    /// The answer (409) of "Save to file" (`POST /api/save`) when the graph came from no file
+    /// ([`Self::source`] `None`): why nothing is saved, in the host's words (a layer kept in
+    /// memory, a layer store that keeps every commit). Default: "the graph did not come from a
+    /// file".
+    pub fn save_refusal(mut self, reason: Option<String>) -> Self {
+        self.save_refusal = reason;
         self
     }
 
@@ -700,6 +713,7 @@ impl ContextBuilder {
             ui: self.ui,
             source: self.source,
             schema_source: self.schema_source,
+            save_refusal: self.save_refusal,
             check: self.check,
             filter: self.filter,
             memory_tracked: self.memory_tracked,
@@ -733,6 +747,7 @@ impl Context {
             ui: Ui::embedded(),
             source: None,
             schema_source: None,
+            save_refusal: None,
             presets: Value::Null,
             read_only: false,
             store: None,

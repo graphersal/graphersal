@@ -8807,3 +8807,167 @@ fn skip_on_ci(what: &str) -> bool {
     }
     on_ci
 }
+
+/// A server started with `args` (plus `--server --port 0`) whose stderr start banner is read up
+/// to its `listening` row: the server and the banner.
+fn start_with_banner(args: &[&str]) -> (DevServer, String) {
+    let mut child = Command::new(env!("CARGO_BIN_EXE_graphersal"))
+        .args(args)
+        .args(["--server", "--port", "0"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("graphersal starts");
+    let stderr = child.stderr.take().expect("stderr");
+    let mut banner = Vec::new();
+    let mut lines = BufReader::new(stderr).lines();
+    for line in lines.by_ref() {
+        let line = line.unwrap();
+        let last = line.starts_with("  listening:");
+        banner.push(line);
+        if last {
+            break;
+        }
+    }
+    std::thread::spawn(move || lines.for_each(drop));
+    let stdout = child.stdout.take().expect("stdout");
+    let mut line = String::new();
+    BufReader::new(stdout).read_line(&mut line).unwrap();
+    let port = line
+        .trim()
+        .trim_end_matches('/')
+        .rsplit(':')
+        .next()
+        .and_then(|p| p.parse().ok())
+        .unwrap_or_else(|| panic!("no address on stdout: {line:?}\n{}", banner.join("\n")));
+    (DevServer { child, port }, banner.join("\n"))
+}
+
+/// The bytes of every file under `dir`, by relative path.
+fn layer_tree(dir: &std::path::Path) -> std::collections::BTreeMap<String, Vec<u8>> {
+    let mut out = std::collections::BTreeMap::new();
+    let mut stack = vec![dir.to_path_buf()];
+    while let Some(next) = stack.pop() {
+        for entry in std::fs::read_dir(&next).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                stack.push(path);
+            } else {
+                let name = path
+                    .strip_prefix(dir)
+                    .unwrap()
+                    .to_string_lossy()
+                    .into_owned();
+                out.insert(name, std::fs::read(&path).unwrap());
+            }
+        }
+    }
+    out
+}
+
+/// S3.5: `--server --layer-store` commits to the layer store (durable: a new process sees the
+/// write), the base Store is never written, the banner names the layer store and its base, and
+/// "Save to file" answers 409 saying the commits are durable already.
+#[test]
+fn a_layer_store_server_commits_to_the_layer_store() {
+    let ui = ui_dir("layer-store");
+    let root = ui.parent().unwrap().to_path_buf();
+    let base = root.join("base");
+    let layer = root.join("layer");
+    let _ = std::fs::remove_dir_all(&base);
+    let _ = std::fs::remove_dir_all(&layer);
+    let created = Command::new(env!("CARGO_BIN_EXE_graphersal"))
+        .args([
+            "store",
+            "create",
+            base.to_str().unwrap(),
+            "--from",
+            "modern",
+        ])
+        .output()
+        .unwrap();
+    assert!(created.status.success(), "{created:?}");
+    let base_files = layer_tree(&base);
+
+    let (server, banner) = start_with_banner(&[
+        "--graph",
+        base.to_str().unwrap(),
+        "--layer-store",
+        layer.to_str().unwrap(),
+        "--create-store",
+        "--ui-dir",
+        ui.to_str().unwrap(),
+    ]);
+    let port = server.port;
+    assert!(banner.contains("The graph is a Store on disk."), "{banner}");
+    assert!(banner.contains("LAYER STORE"), "{banner}");
+    assert!(banner.contains(layer.to_str().unwrap()), "{banner}");
+    assert!(banner.contains("  base:"), "{banner}");
+    let wrote = execute(
+        port,
+        r#"g.add_v("person").property("name", "zed").iterate()"#,
+    );
+    assert_eq!(wrote["ok"], true, "{wrote}");
+    let origin = execute(port, r#"g.v().has("name", "zed").layer().next()"#);
+    assert_eq!(origin["ok"], true, "{origin}");
+    let saved = post(port, "/api/save", "{}");
+    assert_eq!(saved.status, 409, "{}", saved.body);
+    assert!(
+        saved.body.contains("layer store") && saved.body.contains("already durable"),
+        "{}",
+        saved.body
+    );
+    drop(server);
+
+    // A new process over the same base sees the commit; the base is unchanged.
+    let out = Command::new(env!("CARGO_BIN_EXE_graphersal"))
+        .args([
+            "--graph",
+            base.to_str().unwrap(),
+            "--layer-store",
+            layer.to_str().unwrap(),
+            "-e",
+            r#"g.v().has("name", "zed").count().next()"#,
+        ])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{out:?}");
+    assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "1");
+    assert_eq!(layer_tree(&base), base_files, "the base store was written");
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// S3.5: "Save to file" of an in-memory `--layer` over a graph file says that the layer is kept
+/// in memory (not that the graph came from no file), and the file stays as it was.
+#[test]
+fn save_of_an_in_memory_layer_says_it_is_a_layer() {
+    let ui = ui_dir("layer-save");
+    let file = ui.parent().unwrap().join("graph.json");
+    let exported = Command::new(env!("CARGO_BIN_EXE_graphersal"))
+        .args([
+            "-e",
+            &format!("g.export_graphson({:?})", file.to_str().unwrap()),
+        ])
+        .output()
+        .unwrap();
+    assert!(exported.status.success(), "{exported:?}");
+    let bytes = std::fs::read(&file).unwrap();
+    let server = start(&[
+        "--graph",
+        file.to_str().unwrap(),
+        "--layer",
+        "--ui-dir",
+        ui.to_str().unwrap(),
+    ]);
+    let wrote = execute(server.port, r#"g.add_v("person").iterate()"#);
+    assert_eq!(wrote["ok"], true, "{wrote}");
+    let saved = post(server.port, "/api/save", "{}");
+    assert_eq!(saved.status, 409, "{}", saved.body);
+    assert!(
+        saved.body.contains("layer kept in memory") && !saved.body.contains("did not come"),
+        "{}",
+        saved.body
+    );
+    drop(server);
+    assert_eq!(std::fs::read(&file).unwrap(), bytes);
+}
