@@ -546,6 +546,10 @@ pub struct Context {
     /// default.
     #[cfg(feature = "mcp")]
     pub(crate) mcp_profile: Option<graphersal_mcp::Profile>,
+    /// The route tag of the MCP sessions this context starts
+    /// ([`ContextBuilder::mcp_session_route`]); `None`: unpinned sessions.
+    #[cfg(feature = "mcp")]
+    pub(crate) mcp_session_route: Option<String>,
     /// What the host adds.
     pub(crate) hooks: Arc<dyn Hooks>,
     /// The allow-list mode of the HTTP API ([`ContextBuilder::api_allow_list`]); `None`: every
@@ -578,6 +582,8 @@ pub struct ContextBuilder {
     mcp: Option<Arc<mcp::Mcp>>,
     #[cfg(feature = "mcp")]
     mcp_profile: Option<graphersal_mcp::Profile>,
+    #[cfg(feature = "mcp")]
+    mcp_session_route: Option<String>,
     hooks: Option<Arc<dyn Hooks>>,
     filter: Option<Arc<dyn RequestFilter>>,
     memory_tracked: bool,
@@ -686,6 +692,20 @@ impl ContextBuilder {
         self
     }
 
+    /// The route tag that pins the MCP sessions this context starts to its graph
+    /// (`graphersal_mcp::Host::session_route`): the versioned graph name the host's graph
+    /// resolver resolved an alias to (`acme@2026.3`), or an opaque token. Every `initialize`
+    /// this context answers mints an `Mcp-Session-Id` carrying it, and the resolver sends the
+    /// session's later requests back here with `graphersal_mcp::session_route` (the request's
+    /// [`crate::Request::header`] `Mcp-Session-Id`), also after its alias moved to another
+    /// context. It must pass `graphersal_mcp::is_valid_session_route`, else `initialize` fails
+    /// with a JSON-RPC error. Default: `None`, unpinned sessions (one graph needs none).
+    #[cfg(feature = "mcp")]
+    pub fn mcp_session_route(mut self, route: Option<String>) -> Self {
+        self.mcp_session_route = route;
+        self
+    }
+
     /// What the host adds ([`Hooks`]: extra routes, `/api/info` and statistics fields);
     /// default: nothing.
     pub fn hooks(mut self, hooks: Arc<dyn Hooks>) -> Self {
@@ -770,6 +790,8 @@ impl ContextBuilder {
             mcp: self.mcp,
             #[cfg(feature = "mcp")]
             mcp_profile: self.mcp_profile,
+            #[cfg(feature = "mcp")]
+            mcp_session_route: self.mcp_session_route,
             hooks: self.hooks.unwrap_or_else(|| Arc::new(NoHooks)),
             allow_list: self.allow_list.map(Arc::new),
         })
@@ -796,6 +818,8 @@ impl Context {
             mcp: None,
             #[cfg(feature = "mcp")]
             mcp_profile: None,
+            #[cfg(feature = "mcp")]
+            mcp_session_route: None,
             hooks: None,
             filter: None,
             memory_tracked: false,
