@@ -1989,8 +1989,8 @@ impl Store<crate::graph::LayeredGraph> {
         let built_on = layer.base_ref();
         if built_on != given {
             return Err(PersistError::LayerBaseMismatch {
-                expected: built_on,
-                given,
+                expected: Box::new(built_on),
+                given: Box::new(given),
             });
         }
         let dir = DirPath::root(dir.into_store_dir());

@@ -118,10 +118,10 @@ pub enum PersistError {
     )]
     #[non_exhaustive]
     LayerBaseMismatch {
-        /// The base the layer snapshot names.
-        expected: crate::graph::BaseRef,
+        /// The base the layer snapshot names (boxed: keeps `PersistError` small).
+        expected: Box<crate::graph::BaseRef>,
         /// The base of the layer it was loaded into.
-        given: crate::graph::BaseRef,
+        given: Box<crate::graph::BaseRef>,
     },
 
     /// The snapshot and the storage it is loaded into are of different kinds: a layer snapshot
@@ -1029,8 +1029,8 @@ impl PersistError {
             },
             PersistError::LayerBaseMismatch { expected, given } => {
                 PersistError::LayerBaseMismatch {
-                    expected: *expected,
-                    given: *given,
+                    expected: expected.clone(),
+                    given: given.clone(),
                 }
             }
             PersistError::SnapshotKindMismatch { reason } => PersistError::SnapshotKindMismatch {

@@ -1557,7 +1557,10 @@ pub(crate) fn load_snapshot_with<S: PersistentStorage + ?Sized, R: Read>(
         (None, None) => false,
         (Some(expected), Some(given)) if expected == given => true,
         (Some(expected), Some(given)) => {
-            return Err(PersistError::LayerBaseMismatch { expected, given });
+            return Err(PersistError::LayerBaseMismatch {
+                expected: Box::new(expected),
+                given: Box::new(given),
+            });
         }
         (Some(expected), None) => {
             return Err(PersistError::SnapshotKindMismatch {

@@ -747,8 +747,8 @@ fn check_kind(root: &DirPath, kind: StoreKind, seen: &KindSeen) -> Result<(), Pe
                 .find(|(base, _)| *base != given)
             {
                 return Err(PersistError::LayerBaseMismatch {
-                    expected: *expected,
-                    given,
+                    expected: Box::new(*expected),
+                    given: Box::new(given),
                 });
             }
             if let Some(path) = &seen.plain {

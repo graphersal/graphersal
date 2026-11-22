@@ -286,7 +286,7 @@ mod tests {
         // known to this version.
         assert!(row.kind >= 128);
         assert!(!super::super::manifest::is_critical_segment_kind(row.kind));
-        assert_eq!(layer_row(&[row.clone()]).unwrap(), Some(base));
+        assert_eq!(layer_row(std::slice::from_ref(&row)).unwrap(), Some(base));
         assert!(layer_row(&[row.clone(), row]).is_err());
     }
 

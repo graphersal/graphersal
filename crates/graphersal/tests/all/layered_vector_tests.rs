@@ -948,7 +948,7 @@ mod catalog_models {
             .with_name("product");
         assert!(base.serves_models());
         assert_eq!(base.name(), "product");
-        assert!(base.base_ref().is_none());
+        assert!(base.base_ref().is_some());
         let layer = Arc::new(base.new_layer().unwrap());
         let reference = Arc::new(store_graph(&path));
 
