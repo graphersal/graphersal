@@ -69,7 +69,7 @@
           "Server"
         ],
         "summary": "Server info",
-        "description": "What the page needs to switch to this server: `server` (`graphersal-dev`), `version`, `saveable`, `source`, `presets` (the limits in force), `mcp` (`{endpoint, readOnly, client}` or null), `ai` (`{provider, model, readOnly, sendsDataTo, maxToolCallsPerTurn}` or null; never the key), `damageFound`, `embedders`, `readOnly` (`--read-only`, or a Store the process may not write: every write is refused), `uiProfile` (only when the host set one: `--ui-profile`, `ContextBuilder::ui_profile`; a built-in profile name or a profile object, EXPERIMENTAL), `apiMode` (only in allow-list mode: `\"allow-list\"`, EXPERIMENTAL; `ContextBuilder::api_allow_list`: the server then answers only `GET /api/info`, `GET /api/changes` and `POST /api/query` for its selected saved queries, every other `/api/` endpoint and `/mcp` answer 403). Answered without the session.",
+        "description": "What the page needs to switch to this server: `server` (`graphersal-dev`), `version`, `saveable`, `source`, `presets` (the limits in force), `mcp` (`{endpoint, readOnly, client}` or null), `ai` (`{provider, model, readOnly, sendsDataTo, maxToolCallsPerTurn}` or null; never the key), `damageFound`, `embedders`, `readOnly` (`--read-only`, a Store the process may not write, or the host's runtime read-only toggle on (`ContextBuilder::runtime_read_only`, EXPERIMENTAL; then modifying requests answer the one refusal `the graph is served read-only: writes are refused`, the writes that are no commit with 409): every write is refused), `uiProfile` (only when the host set one: `--ui-profile`, `ContextBuilder::ui_profile`; a built-in profile name or a profile object, EXPERIMENTAL), `apiMode` (only in allow-list mode: `\"allow-list\"`, EXPERIMENTAL; `ContextBuilder::api_allow_list`: the server then answers only `GET /api/info`, `GET /api/changes` and `POST /api/query` for its selected saved queries, every other `/api/` endpoint and `/mcp` answer 403). Answered without the session.",
         "operationId": "getApiInfo",
         "responses": {
           "200": {
@@ -89,7 +89,7 @@
           "Server"
         ],
         "summary": "Change feed",
-        "description": "`{version, commitSeq, recent: [{version, by, commitSeq, detail?}], view, mcp, damageFound}`; `by` is the client of the commit (`X-Graphersal-Client` of a page, `mcp`, or `ai` with the conversation id in `detail`). Polled by the page to reload on changes it did not make.",
+        "description": "`{version, commitSeq, recent: [{version, by, commitSeq, detail?}], view, mcp, damageFound, readOnly}` (`readOnly`: read-only now; it changes at run time with the host's runtime read-only toggle); `by` is the client of the commit (`X-Graphersal-Client` of a page, `mcp`, or `ai` with the conversation id in `detail`). Polled by the page to reload on changes it did not make.",
         "operationId": "getApiChanges",
         "responses": {
           "200": {

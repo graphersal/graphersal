@@ -27,6 +27,11 @@
 //! databases of a host serving several (each [`Context`] is still one graph), answering what
 //! they found as data ([`OpenNote`]) and the embedding models per database.
 //!
+//! A host may also turn a served graph read-only and back while it is served, without
+//! reopening it (EXPERIMENTAL): [`ContextBuilder::runtime_read_only`],
+//! [`Context::set_read_only`], [`Context::is_read_only`]; every modifying request (HTTP API, MCP
+//! tools, scheduled jobs) is then refused with one message ([`READ_ONLY_HEADLINE`]).
+//!
 //! # Extension points
 //!
 //! What a host adds goes through these points; each has the core default a host gets without
@@ -75,6 +80,7 @@ mod job_workers;
 mod launch;
 mod mcp;
 mod open;
+mod read_only;
 mod runs;
 mod server;
 mod ui;
@@ -83,6 +89,8 @@ mod ui;
 mod extension_tests;
 #[cfg(test)]
 mod launch_tests;
+#[cfg(test)]
+mod read_only_tests;
 
 pub use api::{SERVER_ID, handle};
 pub use context::{
@@ -99,6 +107,7 @@ pub use open::{
     NoteLevel, OpenError, OpenErrorKind, OpenNote, OpenStore, OpenedBase, OpenedLayerStore,
     OpenedStore, layer_base_of_store, open_layer_store, open_store,
 };
+pub use read_only::{READ_ONLY_HEADLINE, READ_ONLY_HELP};
 pub use runs::{RUN_TEXT_HEAD_CHARS, Registered, RunHandle, RunInfo, RunKind, RunObserver, Runs};
 pub use server::{GraphResolver, Lifecycle, LifecycleHooks, OneGraph, Server};
 pub use ui::Ui;

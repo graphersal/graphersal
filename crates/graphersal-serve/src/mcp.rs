@@ -60,19 +60,22 @@ mod enabled {
     use crate::http::{HttpError, Request, Response};
     use crate::runs::{RunDetails, RunKind};
 
-    /// The endpoint's status with `readOnly` of the context's profile.
+    /// The endpoint's status with `readOnly` of the context's profile (or of the runtime
+    /// read-only toggle, while it is on).
     pub(crate) fn endpoint_status(context: &Context) -> Value {
         let (Some(mcp), Some(profile)) = (context.mcp(), context.mcp_profile()) else {
             return Value::Null;
         };
         let mut status = mcp.status();
-        status["readOnly"] = json!(profile.read_only());
+        status["readOnly"] = json!(profile.read_only() || context.runtime_read_only_on());
         status
     }
 
-    /// Whether the context's MCP profile is read-only (`false` without an endpoint).
+    /// Whether an agent's writes are refused here: the context's MCP profile is read-only, or
+    /// the runtime read-only toggle is on (its commit hook refuses them; the profile and so the
+    /// tool list stay as they are). Asked only of a context with an endpoint.
     fn profile_read_only(context: &Context) -> bool {
-        context.mcp_profile().is_some_and(|p| p.read_only())
+        context.mcp_profile().is_some_and(|p| p.read_only()) || context.runtime_read_only_on()
     }
 
     /// `GET /api/mcp/stats`: the endpoint's usage statistics (memory only, since the start), or
@@ -160,6 +163,7 @@ mod enabled {
                 | ServeError::Lifecycle(_)
                 | ServeError::Session(_)
                 | ServeError::NoMcp(_)
+                | ServeError::Unsupported(_)
                 | ServeError::Open(_)
                 | ServeError::Failed(_) => McpError::Unavailable(err.to_string()),
             })

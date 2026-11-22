@@ -47,11 +47,13 @@ pub(crate) fn route(
         }
         (Method::Post, "store/checkpoint") => {
             own_store(context)?;
+            context.refuse_runtime_writes()?;
             let name = body_text(&request.json_body()?, "name");
             value(session_call(context, move |s| s.store_checkpoint(&name))?)
         }
         (Method::Post, "store/mark") => {
             own_store(context)?;
+            context.refuse_runtime_writes()?;
             let name = body_text(&request.json_body()?, "name");
             value(session_call(context, move |s| s.store_mark(&name))?)
         }
@@ -97,6 +99,7 @@ pub(crate) fn route(
         }
         (Method::Post, "store/rollback") => {
             own_store(context)?;
+            context.refuse_runtime_writes()?;
             let body = request.json_body()?;
             let answer = session_call(context, move |s| s.store_rollback(&body));
             set_view(context, None);
@@ -115,6 +118,7 @@ pub(crate) fn route(
         }
         (Method::Post, "store/attic/restore") => {
             own_store(context)?;
+            context.refuse_runtime_writes()?;
             let id = body_id(request)?;
             let answer = session_call(context, move |s| s.store_attic_restore(&id));
             set_view(context, None);
@@ -140,6 +144,7 @@ pub(crate) fn route(
         }
         (Method::Post, "store/attic/remove") => {
             own_store(context)?;
+            context.refuse_runtime_writes()?;
             let id = body_id(request)?;
             value(session_call(context, move |s| s.store_attic_remove(&id))?)
         }
@@ -168,6 +173,7 @@ pub(crate) fn route(
         }
         (Method::Post, "store/compact") => {
             own_store(context)?;
+            context.refuse_runtime_writes()?;
             // An empty body is `{}` (a bare `curl -X POST`).
             let body = if request.body_length() == Some(0) {
                 json!({})
