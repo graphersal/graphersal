@@ -83,5 +83,16 @@ to a healthy state:
   properties: restore the blob first, or change the schema. Without the flag a repair carries the
   definitions and reports their blobs as not carried.
 
+- **Fill them while copying**: `graphersal store convert <dir> <new> --fill-blobs <source>`
+  (`Store::convert_with(from, to, ConvertOptions::new().with_fill_missing_blobs(source))`) makes
+  the conversion copy of a closed store and fills every blob it references but lacks (or holds
+  damaged) from the same kinds of source, checked the same way, into the COPY only: the source
+  store and the fill source are only read. A host that keeps its model blobs in one shared
+  directory laid out as `blobs/<2 hex>/<hash>` passes that directory (`BlobSource::store`). A
+  blob the source does not hold, or holds with other bytes, fails the conversion
+  (`StoreFailure::BlobUnavailable` / `BlobDamaged`, naming it) and leaves no copy; the report
+  (`ConvertReport`) lists the blobs filled, and each is a `blob.repaired` record in the copy's
+  journal.
+
 By hand, copying the file `blobs/<2 hex>/<hash>` from another copy works too, and writing the
 content again (`Store::write_blob`) replaces a damaged blob.

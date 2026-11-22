@@ -11,8 +11,9 @@ use std::sync::Arc;
 
 use graphersal::persist::{
     BackupMode, BackupReport, BlobSource, ClosedCommitOptions, CompactionAdvice, CompactionPolicy,
-    DamagePolicy, ModelCopy, ModelInfo, PersistError, RecoveryTarget, RepairOptions,
-    RestoreBlobsReport, RollbackMode, SingleFileDir, Store, StoreDir, StoreOptions, store_dir_at,
+    ConvertOptions, DamagePolicy, ModelCopy, ModelInfo, PersistError, RecoveryTarget,
+    RepairOptions, RestoreBlobsReport, RollbackMode, SingleFileDir, Store, StoreDir, StoreOptions,
+    store_dir_at,
 };
 
 use graphersal::storage::{LayerBase, LayeredGraph, PersistentStorage};
@@ -167,11 +168,14 @@ pub fn command_help(command: &str) -> Option<String> {
             false,
         ),
         "convert" => (
-            "graphersal store convert <DIR> <NEW> [--single-file]",
+            "graphersal store convert <DIR> <NEW> [--single-file] [--fill-blobs <SOURCE>]",
             "Copies the whole store DIR (snapshots, WAL, marks, attic) into NEW, byte for byte:\n\
              a directory into a single file (NEW ending in .gstore, or --single-file) or back.\n\
              NEW must not exist (or be empty); DIR must be closed (no server on it). The copy\n\
-             is verified; DIR is not changed.",
+             is verified; DIR is not changed. --fill-blobs takes every blob DIR lacks (a model\n\
+             blob, say) from SOURCE into the copy, checked by its hash: a directory laid out as\n\
+             blobs/<2 hex>/<hash> (a shared model directory, another store, a backup), a ZIP\n\
+             backup or a .gsnap; SOURCE is only read.",
             false,
         ),
         "upgrade" => (
@@ -1226,6 +1230,7 @@ pub fn run(args: &[String]) -> i32 {
             let takes_value = matches!(
                 name.as_str(),
                 "from"
+                    | "fill-blobs"
                     | "base"
                     | "chunk-size"
                     | "on-damage"
@@ -1270,7 +1275,7 @@ pub fn run(args: &[String]) -> i32 {
     };
     let known: &[&str] = match command.as_str() {
         "create" => &["from", "chunk-size", "single-file", "on-damage"],
-        "convert" => &["single-file"],
+        "convert" => &["single-file", "fill-blobs"],
         "upgrade" => &["single-file", "in-place"],
         "compact-advice" => &["min-ratio", "min-reclaimable", "min-size"],
         "journal" => &[
@@ -2301,9 +2306,23 @@ pub fn run(args: &[String]) -> i32 {
                 ));
             }
             let target = backend_of(to, flag("single-file").is_some());
-            match Store::convert(from.as_str(), &target) {
-                Ok((files, bytes)) => {
-                    let note = Note::new(format!(
+            let mut options = ConvertOptions::new();
+            if let Some(fill) = flag("fill-blobs") {
+                if fill.is_empty() {
+                    return usage("`store convert --fill-blobs` needs a <SOURCE>");
+                }
+                match blob_source(&fill) {
+                    Ok(source) => options = options.with_fill_missing_blobs(source),
+                    Err(message) => {
+                        errln!("Error: {message}");
+                        return EXIT_USAGE_ERROR;
+                    }
+                }
+            }
+            match Store::convert_with(from.as_str(), &target, options) {
+                Ok(report) => {
+                    let (files, bytes) = (report.files_copied, report.bytes_copied);
+                    let mut note = Note::new(format!(
                         "Copied the store {from} into the {} {to}",
                         if matches!(target.space_usage(), Ok(Some(_))) {
                             "single file"
@@ -2315,6 +2334,16 @@ pub fn run(args: &[String]) -> i32 {
                     .detail("size", bytes_text(bytes))
                     .detail("verified", "yes")
                     .detail("source", format!("{from} is unchanged"));
+                    if let Some(fill) = &report.fill_source {
+                        note = note.detail(
+                            "blobs filled",
+                            format!(
+                                "{} ({}) from {fill}",
+                                report.blobs_filled.len(),
+                                bytes_text(report.bytes_filled)
+                            ),
+                        );
+                    }
                     print_block(&use_store(note, to, None).text());
                     EXIT_OK
                 }

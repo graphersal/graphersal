@@ -4,7 +4,9 @@
 //! A blob is named by its hash, so the same name anywhere is the same bytes: a backup, a ZIP
 //! backup, a packed snapshot or another store holding it is a valid source. Every restored blob
 //! is checked by length, CRC-32C and (for a known algorithm) its hash before it is renamed into
-//! place; a healthy blob is never touched.
+//! place; a healthy blob is never touched. `Store::convert_with` (`ConvertOptions::
+//! with_fill_missing_blobs`) runs the same restore on the copy it makes, from the source
+//! given.
 
 use std::collections::BTreeMap;
 use std::io::Read;
@@ -12,7 +14,7 @@ use std::sync::Arc;
 
 use super::blobs::{self, BlobError, BlobFault, BlobKey};
 use super::closed_commit::closed_store_prelude;
-use super::files::DirPath;
+use super::files::{DirPath, GraphFile};
 use super::{Store, system_journal};
 use crate::graph::system_journal::{Event, catalogue};
 use crate::persist::PersistError;
@@ -105,6 +107,49 @@ impl RestoreBlobsReport {
     }
 }
 
+/// The options of [`Store::convert_with`].
+#[derive(Debug, Default)]
+#[non_exhaustive]
+pub struct ConvertOptions {
+    pub(crate) fill_from: Option<BlobSource>,
+}
+
+impl ConvertOptions {
+    /// The defaults: a conversion as [`Store::convert`] makes it (a missing blob fails the
+    /// copy's verification).
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Fills the blobs the copy references but `from` lacks (or holds damaged) from `source`
+    /// (a directory laid out as a store's `blobs/<2 hex>/<hash>`, such as a host's shared
+    /// model directory: [`BlobSource::store`]; a backup, a ZIP backup or a `.gsnap` work too).
+    /// Every blob taken is checked by length, CRC-32C and hash before it is written into the
+    /// copy; the source is only read.
+    pub fn with_fill_missing_blobs(mut self, source: BlobSource) -> Self {
+        self.fill_from = Some(source);
+        self
+    }
+}
+
+/// What [`Store::convert_with`] did.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct ConvertReport {
+    /// The files copied from the source store (`GRAPH` included), as [`Store::convert`]
+    /// returns them.
+    pub files_copied: usize,
+    /// Their bytes.
+    pub bytes_copied: u64,
+    /// The fill source, as [`BlobSource::label`] names it, when
+    /// [`ConvertOptions::with_fill_missing_blobs`] was given.
+    pub fill_source: Option<String>,
+    /// The blobs taken from the fill source into the copy (relative names `blobs/..`).
+    pub blobs_filled: Vec<String>,
+    /// Their bytes.
+    pub bytes_filled: u64,
+}
+
 /// The outcome of one blob read from the source.
 enum Outcome {
     Restored,
@@ -144,183 +189,195 @@ impl Store {
     ) -> Result<RestoreBlobsReport, PersistError> {
         let dir = DirPath::root(dir.into_store_dir());
         let (lock, graph_file) = closed_store_prelude(&dir)?;
-        let referenced = blobs::referenced(&dir, &graph_file.chain(), false)?;
-        let mut report = RestoreBlobsReport {
-            source: source.label.clone(),
-            referenced: referenced.blobs.len() as u64,
-            ..RestoreBlobsReport::default()
-        };
-        let mut wanted: BTreeMap<BlobKey, BlobRef> = BTreeMap::new();
-        for (key, blob) in &referenced.blobs {
-            match blobs::check_blob(&dir, blob, true) {
-                Ok(()) => {}
-                Err(BlobError::Fault(_)) => {
-                    report.wanted.push(blobs::blob_name(blob));
-                    wanted.insert(key.clone(), blob.clone());
-                }
-                Err(BlobError::Io(err)) => return Err(PersistError::io("checking a blob", err)),
-                Err(BlobError::DoesNotFit(err)) => return Err(PersistError::Graph(err)),
-                Err(BlobError::Unsupported) => {}
-            }
-        }
-        let mut done: BTreeMap<BlobKey, Outcome> = BTreeMap::new();
-        if !wanted.is_empty() {
-            match source.kind {
-                SourceKind::Dir(from) => {
-                    let from = DirPath::root(from);
-                    for (key, blob) in &wanted {
-                        match blobs::check_blob(&from, blob, true) {
-                            Ok(()) => {}
-                            Err(BlobError::Fault(BlobFault::Missing)) => continue,
-                            Err(BlobError::Fault(_)) => {
-                                done.insert(key.clone(), Outcome::Damaged);
-                                continue;
-                            }
-                            Err(BlobError::Io(err)) => {
-                                return Err(PersistError::io("reading the source's blob", err));
-                            }
-                            Err(BlobError::DoesNotFit(err)) => {
-                                return Err(PersistError::Graph(err));
-                            }
-                            Err(BlobError::Unsupported) => continue,
-                        }
-                        match blobs::copy_blob(&from, &dir, blob, true) {
-                            Ok(_) => {
-                                done.insert(key.clone(), Outcome::Restored);
-                            }
-                            Err(BlobError::Fault(_)) => {
-                                done.insert(key.clone(), Outcome::Damaged);
-                            }
-                            Err(BlobError::Io(err)) => {
-                                return Err(PersistError::io("restoring a blob", err));
-                            }
-                            Err(BlobError::DoesNotFit(err)) => {
-                                return Err(PersistError::Graph(err));
-                            }
-                            Err(BlobError::Unsupported) => {}
-                        }
-                    }
-                }
-                #[cfg(feature = "persist-zip")]
-                SourceKind::Zip(reader) => {
-                    let by_name: BTreeMap<String, (BlobKey, BlobRef)> = wanted
-                        .iter()
-                        .map(|(key, blob)| (blobs::blob_name(blob), (key.clone(), blob.clone())))
-                        .collect();
-                    let mut failure: Option<PersistError> = None;
-                    let problems = super::zip::check_entries(reader, &mut |name, _, data| {
-                        if failure.is_some() {
-                            return Vec::new();
-                        }
-                        let Some((key, blob)) = by_name.get(name) else {
-                            return Vec::new();
-                        };
-                        let staged = match blobs::stage(&dir) {
-                            Ok(staged) => staged,
-                            Err(err) => {
-                                failure = Some(err);
-                                return Vec::new();
-                            }
-                        };
-                        let written = super::snapshot_dir::write_file(&staged, |out| {
-                            std::io::copy(data, out)
-                                .map(|_| ())
-                                .map_err(|err| PersistError::io("reading the backup archive", err))
-                        });
-                        let outcome = match written {
-                            Ok(()) => install(&dir, blob, &staged),
-                            Err(err) => {
-                                let _ = staged.remove_file();
-                                Err(err)
-                            }
-                        };
-                        match outcome {
-                            Ok(outcome) => {
-                                done.insert(key.clone(), outcome);
-                            }
-                            Err(err) => failure = Some(err),
-                        }
-                        Vec::new()
-                    });
-                    if let Some(err) = failure {
-                        return Err(err);
-                    }
-                    if let Some((_, reason)) = problems.iter().find(|(name, _)| name == ".") {
-                        return Err(PersistError::corrupt(&report.source, 0, reason.clone()));
-                    }
-                    // An entry whose ZIP CRC fails was checked against the blob's own CRC-32C
-                    // and hash already: a restored blob is intact whatever the archive says.
-                }
-                SourceKind::Packed(reader) => {
-                    let mut reader = crate::persist::snapshot::PackedReader::open(reader)?;
-                    let table = reader.manifest.blobs.clone();
-                    for entry in reader.manifest.segments.clone() {
-                        let blob = (entry.kind == blobs::PACKED_BLOB_KIND)
-                            .then(|| blobs::packed_blob_ref(&entry, &table).ok())
-                            .flatten()
-                            .filter(|blob| wanted.contains_key(&blobs::key_of(blob)));
-                        let Some(blob) = blob else {
-                            reader.copy_segment(&mut std::io::sink())?;
-                            continue;
-                        };
-                        let staged = blobs::stage(&dir)?;
-                        let written = super::snapshot_dir::write_file(&staged, |out| {
-                            reader.copy_segment(out).map(|_| ())
-                        });
-                        let outcome = match written {
-                            Ok(()) => install(&dir, &blob, &staged)?,
-                            Err(PersistError::Corrupt { .. }) => {
-                                let _ = staged.remove_file();
-                                Outcome::Damaged
-                            }
-                            Err(err) => {
-                                let _ = staged.remove_file();
-                                return Err(err);
-                            }
-                        };
-                        done.insert(blobs::key_of(&blob), outcome);
-                    }
-                }
-            }
-        }
-        for (key, blob) in &wanted {
-            let name = blobs::blob_name(blob);
-            match done.get(key) {
-                Some(Outcome::Restored) => {
-                    report.bytes_restored += blob.length();
-                    report.restored.push(name);
-                }
-                Some(Outcome::Damaged) => report.damaged_in_source.push(name),
-                None => report.not_found.push(name),
-            }
-        }
-        if !report.restored.is_empty() {
-            let clock = crate::graph::CommitClock::new();
-            let journal = system_journal::open_journal(system_journal::OpenJournal {
-                dir: &dir,
-                clock: &clock,
-                writable: true,
-                instance_name: None,
-                segment_bytes: system_journal::DEFAULT_JOURNAL_SEGMENT_BYTES,
-            });
-            for (key, blob) in &wanted {
-                if matches!(done.get(key), Some(Outcome::Restored)) {
-                    journal.emit(
-                        &catalogue::BLOB_REPAIRED,
-                        Event::new(format!(
-                            "the blob {} was restored from {}",
-                            blobs::blob_name(blob),
-                            report.source
-                        ))
-                        .field("hash", blob.hash_hex())
-                        .field("how", "restored")
-                        .field("source", report.source.as_str()),
-                    );
-                }
-            }
-            journal.detach_writer();
-        }
+        let report = restore_into(&dir, &graph_file, source)?;
         drop(lock);
         Ok(report)
     }
+}
+
+/// The work of [`Store::restore_blobs_from`] on the store in `dir` whose `GRAPH` is
+/// `graph_file`, without the prelude (the caller holds the lock, or owns `dir` alone: a copy
+/// being made by [`Store::convert_with`]).
+pub(crate) fn restore_into(
+    dir: &DirPath,
+    graph_file: &GraphFile,
+    source: BlobSource,
+) -> Result<RestoreBlobsReport, PersistError> {
+    let referenced = blobs::referenced(dir, &graph_file.chain(), false)?;
+    let mut report = RestoreBlobsReport {
+        source: source.label.clone(),
+        referenced: referenced.blobs.len() as u64,
+        ..RestoreBlobsReport::default()
+    };
+    let mut wanted: BTreeMap<BlobKey, BlobRef> = BTreeMap::new();
+    for (key, blob) in &referenced.blobs {
+        match blobs::check_blob(dir, blob, true) {
+            Ok(()) => {}
+            Err(BlobError::Fault(_)) => {
+                report.wanted.push(blobs::blob_name(blob));
+                wanted.insert(key.clone(), blob.clone());
+            }
+            Err(BlobError::Io(err)) => return Err(PersistError::io("checking a blob", err)),
+            Err(BlobError::DoesNotFit(err)) => return Err(PersistError::Graph(err)),
+            Err(BlobError::Unsupported) => {}
+        }
+    }
+    let mut done: BTreeMap<BlobKey, Outcome> = BTreeMap::new();
+    if !wanted.is_empty() {
+        match source.kind {
+            SourceKind::Dir(from) => {
+                let from = DirPath::root(from);
+                for (key, blob) in &wanted {
+                    match blobs::check_blob(&from, blob, true) {
+                        Ok(()) => {}
+                        Err(BlobError::Fault(BlobFault::Missing)) => continue,
+                        Err(BlobError::Fault(_)) => {
+                            done.insert(key.clone(), Outcome::Damaged);
+                            continue;
+                        }
+                        Err(BlobError::Io(err)) => {
+                            return Err(PersistError::io("reading the source's blob", err));
+                        }
+                        Err(BlobError::DoesNotFit(err)) => {
+                            return Err(PersistError::Graph(err));
+                        }
+                        Err(BlobError::Unsupported) => continue,
+                    }
+                    match blobs::copy_blob(&from, dir, blob, true) {
+                        Ok(_) => {
+                            done.insert(key.clone(), Outcome::Restored);
+                        }
+                        Err(BlobError::Fault(_)) => {
+                            done.insert(key.clone(), Outcome::Damaged);
+                        }
+                        Err(BlobError::Io(err)) => {
+                            return Err(PersistError::io("restoring a blob", err));
+                        }
+                        Err(BlobError::DoesNotFit(err)) => {
+                            return Err(PersistError::Graph(err));
+                        }
+                        Err(BlobError::Unsupported) => {}
+                    }
+                }
+            }
+            #[cfg(feature = "persist-zip")]
+            SourceKind::Zip(reader) => {
+                let by_name: BTreeMap<String, (BlobKey, BlobRef)> = wanted
+                    .iter()
+                    .map(|(key, blob)| (blobs::blob_name(blob), (key.clone(), blob.clone())))
+                    .collect();
+                let mut failure: Option<PersistError> = None;
+                let problems = super::zip::check_entries(reader, &mut |name, _, data| {
+                    if failure.is_some() {
+                        return Vec::new();
+                    }
+                    let Some((key, blob)) = by_name.get(name) else {
+                        return Vec::new();
+                    };
+                    let staged = match blobs::stage(dir) {
+                        Ok(staged) => staged,
+                        Err(err) => {
+                            failure = Some(err);
+                            return Vec::new();
+                        }
+                    };
+                    let written = super::snapshot_dir::write_file(&staged, |out| {
+                        std::io::copy(data, out)
+                            .map(|_| ())
+                            .map_err(|err| PersistError::io("reading the backup archive", err))
+                    });
+                    let outcome = match written {
+                        Ok(()) => install(dir, blob, &staged),
+                        Err(err) => {
+                            let _ = staged.remove_file();
+                            Err(err)
+                        }
+                    };
+                    match outcome {
+                        Ok(outcome) => {
+                            done.insert(key.clone(), outcome);
+                        }
+                        Err(err) => failure = Some(err),
+                    }
+                    Vec::new()
+                });
+                if let Some(err) = failure {
+                    return Err(err);
+                }
+                if let Some((_, reason)) = problems.iter().find(|(name, _)| name == ".") {
+                    return Err(PersistError::corrupt(&report.source, 0, reason.clone()));
+                }
+                // An entry whose ZIP CRC fails was checked against the blob's own CRC-32C
+                // and hash already: a restored blob is intact whatever the archive says.
+            }
+            SourceKind::Packed(reader) => {
+                let mut reader = crate::persist::snapshot::PackedReader::open(reader)?;
+                let table = reader.manifest.blobs.clone();
+                for entry in reader.manifest.segments.clone() {
+                    let blob = (entry.kind == blobs::PACKED_BLOB_KIND)
+                        .then(|| blobs::packed_blob_ref(&entry, &table).ok())
+                        .flatten()
+                        .filter(|blob| wanted.contains_key(&blobs::key_of(blob)));
+                    let Some(blob) = blob else {
+                        reader.copy_segment(&mut std::io::sink())?;
+                        continue;
+                    };
+                    let staged = blobs::stage(dir)?;
+                    let written = super::snapshot_dir::write_file(&staged, |out| {
+                        reader.copy_segment(out).map(|_| ())
+                    });
+                    let outcome = match written {
+                        Ok(()) => install(dir, &blob, &staged)?,
+                        Err(PersistError::Corrupt { .. }) => {
+                            let _ = staged.remove_file();
+                            Outcome::Damaged
+                        }
+                        Err(err) => {
+                            let _ = staged.remove_file();
+                            return Err(err);
+                        }
+                    };
+                    done.insert(blobs::key_of(&blob), outcome);
+                }
+            }
+        }
+    }
+    for (key, blob) in &wanted {
+        let name = blobs::blob_name(blob);
+        match done.get(key) {
+            Some(Outcome::Restored) => {
+                report.bytes_restored += blob.length();
+                report.restored.push(name);
+            }
+            Some(Outcome::Damaged) => report.damaged_in_source.push(name),
+            None => report.not_found.push(name),
+        }
+    }
+    if !report.restored.is_empty() {
+        let clock = crate::graph::CommitClock::new();
+        let journal = system_journal::open_journal(system_journal::OpenJournal {
+            dir,
+            clock: &clock,
+            writable: true,
+            instance_name: None,
+            segment_bytes: system_journal::DEFAULT_JOURNAL_SEGMENT_BYTES,
+        });
+        for (key, blob) in &wanted {
+            if matches!(done.get(key), Some(Outcome::Restored)) {
+                journal.emit(
+                    &catalogue::BLOB_REPAIRED,
+                    Event::new(format!(
+                        "the blob {} was restored from {}",
+                        blobs::blob_name(blob),
+                        report.source
+                    ))
+                    .field("hash", blob.hash_hex())
+                    .field("how", "restored")
+                    .field("source", report.source.as_str()),
+                );
+            }
+        }
+        journal.detach_writer();
+    }
+    Ok(report)
 }
