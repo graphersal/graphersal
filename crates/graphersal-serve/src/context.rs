@@ -35,7 +35,7 @@ use std::collections::VecDeque;
 use std::fmt;
 use std::panic::AssertUnwindSafe;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::sync::{Arc, Mutex};
 
@@ -91,6 +91,9 @@ pub enum ServeError {
     /// [`crate::layer_base_of_store`]): why, the diagnostic and the engine's error behind it.
     /// An HTTP answer is a `500`.
     Open(crate::open::OpenError),
+    /// The context does not offer what was asked ([`Context::set_read_only`] on a context
+    /// built without [`ContextBuilder::runtime_read_only`]). An HTTP answer is a `500`.
+    Unsupported(String),
 }
 
 impl fmt::Display for ServeError {
@@ -104,6 +107,7 @@ impl fmt::Display for ServeError {
             | Self::Lifecycle(message)
             | Self::Session(message)
             | Self::NoMcp(message)
+            | Self::Unsupported(message)
             | Self::Failed(message) => f.write_str(message),
         }
     }
@@ -119,6 +123,7 @@ impl std::error::Error for ServeError {
             | Self::Lifecycle(_)
             | Self::Session(_)
             | Self::NoMcp(_)
+            | Self::Unsupported(_)
             | Self::Busy(_)
             | Self::Failed(_) => None,
         }
@@ -139,6 +144,7 @@ impl From<ServeError> for HttpError {
             | ServeError::Lifecycle(_)
             | ServeError::Session(_)
             | ServeError::NoMcp(_)
+            | ServeError::Unsupported(_)
             | ServeError::Open(_) => 500,
         };
         HttpError(status, err.to_string())
@@ -531,8 +537,12 @@ pub struct Context {
     /// The session presets, as `GET /api/info` reports them.
     pub(crate) presets: Value,
     /// `--read-only` (or a Store opened read-only): the graph refuses every write and
-    /// "Save to file" is refused.
-    pub(crate) read_only: bool,
+    /// "Save to file" is refused. With [`Self::read_only_toggle`] the toggle's flag, which
+    /// [`Context::set_read_only`] flips.
+    pub(crate) read_only: Arc<AtomicBool>,
+    /// The runtime read-only toggle ([`ContextBuilder::runtime_read_only`]); `None`: read-only
+    /// is fixed for the context's life.
+    pub(crate) read_only_toggle: Option<Arc<crate::read_only::Toggle>>,
     /// The Store of a `--graph <dir>`: checkpoints, marks, snapshot downloads, views, forks,
     /// rollbacks, the attic.
     pub(crate) store: Option<Arc<Store>>,
@@ -583,6 +593,7 @@ pub struct ContextBuilder {
     save_refusal: Option<String>,
     presets: Value,
     read_only: bool,
+    runtime_read_only: Option<Option<String>>,
     store: Option<Arc<Store>>,
     commit_seq: u64,
     layered: u8,
@@ -639,9 +650,38 @@ impl ContextBuilder {
         self
     }
 
-    /// The graph refuses every write; "Save to file" is refused.
+    /// The graph refuses every write; "Save to file" is refused. With
+    /// [`Self::runtime_read_only`] the toggle's initial value; without it the host makes the
+    /// graph refuse its writes itself (the CLI's `--read-only` registers a commit hook of its
+    /// own), and the flag only answers `GET /api/info` `readOnly` and refuses "Save to file".
     pub fn read_only(mut self, read_only: bool) -> Self {
         self.read_only = read_only;
+        self
+    }
+
+    /// The **runtime read-only toggle** (EXPERIMENTAL): [`Context::set_read_only`] turns
+    /// read-only on and off while the graph is served, without reopening it; `help` is the help
+    /// text of its refusals (`None`: [`crate::READ_ONLY_HELP`]), shown after
+    /// [`crate::READ_ONLY_HEADLINE`]. [`Self::read_only`] is its initial value. Default: off
+    /// (read-only fixed for the context's life, as the CLI's dev server has it).
+    ///
+    /// While it is on, every unit that changes the graph (a query of the HTTP API or of an MCP
+    /// tool, the element editor, schema, catalog, compression, index and advisor changes, a
+    /// scheduled query) is vetoed at commit by a commit hook on the served graph, registered
+    /// the first time read-only is turned on (on a Store its live graph) and never removed; the
+    /// HTTP API refuses the writes that are no commit with `409` and the same text (store
+    /// checkpoint, mark, rollback, attic restore and remove, compaction; `jobs/define`, `drop`,
+    /// `enable`, `schedule`, `run`; save to file keeps its `409` "nothing is saved"); the job
+    /// ticker starts no scheduled job (all of them pause, the workload statistics flush too).
+    /// Reading, backups, forks, snapshots, views and verify stay allowed. `GET /api/info` and
+    /// `GET /api/changes` answer `readOnly`, as does the MCP status of the context.
+    ///
+    /// The hook is on the graph, not on the context: two contexts over one session (or a graph
+    /// a host serves in several contexts) refuse each other's writes while either one is
+    /// read-only. Never ask for it on a graph whose writes are refused for good already (the
+    /// CLI's `--read-only` hook): turning it off would not let writes through.
+    pub fn runtime_read_only(mut self, help: Option<String>) -> Self {
+        self.runtime_read_only = Some(help);
         self
     }
 
@@ -770,6 +810,7 @@ impl ContextBuilder {
 
     /// The context.
     pub fn build(self) -> Arc<Context> {
+        let read_only = Arc::new(AtomicBool::new(self.read_only));
         Arc::new(Context {
             jobs: match self.runner {
                 Runner::Session(jobs) => Jobs::Session(Mutex::new(jobs)),
@@ -785,7 +826,10 @@ impl ContextBuilder {
             memory_tracked: self.memory_tracked,
             ui_profile: self.ui_profile,
             presets: self.presets,
-            read_only: self.read_only,
+            read_only: read_only.clone(),
+            read_only_toggle: self
+                .runtime_read_only
+                .map(|help| Arc::new(crate::read_only::Toggle::new(read_only, help))),
             store: self.store,
             view: Mutex::new(None),
             feed: Arc::new(Mutex::new(Feed {
@@ -819,6 +863,7 @@ impl Context {
             save_refusal: None,
             presets: Value::Null,
             read_only: false,
+            runtime_read_only: None,
             store: None,
             commit_seq: 0,
             layered: Layered::UNKNOWN,
@@ -833,6 +878,76 @@ impl Context {
             ui_profile: None,
             allow_list: None,
         }
+    }
+
+    /// Whether the graph is served read-only now: the builder's [`ContextBuilder::read_only`],
+    /// or what [`Context::set_read_only`] set last (`GET /api/info` `readOnly`).
+    pub fn is_read_only(&self) -> bool {
+        self.read_only.load(Ordering::SeqCst)
+    }
+
+    /// Turns the runtime read-only toggle on or off ([`ContextBuilder::runtime_read_only`]),
+    /// without reopening the graph: connections and MCP sessions stay. The flip is a session
+    /// job, so every job queued before it (an HTTP request, an MCP tool call, a write) runs to
+    /// its end first, under the old setting; every job after it sees the new one. The first
+    /// turn on registers the commit hook on the served graph.
+    ///
+    /// A scheduled-job run already on a job worker thread when read-only turns on is not
+    /// awaited: a write it commits after the flip is vetoed like any other (it ends as a failed
+    /// run). A host that wants it finished first waits for [`Context::background_runs`] `0`
+    /// before the call. With a host's [`JobQueue`] the flip runs on one of its workers: jobs
+    /// running on the others at that moment are not awaited either.
+    ///
+    /// `Err`: [`ServeError::Unsupported`] on a context built without the toggle,
+    /// [`ServeError::Failed`] when the graph refuses the hook (a storage without commit hooks;
+    /// read-only stays as it was), the errors of [`Context::call`].
+    pub fn set_read_only(&self, read_only: bool) -> Result<(), ServeError> {
+        let Some(toggle) = &self.read_only_toggle else {
+            return Err(ServeError::Unsupported(
+                "the context has no runtime read-only toggle: build it with \
+                 ContextBuilder::runtime_read_only"
+                    .to_string(),
+            ));
+        };
+        let toggle = toggle.clone();
+        self.call_fallible(move |session| -> Result<(), String> {
+            if read_only {
+                toggle.ensure_registered(session)?;
+            }
+            toggle.on.store(read_only, Ordering::SeqCst);
+            Ok(())
+        })
+    }
+
+    /// The `409` of a write that is no commit while the runtime read-only toggle is on
+    /// ([`ContextBuilder::runtime_read_only`]); `Ok` without the toggle or while it is off.
+    pub(crate) fn refuse_runtime_writes(&self) -> Result<(), HttpError> {
+        if self.runtime_read_only_on() {
+            return Err(self.read_only_refusal());
+        }
+        Ok(())
+    }
+
+    /// The `409` of the runtime read-only toggle: its headline and help text.
+    pub(crate) fn read_only_refusal(&self) -> HttpError {
+        let text = match &self.read_only_toggle {
+            Some(toggle) => toggle.refusal(),
+            None => crate::read_only::READ_ONLY_HEADLINE.to_string(),
+        };
+        HttpError(409, text)
+    }
+
+    /// Whether the runtime read-only toggle is on (the job ticker pauses, the MCP status says
+    /// read-only); `false` without the toggle.
+    pub(crate) fn runtime_read_only_on(&self) -> bool {
+        self.read_only_toggle.as_ref().is_some_and(|t| t.is_on())
+    }
+
+    /// The read-only flag the authorizer of a saved query in allow-list mode follows: the
+    /// builder's fixed flag; with the toggle `false` (its commit hook refuses the writes, with
+    /// its one message).
+    pub(crate) fn fixed_read_only(&self) -> bool {
+        self.read_only_toggle.is_none() && self.is_read_only()
     }
 
     /// Whether the HTTP API is in allow-list mode ([`ContextBuilder::api_allow_list`]).
@@ -960,7 +1075,19 @@ impl Context {
             _ => graphersal::workload::Channel::Playground,
         };
         let key = client.pool_key();
+        // Built read-only with the runtime toggle: its commit hook goes on the graph before the
+        // first job runs (the toggle registers it once).
+        let toggle = self
+            .read_only_toggle
+            .clone()
+            .filter(|toggle| toggle.is_on());
         let job: Job = Box::new(move |session| {
+            if let Some(toggle) = toggle
+                && let Err(err) = toggle.ensure_registered(session)
+            {
+                let _ = reply.send(Err(ServeError::Session(err)));
+                return;
+            }
             let before = position(session);
             let out = graphersal::workload::scope(channel, true, || job(session));
             let after = position(session);
@@ -985,7 +1112,7 @@ impl Context {
                 };
                 feed.record(client, seq);
             }
-            let _ = reply.send(out);
+            let _ = reply.send(Ok(out));
         });
         match &self.jobs {
             Jobs::Session(jobs) => {
@@ -1013,7 +1140,7 @@ impl Context {
         }
         answer
             .recv()
-            .map_err(|_| ServeError::Session("the request failed inside the session".to_string()))
+            .map_err(|_| ServeError::Session("the request failed inside the session".to_string()))?
     }
 
     /// The host's job queue, if this is the read-only serving mode.
@@ -1094,6 +1221,8 @@ impl JobTicker {
 /// [`JobTicker`] is stopped or the context is gone (the last [`Context`] dropped, or the session
 /// thread ended). Each tick is a short session job like a browser call
 /// that only decides what is due; the work happens on job worker threads (one per job group).
+/// While the runtime read-only toggle is on ([`ContextBuilder::runtime_read_only`]) a tick
+/// sends no job: every scheduled job pauses until it is off again.
 /// `Err` when the session does not take the time zone ([`ServeError::Session`]: an unknown
 /// zone, or the session job could not run; then no ticker starts) or when the thread cannot
 /// start.
@@ -1146,6 +1275,10 @@ pub(crate) fn start_ticker(
                 let Some(context) = context.upgrade() else {
                     break;
                 };
+                // Read-only at run time: every scheduled job pauses.
+                if context.runtime_read_only_on() {
+                    continue;
+                }
                 let now = std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
                     .map_or(0, |d| d.as_micros() as i64);
