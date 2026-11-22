@@ -1338,7 +1338,21 @@ pub(super) fn verify_as(
         Ok(entries) => {
             for entry in entries {
                 let at = format!("attic/{}", entry.id);
-                if let Err(err) = super::rollback::attic_state(dir, &entry.id, &read) {
+                // A layer store's entry rebuilds over its base (format spec 7.5); without the
+                // base its snapshots are checked below, its history is not rebuilt.
+                let rebuilt = match kind {
+                    VerifyAs::Layer(base) => crate::graph::LayeredGraph::over_base(base)
+                        .map_err(PersistError::from)
+                        .and_then(|empty| {
+                            super::rollback::attic_state_in(dir, &entry.id, &read, empty)
+                        })
+                        .map(|_| ()),
+                    VerifyAs::Either if unloaded_layers > 0 => Ok(()),
+                    VerifyAs::Plain | VerifyAs::Either => {
+                        super::rollback::attic_state(dir, &entry.id, &read).map(|_| ())
+                    }
+                };
+                if let Err(err) = rebuilt {
                     problem(
                         &mut report,
                         &at,

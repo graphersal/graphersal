@@ -508,9 +508,9 @@ struct Shared {
     /// operation. Commits do not take it: the WAL and the journal are other files.
     operations: parking_lot::RwLock<()>,
     /// The base of a layer store (format spec 7.5; `None`: a plain store): its checkpoints
-    /// encode the loaded layer (a merge is not layer-aware), and the operations a layer store
-    /// does not support yet refuse with [`StoreFailure::LayerStore`]; its views, closed
-    /// copies and verification load over it.
+    /// encode the loaded layer (a merge is not layer-aware); its views, forks, rollbacks,
+    /// attic operations and verification load over it, and a reload after a rollback or an
+    /// attic restore does not rebuild the base's model registry.
     layer: Option<crate::graph::LayerBase>,
 }
 
@@ -748,7 +748,9 @@ impl Store {
     ) -> Result<(usize, u64), PersistError> {
         let from = DirPath::root(from.into_store_dir());
         let to = DirPath::root(to.into_store_dir());
-        files::refuse_other_version(&from)?;
+        // A layer store too (format spec 7.5): its files, the base's identity in its
+        // manifests included, are copied as they are.
+        files::refuse_other_version_as(&from, files::StoreKind::Either)?;
         if !Self::is_store(from.store_dir())? {
             return Err(PersistError::NotAStore {
                 path: from.display(),
@@ -777,7 +779,7 @@ impl Store {
                 }
             }
             files::sync_dir(&to)?;
-            let verified = maintenance::verify(&to, None)?;
+            let verified = maintenance::verify_as(&to, None, maintenance::VerifyAs::Either)?;
             if !verified.is_ok() {
                 return Err(PersistError::store(
                     "convert the store",
@@ -948,6 +950,7 @@ impl Store {
             &DirPath::root(dir.into_store_dir()),
             target,
             &DirPath::root(new_dir.into_store_dir()),
+            None,
         )
     }
 
@@ -1191,6 +1194,7 @@ impl Store {
             &DirPath::root(dir.into_store_dir()),
             id,
             &DirPath::root(new_dir.into_store_dir()),
+            None,
         )
     }
 }
@@ -1934,13 +1938,18 @@ impl<S: PersistentStorage + Default> Store<S> {
 /// commit.
 ///
 /// **EXPERIMENTAL**, like [`LayeredGraph`](crate::storage::LayeredGraph). Every method of
-/// [`Store`] works on it except those not supported for layer stores yet, which refuse with
-/// [`StoreFailure::LayerStore`]: copies (fork, attic fork, repair, convert, backups, restore,
-/// export, upgrade), verification, rollback and attic restore, closed-store commits and
-/// checkpoints ([`Store::checkpoint_dir`]). A checkpoint encodes the loaded layer (a merge
-/// works on whole graphs); a damaged layer store refuses the open with the damage (no
-/// maintenance mode yet). The embedding models are the base's ([`LayerBase`](crate::storage::LayerBase)):
-/// the store keeps none.
+/// [`Store`] works on it, and every copy (backups, restores, export, fork, attic fork, convert,
+/// upgrade) is a layer store over the same base, except: the repair ([`Store::repair_to`],
+/// [`Store::repair_dir`]: a salvage rebuilds whole graphs) and the closed-store model commits
+/// ([`Store::import_model_dir`] and its siblings: the store keeps no model) refuse with
+/// [`StoreFailure::LayerStore`]; so do the plain forms that would load the layer over no base
+/// ([`Store::open_read_only`], [`Store::open_backup`], [`Store::checkpoint_dir`],
+/// [`Store::fork_dir`], [`Store::attic_fork_dir`]), whose layer forms below take the base. A
+/// checkpoint encodes the loaded layer (a merge works on whole graphs); a damaged layer store
+/// refuses the open with the damage (no maintenance mode): restore a backup of it. A rollback
+/// or attic restore reloads the layer over its base and leaves the base's model registry as it
+/// is. The embedding models are the base's ([`LayerBase`](crate::storage::LayerBase)): the
+/// store keeps none.
 impl Store<crate::graph::LayeredGraph> {
     /// Creates a layer store for an empty layer over `base` in `dir` (which must not exist or
     /// be empty) and opens it ([`Store::open_layer`]).
@@ -2136,6 +2145,53 @@ impl Store<crate::graph::LayeredGraph> {
         encode_closed_checkpoint(&dir, &recovered.graph, &write, name)
     }
 
+    /// [`Store::fork`] of the layer store in `dir` over `base`, read without a lock: the
+    /// layer's state at `target` loaded over `base` becomes the first snapshot of a NEW layer
+    /// store in `new_dir` over the same base (a new lineage whose parent is this store's at the
+    /// target, the creation parameters carried, marks not carried). [`Store::fork_dir`] of a
+    /// layer store is refused ([`StoreFailure::LayerStore`]): it would load over no base.
+    ///
+    /// # Errors
+    ///
+    /// [`PersistError::LayerBaseMismatch`] when the store's layer was built over another base,
+    /// [`PersistError::SnapshotKindMismatch`] when `dir` is a plain store (both before anything
+    /// is loaded or written); otherwise the errors of [`Store::fork_dir`].
+    pub fn fork_layer_dir(
+        dir: impl IntoStoreDir,
+        base: &crate::graph::LayerBase,
+        target: RecoveryTarget,
+        new_dir: impl IntoStoreDir,
+    ) -> Result<ForkReport, PersistError> {
+        StoreCore::fork_at(
+            &DirPath::root(dir.into_store_dir()),
+            target,
+            &DirPath::root(new_dir.into_store_dir()),
+            Some(base),
+        )
+    }
+
+    /// [`Store::attic_fork`] of the layer store in `dir` over `base`, without a lock: the end of
+    /// attic entry `id` loaded over `base` becomes a NEW layer store in `new_dir` over the same
+    /// base. [`Store::attic_fork_dir`] of a layer store is refused
+    /// ([`StoreFailure::LayerStore`]).
+    ///
+    /// # Errors
+    ///
+    /// As [`Store::fork_layer_dir`]; otherwise the errors of [`Store::attic_fork_dir`].
+    pub fn attic_fork_layer_dir(
+        dir: impl IntoStoreDir,
+        base: &crate::graph::LayerBase,
+        id: &str,
+        new_dir: impl IntoStoreDir,
+    ) -> Result<ForkReport, PersistError> {
+        rollback::attic_fork(
+            &DirPath::root(dir.into_store_dir()),
+            id,
+            &DirPath::root(new_dir.into_store_dir()),
+            Some(base),
+        )
+    }
+
     /// Writes the layer's current state as a STANDALONE packed snapshot (`.gsnap`) of the
     /// whole graph it shows: the base's elements with the layer's changes applied, the
     /// layer's schema and catalog, its lineage id, position and auto-id sequences (format
@@ -2193,6 +2249,78 @@ fn encode_closed_checkpoint<S: PersistentStorage>(
     let (_, mut info) = snapshot.finish()?;
     info.meta.clear();
     Ok(CheckpointReport::encoded(info))
+}
+
+/// What a fork (or an attic fork) writes its new store from: the source store's files and
+/// `GRAPH` (`parent`, whose lineage and creation parameters the new store continues), the
+/// options carrying those parameters, the new location and the system journal's name of the
+/// creation.
+pub(super) struct ForkSource<'a> {
+    pub(super) dir: &'a DirPath,
+    pub(super) parent: &'a GraphFile,
+    pub(super) options: &'a StoreOptions,
+    pub(super) new_dir: &'a DirPath,
+    pub(super) created: &'static str,
+}
+
+impl ForkSource<'_> {
+    /// Writes `graph` (the forked state, a whole graph or a layer over its base) as the first
+    /// snapshot of a new store with a new lineage whose parent is the graph's at its position;
+    /// `marks` lists the marks of the forked history up to that position (before anything is
+    /// written: a fork that cannot report them writes nothing). The blobs the new snapshot
+    /// references are carried; a layer store's copy (`layer`) skips the blobs the source does
+    /// not hold, which are the base's (format spec 7.5), and lists no models.
+    pub(super) fn write<S: PersistentStorage>(
+        &self,
+        mut graph: S,
+        marks: impl FnOnce(&DirPath, u64) -> Result<Vec<Mark>, PersistError>,
+        layer: bool,
+    ) -> Result<ForkReport, PersistError> {
+        let branched_at = crate::graph::GraphStorage::last_commit_seq(&graph)?;
+        let marks_not_carried = marks(self.dir, branched_at)?;
+        let parent_id = graph.graph_id();
+        graph.set_graph_id(crate::value::uuid::new_v7())?;
+        let mut lineage = vec![LineageEntry {
+            graph_id: graph.graph_id(),
+            branched_at,
+            time: now(),
+        }];
+        lineage.extend(self.parent.lineage.iter().copied());
+        let existed = self.new_dir.exists();
+        StoreCore::create_lineage(
+            self.new_dir,
+            &graph,
+            lineage,
+            WriteOptions::new().with_parent(parent_id, branched_at),
+            self.options,
+            (self.created, Some((self.parent.store_id, branched_at))),
+        )?;
+        drop(graph);
+        models::carry_into_new(self.dir, self.new_dir, existed)?;
+        let (blobs, blobs_not_carried) =
+            blobs::carry_state_as(self.dir, self.new_dir, false, layer)
+                .inspect_err(|_| files::undo_new_dir(self.new_dir, existed))?;
+        // A layer store keeps no model: the model definitions of its catalog are the base's.
+        let models = if layer {
+            Vec::new()
+        } else {
+            model_catalog::infos_in_files(self.new_dir)?
+        };
+        let (_, path) = list_snapshots(self.new_dir)?.pop().ok_or_else(|| {
+            PersistError::store(
+                "fork the store",
+                StoreFailure::ChangedConcurrently,
+                "the new store has no snapshot",
+            )
+        })?;
+        Ok(ForkReport {
+            snapshot: read_listing(&path)?,
+            marks_not_carried,
+            models,
+            blobs,
+            blobs_not_carried,
+        })
+    }
 }
 
 /// The identity of `base`, which a layer store records ([`LayerBase::base_ref`](crate::graph::LayerBase::base_ref)).
@@ -2849,8 +2977,20 @@ impl StoreCore {
         new_dir: &DirPath,
         options: &RepairOptions,
     ) -> Result<RepairReport, PersistError> {
-        // Never a lossy repair of files a newer Graphersal wrote (format spec 15).
-        files::refuse_newer_version(dir)?;
+        // Never a lossy repair of files a newer Graphersal wrote (format spec 15). A layer
+        // store is not repaired (format spec 7.5): refused, saying why.
+        if let Err(err) = files::refuse_newer_version(dir) {
+            return Err(match (&err, layer_base_in(dir)) {
+                (
+                    PersistError::Store {
+                        cause: StoreFailure::LayerStore,
+                        ..
+                    },
+                    Ok(Some(base)),
+                ) => files::layer_store_not_repaired(dir, &base),
+                _ => err,
+            });
+        }
         // A store of a released older format is read as upgraded (format spec 15.1): the
         // repaired store is of the current format.
         let models_from = dir.clone();
@@ -3229,58 +3369,45 @@ impl StoreCore {
             &self.shared.dir,
             target,
             &DirPath::root(new_dir.into_store_dir()),
+            self.shared.layer.as_ref(),
         )
     }
 
+    /// The fork of the store in `dir` at `target` into `new_dir`: a plain store (`layer`
+    /// `None`), or a layer store over `layer`, whose copy is a layer store over the same base
+    /// (format spec 7.5; another base: [`PersistError::LayerBaseMismatch`], nothing written).
     fn fork_at(
         dir: &DirPath,
         target: RecoveryTarget,
         new_dir: &DirPath,
+        layer: Option<&crate::graph::LayerBase>,
     ) -> Result<ForkReport, PersistError> {
-        files::refuse_other_version(dir)?;
+        let kind = match layer {
+            Some(base) => files::StoreKind::Layer(base_identity(base)?),
+            None => files::StoreKind::Plain,
+        };
+        files::refuse_other_version_as(dir, kind)?;
         let parent = read_graph_file(dir)?.file;
         let options = StoreOptions::new()
             .with_chunk_bytes(parent.chunk_bytes)
             .with_damage_policy(parent.damage_policy);
-        let recovered = Self::load_at(dir, target, &options.read)?;
-        let branched_at = recovered.graph.last_commit_seq();
-        // Listed before anything is written: a fork that cannot report them writes nothing.
-        let marks_not_carried = marks_up_to(dir, branched_at)?;
-        let parent_id = recovered.graph.graph_id();
-        let graph = recovered.graph.with_graph_id(crate::value::uuid::new_v7());
-        let mut lineage = vec![LineageEntry {
-            graph_id: graph.graph_id(),
-            branched_at,
-            time: now(),
-        }];
-        lineage.extend(parent.lineage.iter().copied());
-        let existed = new_dir.exists();
-        Self::create_lineage(
+        let plan = Self::load_plan_at(dir, target, &options.read, kind)?;
+        let forked = ForkSource {
+            dir,
+            parent: &parent,
+            options: &options,
             new_dir,
-            &graph,
-            lineage,
-            WriteOptions::new().with_parent(parent_id, branched_at),
-            &options,
-            ("fork", Some((parent.store_id, branched_at))),
-        )?;
-        models::carry_into_new(dir, new_dir, existed)?;
-        let (blobs, blobs_not_carried) = blobs::carry_state(dir, new_dir, false)
-            .inspect_err(|_| files::undo_new_dir(new_dir, existed))?;
-        let models = model_catalog::infos_in_files(new_dir)?;
-        let (_, path) = list_snapshots(new_dir)?.pop().ok_or_else(|| {
-            PersistError::store(
-                "fork the store",
-                StoreFailure::ChangedConcurrently,
-                "the new store has no snapshot",
-            )
-        })?;
-        Ok(ForkReport {
-            snapshot: read_listing(&path)?,
-            marks_not_carried,
-            models,
-            blobs,
-            blobs_not_carried,
-        })
+            created: "fork",
+        };
+        match layer {
+            Some(base) => forked.write(
+                plan.run_in(crate::graph::LayeredGraph::over_base(base)?)?
+                    .graph,
+                marks_up_to,
+                true,
+            ),
+            None => forked.write(plan.run()?.graph, marks_up_to, false),
+        }
     }
 
     pub fn prune(&self, up_to: u64) -> Result<PruneReport, PersistError> {
@@ -3666,7 +3793,6 @@ impl StoreCore {
         target: RecoveryTarget,
         mode: RollbackMode,
     ) -> Result<RollbackReport, PersistError> {
-        self.refuse_layer("roll the store back")?;
         let _quiet = self.shared.operations.read();
         self.writable("roll the store back")?;
         let _guard = self.shared.maintenance.lock().map_err(|_| {
@@ -3691,9 +3817,7 @@ impl StoreCore {
         let target = match target {
             RecoveryTarget::CommitSeq(seq) => seq,
             RecoveryTarget::Latest => current,
-            other => Self::load_at(dir, other, &self.shared.options.read)?
-                .graph
-                .last_commit_seq(),
+            other => self.commit_at(other)?,
         };
         if target >= current {
             return Err(PersistError::store(
@@ -3776,7 +3900,6 @@ impl StoreCore {
     }
 
     pub fn attic_restore(&self, id: &str) -> Result<u64, PersistError> {
-        self.refuse_layer("restore the attic entry")?;
         let _quiet = self.shared.operations.read();
         self.writable("restore the attic entry")?;
         let _guard = self.shared.maintenance.lock().map_err(|_| {
@@ -3811,7 +3934,6 @@ impl StoreCore {
     }
 
     pub fn attic_can_restore(&self, id: &str) -> Result<(), PersistError> {
-        self.refuse_layer("restore the attic entry")?;
         self.writable("restore the attic entry")?;
         let commit_seq = self.shared.graph.read().last_commit_seq()?;
         rollback::plan_restore(&self.shared.dir, id, commit_seq).map(|_| ())
@@ -3822,12 +3944,12 @@ impl StoreCore {
         id: &str,
         new_dir: impl IntoStoreDir,
     ) -> Result<ForkReport, PersistError> {
-        self.refuse_layer("fork the attic entry")?;
         let _pin = self.pin_files("fork the attic entry")?;
         rollback::attic_fork(
             &self.shared.dir,
             id,
             &DirPath::root(new_dir.into_store_dir()),
+            self.shared.layer.as_ref(),
         )
     }
 
@@ -3892,18 +4014,22 @@ impl StoreCore {
         }
     }
 
-    /// Refuses `operation` on a layer store ([`StoreFailure::LayerStore`]): it is not
-    /// supported for layer stores yet. The operations reading the store's files refuse in the
-    /// version guard already ([`files::StoreKind::Plain`]); this covers those of the open store
-    /// that do not read it.
-    fn refuse_layer(&self, operation: &'static str) -> Result<(), PersistError> {
-        match self.shared.layer.as_ref().and_then(|base| base.base_ref()) {
-            Some(base) => Err(files::layer_store_refused(
-                &self.shared.dir,
-                base,
-                operation,
-            )),
-            None => Ok(()),
+    /// The commit the store's state at `target` is at (a rollback's target given as a time or
+    /// a mark): loaded read-only, a layer store's over its base.
+    fn commit_at(&self, target: RecoveryTarget) -> Result<u64, PersistError> {
+        let plan = Self::load_plan_at(
+            &self.shared.dir,
+            target,
+            &self.shared.options.read,
+            self.store_kind(),
+        )?;
+        match &self.shared.layer {
+            Some(base) => Ok(crate::graph::GraphStorage::last_commit_seq(
+                &plan
+                    .run_in(crate::graph::LayeredGraph::over_base(base)?)?
+                    .graph,
+            )?),
+            None => Ok(plan.run()?.graph.last_commit_seq()),
         }
     }
 
@@ -4034,7 +4160,11 @@ impl StoreCore {
             self.shared.durable.clone(),
         )?;
         self.shared.wal.rotate.store(false, Ordering::Release);
-        self.refresh_models(graph)?;
+        // A layer store keeps no model: its graph serves the base's registry, which the layer's
+        // catalog never rebuilds (format spec 7.5).
+        if self.shared.layer.is_none() {
+            self.refresh_models(graph)?;
+        }
         Ok(graph_id)
     }
 

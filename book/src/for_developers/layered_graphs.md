@@ -253,10 +253,27 @@ The `indexes` rows come from `property_indexes()`, whose `bytes` are the layer-o
   them instead of reporting them missing, a layer `.gsnap` carries none, and a materialized
   export carries them from the base's registry.
 
-  Not supported for layer stores yet (refused with `StoreFailure::LayerStore`): forks, attic
-  forks and attic restore, repair, convert, upgrade, rollback, closed-store commits, and
-  creating one from a `.gsnap`; a damaged layer store refuses the open with the damage (no
-  maintenance mode).
+  Forks, rollbacks and the attic work on a layer store and keep it a layer over the same
+  base: `fork` and `attic_fork` of the open store and their closed forms
+  `Store::fork_layer_dir`/`Store::attic_fork_layer_dir` (with the base; the plain `fork_dir`/
+  `attic_fork_dir` refuse a layer store) load the layer over its base and write a new layer
+  store over it (a new lineage, the creation parameters carried; blobs of the base are not
+  listed as "not carried"); `rollback_to` (to a commit, a time or a mark), `attic_restore` and
+  `attic_can_restore` reload the layer over its base in place and never rebuild the base's
+  model registry, which the base owns (the layer store keeps no model). `Store::convert`
+  copies a layer store byte for byte onto another backend (a new store id, verified without
+  the base); `Store::upgrade_in_place` leaves it as it is and `Store::upgrade` refuses it as
+  current (`AlreadyCurrent`): a layer store exists only in the current store format.
+
+  Refused for layer stores (`StoreFailure::LayerStore`, nothing written): the **repair**
+  (`repair_to`, `repair_dir`): a salvage rebuilds a whole graph from damaged files (chunk
+  donors, placeholders for lost elements, divergence against before images, all over a
+  `TraversalGraph`), and a layer store's files hold only the layer's changes to a base the
+  salvage does not read; a damaged layer store refuses the open with the damage (no
+  maintenance mode): restore a backup of it, or rebuild the layer. The **closed-store catalog
+  commits** (`import_model_dir`, `set_default_model_dir`, `remove_model_dir`): they change
+  embedding models, which a layer store does not keep and a layer refuses to define. And
+  creating a layer store from a `.gsnap`.
 - **The base is a `TraversalGraph`** with fewer than 2^31 vertex slots and fewer than 2^31
   edge slots. Nobody can change it while layers share it: it sits behind the `Arc`.
 - **Refused**, with `GraphError::Unsupported` ("... not supported on a layered graph yet"):

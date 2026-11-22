@@ -17,6 +17,12 @@
 //! checkpoint carry the base and give the layer back over it only; backups warn that they are
 //! useless without the base; the materialized export is a plain format-4 snapshot of the whole
 //! visible graph.
+//!
+//! S3.4b (rule 22, part B): forks (open store, `fork_layer_dir`), rollback, the attic (fork,
+//! `attic_fork_layer_dir`, restore), convert and upgrade work on layer stores and keep the base;
+//! the plain `fork_dir`/`attic_fork_dir` (no base to load over), the closed-store catalog
+//! commits (model changes: a layer store keeps no model) and the repair (salvage rebuilds whole
+//! graphs) refuse with `StoreFailure::LayerStore` and write nothing.
 #![cfg(feature = "persist")]
 
 use std::collections::BTreeMap;
@@ -519,8 +525,9 @@ fn a_layer_manifest_is_accepted_only_in_a_layer_store() {
     assert_eq!(Store::inspect(&fresh).unwrap().layer_base, None);
 }
 
-/// What is not supported for layer stores yet refuses with `StoreFailure::LayerStore` (fork,
-/// rollback, attic, repair, convert: S3.4b); what works on files only works.
+/// What is not supported for layer stores refuses with `StoreFailure::LayerStore` (the repair;
+/// the plain forms that would load over no base); what works on files only works. (S3.4b
+/// lifted the refusals of fork, rollback, attic and convert: their own tests below.)
 #[test]
 fn unsupported_operations_refuse_a_layer_store() {
     let base = layer_base();
@@ -532,11 +539,6 @@ fn unsupported_operations_refuse_a_layer_store() {
     store.checkpoint(None).unwrap();
 
     // The open store.
-    assert_layer_store_refused(store.fork(RecoveryTarget::Latest, MemDir::new()), "fork");
-    assert_layer_store_refused(
-        store.rollback_to(RecoveryTarget::Mark("m".into()), RollbackMode::Move),
-        "rollback",
-    );
     assert_layer_store_refused(store.repair_to(MemDir::new()), "repair");
     // File-level operations work.
     store.prune(0).unwrap();
@@ -561,7 +563,6 @@ fn unsupported_operations_refuse_a_layer_store() {
         "open_read_only",
     );
     assert_layer_store_refused(Store::open_backup(&dir, options()), "open_backup");
-    assert_layer_store_refused(Store::convert(&dir, MemDir::new()), "convert");
     // Listings work and say what the store is.
     assert_eq!(Store::snapshots_dir(&dir).unwrap().len(), 2);
     assert_eq!(Store::marks_dir(&dir).unwrap().len(), 1);
@@ -1363,11 +1364,13 @@ fn a_materialized_export_is_the_whole_visible_graph_in_format_4() {
 }
 
 /// Rule 22: the base a layer store was built over (`base_ref`) is a creation parameter: every
-/// copy path supported for layer stores carries it (backups full, increment, from the closed
-/// store, ZIP and from memory, their restores, the read-only open of a backup, the exported
-/// snapshot, the closed checkpoint), and the copy paths not supported yet (fork, attic, rollback,
-/// repair, convert, upgrade, closed-store commits) refuse a layer store with
-/// `StoreFailure::LayerStore` and write nothing.
+/// copy path carries it (backups full, increment, from the closed store, ZIP and from memory,
+/// their restores, the read-only open of a backup, the exported snapshot, the closed
+/// checkpoint; S3.4b: fork and `fork_layer_dir`, attic fork and `attic_fork_layer_dir`,
+/// rollback, attic restore, convert, upgrade in place). The plain `fork_dir` /
+/// `attic_fork_dir` (which would load over no base), the repair (salvage rebuilds whole
+/// graphs) and the closed-store catalog commits (model changes, which a layer does not take)
+/// refuse a layer store with `StoreFailure::LayerStore` and write nothing.
 #[test]
 fn the_base_ref_is_a_creation_parameter_carried_by_every_copy_path() {
     use graphersal::persist::{BackupMode, ClosedCommitOptions};
@@ -1406,15 +1409,34 @@ fn the_base_ref_is_a_creation_parameter_carried_by_every_copy_path() {
         zip
     };
 
-    // Not supported yet (S3.4b): refused, nothing written.
-    assert_layer_store_refused(store.fork(RecoveryTarget::Latest, MemDir::new()), "fork");
-    assert_layer_store_refused(
-        store.rollback_to(RecoveryTarget::Mark("m".into()), RollbackMode::Move),
-        "rollback",
+    // S3.4b: the open store's fork, rollback and attic.
+    let forked = MemDir::new();
+    assert_eq!(
+        store
+            .fork(RecoveryTarget::Latest, &forked)
+            .unwrap()
+            .snapshot
+            .layer_base,
+        identity,
+        "fork"
     );
-    assert_layer_store_refused(store.attic_restore("none"), "attic restore");
-    assert_layer_store_refused(store.attic_can_restore("none"), "attic can restore");
-    assert_layer_store_refused(store.attic_fork("none", MemDir::new()), "attic fork");
+    assert_eq!(base_of(&forked), identity, "fork");
+    let rolled = store
+        .rollback_to(RecoveryTarget::Mark("m".into()), RollbackMode::Move)
+        .unwrap();
+    assert_eq!(base_of(&dir), identity, "rollback");
+    let entry = rolled.attic.unwrap();
+    store.attic_can_restore(&entry).unwrap();
+    let attic_forked = MemDir::new();
+    store.attic_fork(&entry, &attic_forked).unwrap();
+    assert_eq!(base_of(&attic_forked), identity, "attic fork");
+    // The closed form reads the files without a lock.
+    let attic_dir = MemDir::new();
+    LayerStore::attic_fork_layer_dir(&dir, &base, &entry, &attic_dir).unwrap();
+    assert_eq!(base_of(&attic_dir), identity, "attic_fork_layer_dir");
+    store.attic_restore(&entry).unwrap();
+    assert_eq!(base_of(&dir), identity, "attic restore");
+    // Still refused: the repair.
     assert_layer_store_refused(store.repair_to(MemDir::new()), "repair");
     store.close().unwrap();
     let before = mem_files(&dir);
@@ -1431,12 +1453,6 @@ fn the_base_ref_is_a_creation_parameter_carried_by_every_copy_path() {
             "repair_dir",
             Store::repair_dir(&dir, MemDir::new()).map(|_| ()),
         ),
-        ("convert", Store::convert(&dir, MemDir::new()).map(|_| ())),
-        ("upgrade", Store::upgrade(&dir, MemDir::new()).map(|_| ())),
-        (
-            "upgrade_in_place",
-            Store::upgrade_in_place(&dir).map(|_| ()),
-        ),
         (
             "closed-store commit",
             Store::remove_model_dir(&dir, "acme/none", ClosedCommitOptions::new()).map(|_| ()),
@@ -1445,6 +1461,15 @@ fn the_base_ref_is_a_creation_parameter_carried_by_every_copy_path() {
         assert_layer_store_refused(result, what);
     }
     assert_eq!(mem_files(&dir), before, "the refusals wrote nothing");
+    // S3.4b: the closed store's fork, attic fork, convert, upgrade.
+    let fork_dir = MemDir::new();
+    LayerStore::fork_layer_dir(&dir, &base, RecoveryTarget::Latest, &fork_dir).unwrap();
+    assert_eq!(base_of(&fork_dir), identity, "fork_layer_dir");
+    let converted = MemDir::new();
+    Store::convert(&dir, &converted).unwrap();
+    assert_eq!(base_of(&converted), identity, "convert");
+    assert!(Store::upgrade_in_place(&dir).unwrap().already_current);
+    assert_eq!(base_of(&dir), identity, "upgrade_in_place");
 
     // The closed store's paths.
     let by_dir = MemDir::new();
@@ -1602,4 +1627,327 @@ fn copies_of_a_layer_store_over_a_base_with_models_succeed() {
     let standalone = MemDir::new();
     let opened = Store::create_from_packed(&standalone, whole.as_slice(), options()).unwrap();
     assert_eq!(opened.models().unwrap().len(), 1);
+}
+
+// ---- S3.4b: fork, attic, rollback, convert, upgrade, closed-store commits (rule 22) ----
+
+/// The state of `layer` (the `state` oracle of a `Recovered` or loaded layer).
+fn recovered_state(recovered: graphersal::persist::Recovered<LayeredGraph>) -> Vec<String> {
+    state(&recovered.into_graph().read())
+}
+
+/// A fork of a layer store (from the open store, and `fork_layer_dir` of the closed one, at the
+/// latest commit and at a mark) is a NEW layer store over the same base: it carries the base,
+/// holds the layer's state at the target, opens over that base only, starts a new lineage whose
+/// parent is the source's, and keeps the creation parameters. A fork over another base and the
+/// plain `fork_dir` (which would load over no base) are refused and write nothing.
+#[test]
+fn a_fork_of_a_layer_store_is_a_layer_store_over_the_same_base() {
+    let base = layer_base();
+    let identity = base.base_ref().copied();
+    let dir = MemDir::new();
+    let (live, _) = closed_layer_store(&dir, &base);
+    let at_mark =
+        recovered_state(LayerStore::open_layer_read_only(&dir, &base, mark("half")).unwrap());
+
+    let store = LayerStore::open_layer(&dir, &base, options()).unwrap();
+    let source_info = store.info().unwrap();
+    let copy = MemDir::new();
+    let report = store.fork(RecoveryTarget::Latest, &copy).unwrap();
+    assert_eq!(report.snapshot.layer_base, identity, "fork: the snapshot");
+    assert!(report.models.is_empty(), "a layer store keeps no model");
+    assert_eq!(report.marks_not_carried.len(), 1, "the mark is listed");
+    let at = MemDir::new();
+    store.fork(mark("half"), &at).unwrap();
+    store.close().unwrap();
+    assert_copy_is_the_layer(&copy, &base, &live, "fork");
+    assert_copy_is_the_layer(&at, &base, &at_mark, "fork at the mark");
+    let info = Store::inspect(&copy).unwrap();
+    assert_ne!(info.store_id, source_info.store_id, "a new store");
+    assert_ne!(info.graph_id, source_info.graph_id, "a new lineage");
+    assert_eq!(info.lineage[1].graph_id, source_info.graph_id, "its parent");
+    assert_eq!(info.chunk_bytes, source_info.chunk_bytes);
+    assert_eq!(info.damage_policy, source_info.damage_policy);
+
+    let by_dir = MemDir::new();
+    let report = LayerStore::fork_layer_dir(&dir, &base, RecoveryTarget::Latest, &by_dir).unwrap();
+    assert_eq!(report.snapshot.layer_base, identity, "fork_layer_dir");
+    assert_copy_is_the_layer(&by_dir, &base, &live, "fork_layer_dir");
+
+    // Refusals: another base, the plain form; nothing written anywhere.
+    let before = mem_files(&dir);
+    let target = MemDir::new();
+    let err = LayerStore::fork_layer_dir(&dir, &layer_base(), RecoveryTarget::Latest, &target)
+        .expect_err("another base");
+    assert!(
+        matches!(err, PersistError::LayerBaseMismatch { .. }),
+        "{err:?}"
+    );
+    assert_layer_store_refused(
+        Store::fork_dir(&dir, RecoveryTarget::Latest, &target),
+        "fork_dir",
+    );
+    assert!(target.file_names().is_empty(), "{:?}", target.file_names());
+    assert_eq!(mem_files(&dir), before, "the source is unchanged");
+    // A plain store is no layer store.
+    let plain = MemDir::new();
+    Store::create(&plain, options()).unwrap().close().unwrap();
+    assert!(matches!(
+        LayerStore::fork_layer_dir(&plain, &base, RecoveryTarget::Latest, MemDir::new()),
+        Err(PersistError::SnapshotKindMismatch { .. })
+    ));
+}
+
+/// One commit adding a vertex to the layer store's graph.
+fn add_person(store: &LayerStore) {
+    let mut graph = store.graph().write();
+    GraphTraversalSource::new(&mut *graph)
+        .add_v("person")
+        .iterate()
+        .unwrap();
+}
+
+fn mark(name: &str) -> RecoveryTarget {
+    RecoveryTarget::Mark(name.into())
+}
+
+/// A rollback of a layer store (to a mark, a commit and a time; Move and Delete) gives the
+/// layer's state at the target in place and after a reopen over the base; the moved history
+/// is an attic entry that `attic_can_restore` allows, `attic_fork` (open store) and
+/// `attic_fork_layer_dir` (closed) copy into new layer stores over the same base holding the
+/// rolled-back state, and `attic_restore` brings back. The store stays a layer store over its
+/// base throughout, verifies with and without the base, and another base is refused.
+#[test]
+fn rollback_and_the_attic_of_a_layer_store_keep_it_a_layer_over_its_base() {
+    let base = layer_base();
+    let identity = base.base_ref().copied();
+    let dir = MemDir::new();
+    let (live, at_mark) = closed_layer_store(&dir, &base);
+    let at_half =
+        recovered_state(LayerStore::open_layer_read_only(&dir, &base, mark("half")).unwrap());
+
+    let store = LayerStore::open_layer(&dir, &base, options()).unwrap();
+    let report = store.rollback_to(mark("half"), RollbackMode::Move).unwrap();
+    assert_eq!(report.target, at_mark);
+    let entry = report.attic.clone().expect("an attic entry");
+    assert_eq!(
+        state(&store.graph().read()),
+        at_half,
+        "rolled back in place"
+    );
+    check(&store.graph().read());
+    assert_eq!(store.layer_base().unwrap(), identity.unwrap());
+    assert_eq!(store.attic_list().unwrap().len(), 1);
+    store.attic_can_restore(&entry).unwrap();
+    // The attic fork: the rolled-back history (the state before the rollback).
+    let attic_copy = MemDir::new();
+    let forked = store.attic_fork(&entry, &attic_copy).unwrap();
+    assert_eq!(forked.snapshot.layer_base, identity, "attic fork");
+    assert!(forked.models.is_empty());
+    store.close().unwrap();
+    assert_copy_is_the_layer(&attic_copy, &base, &live, "attic fork");
+    assert_eq!(base_of(&dir), identity, "rollback");
+    let verified = LayerStore::verify_layer_dir(&dir, &base).unwrap();
+    assert!(verified.is_ok(), "{:?}", verified.problems);
+    let verified = Store::verify_dir(&dir).unwrap();
+    assert!(verified.is_ok(), "{:?}", verified.problems);
+    // Closed: the attic fork over the base only.
+    let by_dir = MemDir::new();
+    LayerStore::attic_fork_layer_dir(&dir, &base, &entry, &by_dir).unwrap();
+    assert_copy_is_the_layer(&by_dir, &base, &live, "attic_fork_layer_dir");
+    let before = mem_files(&dir);
+    let target = MemDir::new();
+    assert!(matches!(
+        LayerStore::attic_fork_layer_dir(&dir, &layer_base(), &entry, &target),
+        Err(PersistError::LayerBaseMismatch { .. })
+    ));
+    assert_layer_store_refused(
+        Store::attic_fork_dir(&dir, &entry, &target),
+        "attic_fork_dir",
+    );
+    assert!(target.file_names().is_empty());
+    assert_eq!(mem_files(&dir), before);
+    // The rolled-back store reopens as rolled back, over its base only.
+    assert_copy_is_the_layer(&dir, &base, &at_half, "after the rollback");
+
+    // The attic restore brings the rolled-back history back.
+    let store = LayerStore::open_layer(&dir, &base, options()).unwrap();
+    store.attic_restore(&entry).unwrap();
+    assert_eq!(state(&store.graph().read()), live, "restored in place");
+    check(&store.graph().read());
+    store.close().unwrap();
+    assert_copy_is_the_layer(&dir, &base, &live, "after the attic restore");
+
+    // A rollback to a commit (Delete) and to a time: the layer at that commit.
+    let store = LayerStore::open_layer(&dir, &base, options()).unwrap();
+    let to = at_mark - 1;
+    let at_to = recovered_state(store.read_only_at(RecoveryTarget::CommitSeq(to)).unwrap());
+    store
+        .rollback_to(RecoveryTarget::CommitSeq(to), RollbackMode::Delete)
+        .unwrap();
+    assert_eq!(state(&store.graph().read()), at_to);
+    add_person(&store);
+    let time = store.graph().read().last_committed_at();
+    let at_time = state(&store.graph().read());
+    add_person(&store);
+    store
+        .rollback_to(RecoveryTarget::Time(time), RollbackMode::Move)
+        .unwrap();
+    assert_eq!(state(&store.graph().read()), at_time, "rollback to a time");
+    store.close().unwrap();
+    assert_copy_is_the_layer(&dir, &base, &at_time, "after a rollback to a time");
+}
+
+/// `Store::convert` of a layer store copies it byte for byte (directory, single file, memory):
+/// the copy carries the base, verifies, opens over that base only and holds the layer; it is
+/// another store (a new store id).
+#[test]
+fn convert_copies_a_layer_store_onto_every_backend() {
+    let base = layer_base();
+    let dir = MemDir::new();
+    let (live, _) = closed_layer_store(&dir, &base);
+    let source_id = Store::inspect(&dir).unwrap().store_id;
+    let temp = Temp::new("convert");
+    for (backend, to) in backends(&temp) {
+        Store::convert(&dir, to.clone()).unwrap_or_else(|e| panic!("{backend}: {e}"));
+        let info = Store::inspect(to.clone()).unwrap();
+        assert_eq!(info.layer_base, base.base_ref().copied(), "{backend}");
+        assert_ne!(info.store_id, source_id, "{backend}: another store");
+        // Back into memory for the common checks.
+        let back = MemDir::new();
+        Store::convert(to, &back).unwrap();
+        assert_copy_is_the_layer(&back, &base, &live, backend);
+    }
+}
+
+/// A layer store exists only in the current store format: `Store::upgrade` refuses it as
+/// current (writing nothing into the target), `upgrade_in_place` leaves it as it is, as for a
+/// plain store; it still opens over its base.
+#[test]
+fn upgrade_treats_a_layer_store_as_current() {
+    let base = layer_base();
+    let dir = MemDir::new();
+    let (live, _) = closed_layer_store(&dir, &base);
+    let before = mem_files(&dir);
+    let target = MemDir::new();
+    match Store::upgrade(&dir, &target) {
+        Err(PersistError::Store { cause, .. }) => assert_eq!(cause, StoreFailure::AlreadyCurrent),
+        other => panic!("expected AlreadyCurrent, got {other:?}"),
+    }
+    assert!(target.file_names().is_empty());
+    let report = Store::upgrade_in_place(&dir).unwrap();
+    assert!(report.already_current);
+    assert_eq!(mem_files(&dir), before, "nothing written");
+    assert_copy_is_the_layer(&dir, &base, &live, "after upgrade_in_place");
+}
+
+/// A repair stays refused for layer stores (salvage rebuilds whole graphs; a layer store holds
+/// only a layer's changes): `repair_to` and `repair_dir` refuse with `StoreFailure::LayerStore`
+/// saying why, and nothing is written into the source or the target.
+#[test]
+fn a_repair_of_a_layer_store_is_refused_saying_why() {
+    let base = layer_base();
+    let dir = MemDir::new();
+    let store = LayerStore::create_layer(&dir, &base, options()).unwrap();
+    commit_units(&store, 0, 3);
+    let target = MemDir::new();
+    let err = store.repair_to(&target).expect_err("repair_to");
+    assert!(err.to_string().contains("not repaired"), "{err}");
+    assert_layer_store_refused(Err::<(), _>(err), "repair_to");
+    store.close().unwrap();
+    let before = mem_files(&dir);
+    let err = Store::repair_dir(&dir, &target).expect_err("repair_dir");
+    assert!(err.to_string().contains("restore a backup"), "{err}");
+    assert_layer_store_refused(Err::<(), _>(err), "repair_dir");
+    assert!(target.file_names().is_empty());
+    assert_eq!(mem_files(&dir), before);
+}
+
+/// Closed-store catalog commits (today: the embedding models) refuse a layer store with
+/// `StoreFailure::LayerStore` before anything is written: a layer store keeps no model and a
+/// layer takes no model definition change (as the open layer store refuses it).
+#[test]
+fn closed_catalog_commits_refuse_a_layer_store() {
+    use graphersal::persist::ClosedCommitOptions;
+
+    let base = layer_base();
+    let dir = MemDir::new();
+    let (live, _) = closed_layer_store(&dir, &base);
+    let before = mem_files(&dir);
+    assert_layer_store_refused(
+        Store::set_default_model_dir(&dir, None, ClosedCommitOptions::new()),
+        "set_default_model_dir",
+    );
+    assert_layer_store_refused(
+        Store::remove_model_dir(&dir, "acme/none", ClosedCommitOptions::new()),
+        "remove_model_dir",
+    );
+    assert_eq!(mem_files(&dir), before, "nothing written");
+    assert_copy_is_the_layer(&dir, &base, &live, "after the refused commits");
+}
+
+/// Over a base with an embedding model: a rollback and an attic restore of the layer store
+/// work (the base's model registry is not rebuilt from the layer's catalog: a layer store keeps
+/// no model), the base's catalog stays as it was, and the closed-store model import into the
+/// layer store is refused, nothing written.
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn rollback_of_a_layer_over_a_base_with_models() {
+    use graphersal::persist::{ImportModelOptions, ModelSource};
+
+    let temp = Temp::new("model-base-commits");
+    let base_dir = temp.join("base");
+    let base_graph = Arc::try_unwrap(base()).unwrap_or_else(|_| unreachable!());
+    let base_store = Store::create_with(&base_dir, base_graph, options()).unwrap();
+    base_store
+        .import_model(
+            ModelSource::Files(crate::model_fixture::tiny_model(1, "acme/tiny")),
+            ImportModelOptions::new(),
+        )
+        .unwrap();
+    base_store.close().unwrap();
+    let view = Store::open_read_only(&base_dir, RecoveryTarget::Latest).unwrap();
+    let base = LayerBase::from_graph(view.into_graph()).unwrap();
+
+    let closed = MemDir::new();
+    let store = LayerStore::create_layer(&closed, &base, options()).unwrap();
+    commit_units(&store, 0, 3);
+    store.mark("m").unwrap();
+    commit_units(&store, 3, history().len());
+    let expected = state(&store.graph().read());
+    store.close().unwrap();
+
+    let store = LayerStore::open_layer(&closed, &base, options()).unwrap();
+    let at_mark = recovered_state(store.read_only_at(mark("m")).unwrap());
+    store.rollback_to(mark("m"), RollbackMode::Move).unwrap();
+    assert_eq!(state(&store.graph().read()), at_mark);
+    let entry = store.attic_list().unwrap()[0].id.clone();
+    store.attic_restore(&entry).unwrap();
+    assert_eq!(state(&store.graph().read()), expected);
+    store.close().unwrap();
+    assert_copy_is_the_layer(&closed, &base, &expected, "after the attic restore");
+    // A second layer over the same base still sees the base's model definitions.
+    let other = LayerStore::create_layer(MemDir::new(), &base, options()).unwrap();
+    assert!(
+        other
+            .graph()
+            .read()
+            .definitions()
+            .unwrap()
+            .any(|d| d.kind().to_string() == "model"),
+        "the base's catalog is unchanged"
+    );
+    drop(other);
+
+    // The import into a closed layer store: refused, nothing written.
+    let before = mem_files(&closed);
+    assert_layer_store_refused(
+        Store::import_model_dir(
+            &closed,
+            ModelSource::Files(crate::model_fixture::tiny_model(2, "acme/other")),
+            ImportModelOptions::new(),
+        ),
+        "import_model_dir",
+    );
+    assert_eq!(mem_files(&closed), before);
 }

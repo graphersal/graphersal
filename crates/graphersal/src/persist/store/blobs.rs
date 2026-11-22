@@ -1363,6 +1363,19 @@ pub(crate) fn carry_state(
     to: &DirPath,
     hash: bool,
 ) -> Result<(Vec<String>, Vec<String>), PersistError> {
+    carry_state_as(from, to, hash, false)
+}
+
+/// [`carry_state`] into the copy of a store that is a LAYER store (`layer`, format spec 7.5)
+/// or not: a layer's catalog may name blobs of its base (an embedding model), which the layer
+/// store does not hold; a blob missing from `from` is then the base's and not listed as not
+/// carried (a damaged one still is).
+pub(crate) fn carry_state_as(
+    from: &DirPath,
+    to: &DirPath,
+    hash: bool,
+    layer: bool,
+) -> Result<(Vec<String>, Vec<String>), PersistError> {
     let Some((_, snapshot)) = files::list_snapshots(to)?.pop() else {
         return Ok((Vec::new(), Vec::new()));
     };
@@ -1375,6 +1388,7 @@ pub(crate) fn carry_state(
             Ok(false) => {}
             Err(BlobError::Io(err)) => return Err(PersistError::io("copying a blob", err)),
             Err(BlobError::DoesNotFit(err)) => return Err(PersistError::Graph(err)),
+            Err(BlobError::Fault(BlobFault::Missing)) if layer => {}
             Err(BlobError::Fault(_) | BlobError::Unsupported) => missing.push(blob_name(blob)),
         }
     }

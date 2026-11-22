@@ -324,6 +324,28 @@ fn hook_error(err: crate::graph::hooks::HookError) -> PersistError {
     }
 }
 
+/// Refuses a closed-store catalog commit (today: the embedding models) on a LAYER store
+/// (format spec 7.5) with [`StoreFailure::LayerStore`], before anything is written: a layer
+/// store keeps no model (its graph serves the base's), and a layer refuses model definition
+/// changes (the open layer store does too), so such a commit could not be replayed onto it.
+/// Any other store passes (its kind is checked again by the prelude).
+fn refuse_layer_store(dir: &DirPath, operation: &'static str) -> Result<(), PersistError> {
+    files::refuse_other_version_as(dir, files::StoreKind::Either)?;
+    match super::layer_base_in(dir)? {
+        Some(base) => Err(PersistError::store(
+            operation,
+            StoreFailure::LayerStore,
+            format!(
+                "the store {} is a layer store over the base {base}: it keeps no embedding \
+                 model (its graph serves the base's models) and a layer takes no change of a \
+                 model definition, so the models are changed in the base",
+                dir.display()
+            ),
+        )),
+        None => Ok(()),
+    }
+}
+
 /// Appends ONE commit holding the schema and catalog changes `plan` computes from the catalog
 /// view of the CLOSED store in `dir` (format spec 12.12; the module documentation lists the
 /// steps). `plan` runs under the writer lock and may write blobs (the commit references them;
@@ -334,6 +356,7 @@ pub(crate) fn commit_catalog_closed(
     options: &ClosedCommitOptions,
     plan: &mut dyn FnMut(&CatalogView, &DirPath) -> Result<CatalogPlan, PersistError>,
 ) -> Result<ClosedCommit, PersistError> {
+    refuse_layer_store(dir, operation)?;
     let (lock, graph_file) = closed_store_prelude(dir)?;
     let committed = commit_catalog_locked(dir, graph_file, operation, options, plan);
     drop(lock);
@@ -563,7 +586,10 @@ impl Store {
     /// the same commit, which needs the data: then (only then) the store is OPENED, its graph
     /// loaded and [`Store::import_model`] run; [`ImportModelReport::reembedded`](super::ImportModelReport::reembedded)
     /// names the properties and the first warning says so. Vectors of the old revision without
-    /// a rule refuse the replace ([`StoreFailure::ModelInUse`]) on both paths.
+    /// a rule refuse the replace ([`StoreFailure::ModelInUse`]) on both paths. A layer store
+    /// (format spec 7.5) is refused with [`StoreFailure::LayerStore`] before anything is
+    /// written: it keeps no model (its graph serves the base's) and a layer takes no change of
+    /// a model definition, as the open layer store refuses it.
     pub fn import_model_dir(
         dir: impl IntoStoreDir,
         source: super::ModelSource,
@@ -575,6 +601,8 @@ impl Store {
         };
         const OP: &str = "import a model";
         let dir = DirPath::root(dir.into_store_dir());
+        // Before the model is read: a layer store takes no model commit.
+        refuse_layer_store(&dir, OP)?;
         let prepared: Prepared = prepare(source, &options)?;
         let mut warnings = warnings_of(&prepared);
         let identity = prepared.identity.clone();
@@ -776,7 +804,8 @@ impl Store {
 
     /// [`Store::set_default_model`] of the CLOSED store in `dir` without loading its graph
     /// (format spec 12.12): one commit appended to its WAL, nothing when the model is the
-    /// default already. Locking and refusals as [`Store::import_model_dir`].
+    /// default already. Locking and refusals as [`Store::import_model_dir`] (a layer store
+    /// included).
     pub fn set_default_model_dir(
         dir: impl IntoStoreDir,
         repo: Option<&str>,
@@ -818,7 +847,7 @@ impl Store {
     /// `graphersal store models remove <dir> <repo>`; format spec 12.12): one commit dropping
     /// the definition, appended to its WAL. Refused while the schema needs the model
     /// ([`StoreFailure::ModelInUse`]); locking and the other refusals as
-    /// [`Store::import_model_dir`].
+    /// [`Store::import_model_dir`] (a layer store included).
     pub fn remove_model_dir(
         dir: impl IntoStoreDir,
         repo: &str,
