@@ -15,7 +15,9 @@ use crate::connection::Stream;
 use crate::host::{ClientRef, Ctx, Host, McpError, clear_busy, take_busy};
 use crate::profile::Profile;
 use crate::resources::{RESOURCES, read_resource};
-use crate::sessions::{SessionKey, Sessions};
+use crate::sessions::{
+    MAX_SESSION_ROUTE_BYTES, SessionKey, Sessions, is_valid_session_route, session_route,
+};
 use crate::stats::{McpStats, Refusal};
 use crate::tools::{CallRefused, ToolCaller, call_tool, tool_listings, tool_result};
 use crate::transport::{McpRequest, McpResponse};
@@ -107,6 +109,16 @@ impl Mcp {
     /// Whether the session ids are stateless ([`Mcp::with_session_key`]).
     pub fn stateless_sessions(&self) -> bool {
         self.sessions.is_signed()
+    }
+
+    /// The route tag of the MCP session id `session_id` ([`crate::session_route`]), only when
+    /// this endpoint knows the id (signed by its key, or in its table): a forged or altered
+    /// route answers `None`. For a host whose graph resolver holds the endpoint (one shared
+    /// endpoint for its graphs); a resolver without it uses [`crate::session_route`], and the
+    /// endpoint refuses a forged id when it serves the request.
+    pub fn verified_session_route<'a>(&self, session_id: &'a str) -> Option<&'a str> {
+        let route = session_route(session_id)?;
+        self.sessions.knows(session_id).then_some(route)
     }
 
     /// Serves the operator's configuration (`--mcp-config`, with the shorthand flags folded in
@@ -570,7 +582,24 @@ impl Mcp {
         });
         let session = match peer.stream {
             None => {
-                let session = self.sessions.create(&client);
+                // The host's route tag pins the session to the graph it resolved (asked from
+                // host state, no job). An invalid one is the host's mistake: the session is
+                // refused rather than left unpinned (its later requests would follow an alias).
+                let route = peer.host.session_route();
+                if let Some(route) = &route
+                    && !is_valid_session_route(route)
+                {
+                    return Err((
+                        INTERNAL_ERROR,
+                        format!(
+                            "the server cannot start an MCP session: its session route tag \
+                             ({} bytes) is not 1 to {MAX_SESSION_ROUTE_BYTES} bytes of ASCII \
+                             letters, digits and . _ - @ / : + =",
+                            route.len()
+                        ),
+                    ));
+                }
+                let session = self.sessions.create_routed(&client, route.as_deref());
                 self.stats.record_initialize(&session);
                 Some(session)
             }

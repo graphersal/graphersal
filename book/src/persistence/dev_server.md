@@ -879,7 +879,9 @@ The endpoint implements MCP's Streamable HTTP transport of the protocol revision
 with JSON answers and no server-sent event stream: `POST /mcp` with one JSON-RPC message
 (`initialize`, `ping`, `tools/list`, `tools/call`, `resources/list`, `resources/read`; a
 notification is answered `202 Accepted`), `GET /mcp` is `405`, `DELETE /mcp` ends the session.
-`initialize` returns an `Mcp-Session-Id`; a request that names an unknown session (after a
+`initialize` returns an `Mcp-Session-Id` (an opaque value for the client; a server that embeds
+the endpoint and serves several graphs may prefix it with a route tag, `<route>~<id>`, that
+keeps the session on the graph it started on); a request that names an unknown session (after a
 restart of the server) is `404`, so the client initializes again. A request whose
 `MCP-Protocol-Version` header names another revision is `400`, which tells a client that also
 speaks newer, stateless revisions to fall back to `initialize`. The `Host`/`Origin` checks of the

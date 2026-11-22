@@ -1123,3 +1123,112 @@ fn a_host_serves_its_profile_files_first_and_the_core_the_rest() {
         403
     );
 }
+
+/// Two versions of one graph behind an alias (`acme` -> `acme@1` or `acme@2`): a request whose
+/// `Mcp-Session-Id` carries a route tag goes to that version, every other one to the alias's
+/// current version (S5.2, `ContextBuilder::mcp_session_route`).
+#[cfg(feature = "mcp")]
+struct PinnedVersions {
+    versions: Vec<(&'static str, Arc<Context>)>,
+    alias: Mutex<&'static str>,
+}
+
+#[cfg(feature = "mcp")]
+impl GraphResolver for PinnedVersions {
+    fn resolve(&self, request: &Request<'_>) -> Result<Arc<Context>, HttpError> {
+        let route = request
+            .header("Mcp-Session-Id")
+            .and_then(graphersal_mcp::session_route);
+        let name = match route {
+            Some(route) => route,
+            None => *self.alias.lock().expect("alias"),
+        };
+        self.versions
+            .iter()
+            .find(|(version, _)| *version == name)
+            .map(|(_, context)| context.clone())
+            .ok_or_else(|| HttpError::new(404, format!("unknown graph version {name}")))
+    }
+}
+
+/// `POST /mcp` of `body` on `server` with an optional session id: the status, the minted
+/// session id (of an `initialize`) and the JSON answer.
+#[cfg(feature = "mcp")]
+fn mcp_exchange(
+    server: &Server,
+    body: &Value,
+    session: Option<&str>,
+) -> (u16, Option<String>, Value) {
+    let text = body.to_string();
+    let mut request = post("/mcp", text.as_bytes()).with_header("Accept", "application/json");
+    if let Some(session) = session {
+        request = request.with_header("Mcp-Session-Id", session);
+    }
+    let answer = server.handle(request);
+    let id = answer
+        .headers()
+        .iter()
+        .find(|(name, _)| name.eq_ignore_ascii_case("mcp-session-id"))
+        .map(|(_, value)| value.clone());
+    let json = serde_json::from_slice(answer.body()).unwrap_or(Value::Null);
+    (answer.status(), id, json)
+}
+
+#[cfg(feature = "mcp")]
+#[test]
+fn a_resolver_reading_the_session_route_keeps_a_session_on_its_version() {
+    let initialize = json!({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {
+        "protocolVersion": "2025-06-18", "capabilities": {},
+        "clientInfo": {"name": "tester", "version": "1"}}});
+    let count = tool_call("gql", json!({"query": "MATCH (n) RETURN count(n) AS c"}));
+    let key = graphersal_mcp::SessionKey::new(b"a shared secret of the replicas, 32+ bytes")
+        .expect("a valid key");
+    for signed in [false, true] {
+        let mut mcp = graphersal_mcp::Mcp::new(true, None, false);
+        if signed {
+            mcp = mcp.with_session_key(key.clone());
+        }
+        let mcp = Arc::new(mcp);
+        let version = |sample: &'static str, route: &str| {
+            Context::builder(session_on(sample), check())
+                .shared_mcp(mcp.clone())
+                .mcp_session_route(Some(route.to_string()))
+                .build()
+        };
+        let resolver = Arc::new(PinnedVersions {
+            versions: vec![
+                ("acme@1", version("modern", "acme@1")),
+                ("acme@2", version("empty", "acme@2")),
+            ],
+            alias: Mutex::new("acme@1"),
+        });
+        let server = Server::new();
+        server.ready_with(resolver.clone()).expect("ready once");
+        let (status, old, _) = mcp_exchange(&server, &initialize, None);
+        assert_eq!(status, 200);
+        let old = old.expect("a session id");
+        assert_eq!(graphersal_mcp::session_route(&old), Some("acme@1"), "{old}");
+        // The release flips the alias: the open session finishes on its version, a new one
+        // sees the new version.
+        *resolver.alias.lock().unwrap() = "acme@2";
+        let (_, _, answer) = mcp_exchange(&server, &count, Some(&old));
+        assert!(
+            tool_text(&answer).contains("\"c\":6"),
+            "signed {signed}: {answer}"
+        );
+        let (_, new, _) = mcp_exchange(&server, &initialize, None);
+        let new = new.expect("a session id");
+        assert_eq!(graphersal_mcp::session_route(&new), Some("acme@2"), "{new}");
+        let (_, _, answer) = mcp_exchange(&server, &count, Some(&new));
+        assert!(
+            tool_text(&answer).contains("\"c\":0"),
+            "signed {signed}: {answer}"
+        );
+        // Editing the route reaches the other version's context, whose endpoint refuses the id.
+        let forged = old.replacen("acme@1~", "acme@2~", 1);
+        let (status, _, _) = mcp_exchange(&server, &count, Some(&forged));
+        assert_eq!(status, 404, "signed {signed}");
+        assert_eq!(mcp.verified_session_route(&forged), None);
+        assert_eq!(mcp.verified_session_route(&old), Some("acme@1"));
+    }
+}

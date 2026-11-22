@@ -203,6 +203,11 @@ mod enabled {
             self.layered.load(Ordering::Relaxed) == Layered::LAYER
         }
 
+        /// The host's route tag ([`crate::ContextBuilder::mcp_session_route`]); runs no job.
+        fn session_route(&self) -> Option<String> {
+            self.mcp_session_route.clone()
+        }
+
         fn run_started(&self, client: &ClientRef, cancel: &CancelToken) -> u64 {
             self.run_started_with_text(client, cancel, "")
         }

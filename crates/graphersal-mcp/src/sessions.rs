@@ -3,6 +3,12 @@
 //! `hex(nonce || client digest || tag)`, the tag an HMAC-SHA256 of the nonce and the digest
 //! under the key, so any process holding the same key accepts the id without a table (several
 //! replicas behind a load balancer), and no number of clients evicts another.
+//!
+//! A host may pin a session to the graph it resolved at `initialize` with a route tag
+//! ([`crate::Host::session_route`]): the id is then `<route>~<id>`, the route covered by the
+//! HMAC of a signed id (and part of the remembered id in table mode), so a changed route is an
+//! unknown session. An id without a route is byte-identical to one minted before routes
+//! existed. [`session_route`] reads the route back from a request's `Mcp-Session-Id`.
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -32,6 +38,50 @@ const ID_BYTES: usize = NONCE_BYTES + CLIENT_BYTES + TAG_BYTES;
 
 /// The domain of the signed data, so the key signs nothing else by accident.
 const DOMAIN: &[u8] = b"graphersal-mcp-session/1";
+
+/// The most bytes of a session route tag ([`crate::Host::session_route`]).
+pub const MAX_SESSION_ROUTE_BYTES: usize = 128;
+
+/// The character between a session route tag and the id proper (`<route>~<id>`); neither a
+/// route nor an id contains it.
+const ROUTE_SEPARATOR: char = '~';
+
+/// Whether `route` can be a session route tag ([`crate::Host::session_route`]): 1 to
+/// [`MAX_SESSION_ROUTE_BYTES`] bytes of ASCII letters, digits and `.` `_` `-` `@` `/` `:` `+`
+/// `=` (a graph name and version such as `acme@2026.3`, or an opaque token in base64url or
+/// hex). These characters are safe in an HTTP header value and never contain the separator.
+pub fn is_valid_session_route(route: &str) -> bool {
+    !route.is_empty()
+        && route.len() <= MAX_SESSION_ROUTE_BYTES
+        && route
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"._-@/:+=".contains(&b))
+}
+
+/// The route tag inside the MCP session id `session_id` (a request's `Mcp-Session-Id` header,
+/// `<route>~<id>`), or `None` for an id without one (or text that is no routed id). A host's
+/// graph resolver calls it to send every request of a session to the graph the session was
+/// pinned to at `initialize` ([`crate::Host::session_route`]), also after the host moved its
+/// alias, without a table and across replicas.
+///
+/// It only reads the id; it does not check it. The endpoint that then serves the request
+/// refuses a forged or altered id (`404`, an unknown session): with signed ids the route is
+/// covered by the signature, in table mode the whole routed id is what the table remembers.
+/// So a resolver must not trust the route further than choosing where the request goes (e.g.
+/// it checks that the route is a version of the graph the path names);
+/// [`crate::Mcp::verified_session_route`] also checks the id.
+pub fn session_route(session_id: &str) -> Option<&str> {
+    split_route(session_id).0
+}
+
+/// `(route, id proper)` of a session id: no route when the id has no separator or what
+/// precedes it is no valid route (then the whole text is the id, which no endpoint knows).
+fn split_route(session_id: &str) -> (Option<&str>, &str) {
+    match session_id.split_once(ROUTE_SEPARATOR) {
+        Some((route, id)) if is_valid_session_route(route) => (Some(route), id),
+        _ => (None, session_id),
+    }
+}
 
 /// The secret that signs stateless MCP session ids ([`crate::Mcp::with_session_key`]). Never
 /// shown: its `Debug` prints no byte of it.
@@ -119,6 +169,7 @@ impl Sessions {
                     .map(|(_, client)| client_digest(client))
             }),
             Self::Signed { .. } => {
+                let (_, id) = split_route(id);
                 let hex = id.get(NONCE_BYTES * 2..(NONCE_BYTES + CLIENT_BYTES) * 2)?;
                 u64::from_str_radix(hex, 16).ok()
             }
@@ -130,11 +181,20 @@ impl Sessions {
         matches!(self, Self::Signed { .. })
     }
 
-    /// A new session id for the client `client` (`{name, version}`).
+    /// A new session id for the client `client` (`{name, version}`), without a route.
+    #[cfg(test)]
     pub(crate) fn create(&self, client: &Value) -> String {
+        self.create_routed(client, None)
+    }
+
+    /// A new session id for the client `client` (`{name, version}`), pinned to `route` when
+    /// the host gave one (`<route>~<id>`; the caller checked it with
+    /// [`is_valid_session_route`]).
+    pub(crate) fn create_routed(&self, client: &Value, route: Option<&str>) -> String {
+        let prefix = route.map_or(String::new(), |route| format!("{route}{ROUTE_SEPARATOR}"));
         match self {
             Self::Table { ids, clients } => {
-                let session = format!("{:032x}", rand::random::<u128>());
+                let session = format!("{prefix}{:032x}", rand::random::<u128>());
                 if let Ok(mut sessions) = ids.lock() {
                     if sessions.len() >= MAX_SESSIONS {
                         sessions.remove(0);
@@ -154,9 +214,9 @@ impl Sessions {
                 let mut id = Vec::with_capacity(ID_BYTES);
                 id.extend((0..NONCE_BYTES).map(|_| rand::random::<u8>()));
                 id.extend_from_slice(&digest.to_be_bytes());
-                let tag = sign(key, &id);
+                let tag = sign(key, &id, route.unwrap_or_default());
                 id.extend_from_slice(&tag.as_ref()[..TAG_BYTES]);
-                hex(&id)
+                format!("{prefix}{}", hex(&id))
             }
         }
     }
@@ -331,17 +391,21 @@ fn client_digest(client: &Value) -> u64 {
     u64::from_be_bytes(first)
 }
 
-/// The HMAC-SHA256 of [`DOMAIN`] and `data` under `key`.
-fn sign(key: &hmac::Key, data: &[u8]) -> hmac::Tag {
+/// The HMAC-SHA256 of [`DOMAIN`], `data` (the nonce and the client digest, fixed length) and
+/// the session's `route` (empty without one, so an id without a route signs exactly what it
+/// signed before routes existed) under `key`.
+fn sign(key: &hmac::Key, data: &[u8], route: &str) -> hmac::Tag {
     let mut context = hmac::Context::with_key(key);
     context.update(DOMAIN);
     context.update(data);
+    context.update(route.as_bytes());
     context.sign()
 }
 
 /// Whether `id` is a session id signed with `key` (compared without stopping at the first
 /// difference).
 fn verify(key: &hmac::Key, id: &str) -> bool {
+    let (route, id) = split_route(id);
     let Some(bytes) = unhex(id) else {
         return false;
     };
@@ -349,7 +413,7 @@ fn verify(key: &hmac::Key, id: &str) -> bool {
         return false;
     }
     let (signed, tag) = bytes.split_at(NONCE_BYTES + CLIENT_BYTES);
-    let expected = sign(key, signed);
+    let expected = sign(key, signed, route.unwrap_or_default());
     expected.as_ref()[..TAG_BYTES]
         .iter()
         .zip(tag)
