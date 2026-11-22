@@ -12,6 +12,8 @@
 // The index columns become Uint32Arrays (`packGraphView`; the worker transfers their buffers).
 // Properties are fetched for the clicked element only (`engine.element(kind, id)`).
 
+import { cyOriginClass, ORIGIN_TEXT } from './graph/origin-style.js';
+
 /** The index columns of a graph view (numbers: Uint32Array after `packGraphView`). */
 export const INDEX_COLUMNS = Object.freeze(['vertexLabel', 'edgeSource', 'edgeTarget', 'edgeLabel']);
 
@@ -20,6 +22,29 @@ export const INDEX_COLUMNS = Object.freeze(['vertexLabel', 'edgeSource', 'edgeTa
  * outgoing edges in the whole graph. Packed like the index columns when present.
  */
 export const DEGREE_COLUMNS = Object.freeze(['vertexInDegree', 'vertexOutDegree']);
+
+/**
+ * The columns a LAYER's drawings carry (crates/graphersal-session `CompactGraph`): per vertex /
+ * edge its origin, 'base' | 'added' | 'modified' (null: a stale handle). Absent on a plain graph.
+ * Styled by js/graph/origin-style.js.
+ */
+export const ORIGIN_COLUMNS = Object.freeze(['vertexOrigin', 'edgeOrigin']);
+
+/**
+ * The origin columns of a view cut down to the vertices `vi` and the edges `ej` (old indices, in
+ * the new order): `{vertexOrigin?, edgeOrigin?}`, empty for a view without them. Every function
+ * that re-indexes a view spreads this in, so a filtered, sliced or edited drawing keeps each
+ * element's origin.
+ * @param {Object} view
+ * @param {ArrayLike<number>} vi
+ * @param {ArrayLike<number>} ej
+ */
+export function originColumns(view, vi, ej) {
+  const out = {};
+  if (view && Array.isArray(view.vertexOrigin)) out.vertexOrigin = Array.from(vi, (i) => view.vertexOrigin[i] ?? null);
+  if (view && Array.isArray(view.edgeOrigin)) out.edgeOrigin = Array.from(ej, (j) => view.edgeOrigin[j] ?? null);
+  return out;
+}
 
 /**
  * Turns the index columns of `view` into Uint32Arrays, in place, and returns their buffers (the
@@ -76,6 +101,7 @@ export function sliceGraphView(view, maxNodes) {
   return {
     ...view,
     ...degrees,
+    ...originColumns(view, Array.from({ length: n }, (_, i) => i), keep),
     vertexIds: view.vertexIds.slice(0, n),
     vertexLabel: view.vertexLabel.slice(0, n),
     vertexName: view.vertexName.slice(0, n),
@@ -227,6 +253,7 @@ export function toCyElements(view, { showIds = false, edgeIds = false, slotOf, p
       data: { id: 'n' + id, kind: 'vertex', elementId: id, index: i, label: vertexLabelOf(view, i), caption: vertexCaption(view, i, showIds) },
     };
     if (view.nodeStyle) styleNode(out[i], view.nodeStyle[i]);
+    if (view.vertexOrigin) addClass(out[i], cyOriginClass(view.vertexOrigin[i]));
     if (positions) out[i].position = { x: positions[2 * i], y: positions[2 * i + 1] };
   }
   for (let j = 0; j < edgeCount(view); j++) {
@@ -246,8 +273,15 @@ export function toCyElements(view, { showIds = false, edgeIds = false, slotOf, p
         ...(view.edgeStyle ? styledEdgeData(view.edgeStyle[j]) : {}),
       },
     };
+    if (view.edgeOrigin) addClass(out[n + j], cyOriginClass(view.edgeOrigin[j]));
   }
   return out;
+}
+
+/** Adds the class `name` (none for '') to a Cytoscape element definition. */
+function addClass(def, name) {
+  if (!name) return;
+  def.classes = def.classes ? `${def.classes} ${name}` : name;
 }
 
 // A profile graph view (js/profile-graph.js `styledView`) carries a resolved style per element:
@@ -309,6 +343,8 @@ export function inspectorRows(element, formatValue) {
     rows.push(['edges', `in ${element.inDegree} · out ${element.outDegree}`]);
   }
   if (element.kind === 'edge') rows.push(['out → in', `${element.source} → ${element.target}`]);
+  // A layer's element says where it comes from (absent on a plain graph).
+  if (element.origin) rows.push(['origin', ORIGIN_TEXT[element.origin] || element.origin]);
   for (const [k, v] of Object.entries(element.properties || {})) rows.push([k, formatValue(v)]);
   return rows;
 }
@@ -409,6 +445,7 @@ export function subView(view, indices) {
   }
   return {
     ...degrees,
+    ...originColumns(view, indices, keep),
     vertexIds: indices.map((i) => view.vertexIds[i]),
     vertexLabel: Uint32Array.from(indices, (i) => view.vertexLabel[i]),
     vertexName: indices.map((i) => view.vertexName[i]),

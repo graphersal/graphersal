@@ -386,3 +386,23 @@ fn a_layer_cannot_drop_while_another_owner_holds_it() {
     drop(other);
     assert_eq!(session.drop_layer()["ok"], true);
 }
+
+/// The playground's worker ticks the jobs between requests, which builds the store's scheduler
+/// (its system jobs hold the graph): starting a layer lets go of it instead of refusing the graph
+/// as "shared with another owner".
+#[test]
+fn start_layer_after_a_job_tick_releases_the_scheduler() {
+    let mut session = plain();
+    session.set_memory_stores(true);
+    session.set_time_zone("UTC").unwrap();
+    session.tick_jobs(1_700_000_000_000).unwrap();
+    let started = session.start_layer();
+    assert_eq!(started["ok"], true, "{started}");
+    assert!(started["info"]["layer"].is_object(), "{started}");
+    // Ticking on the layer (no store, no scheduler) is harmless, and dropping brings the store back.
+    session.tick_jobs(1_700_000_005_000).unwrap();
+    let dropped = session.drop_layer();
+    assert_eq!(dropped["ok"], true, "{dropped}");
+    assert!(session.has_store());
+    session.tick_jobs(1_700_000_010_000).unwrap();
+}

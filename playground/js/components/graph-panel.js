@@ -412,7 +412,10 @@ export const GraphPanel = {
     });
     watch(() => state.graphRequest && state.graphRequest.n, () => {
       const r = state.graphRequest;
-      if (r && r.source === 'neighbourhood' && r.ids && r.ids.length) showNeighbourhood(r.ids[0]);
+      if (!r || r.source !== 'neighbourhood' || !r.ids || !r.ids.length) return;
+      // The Layer changes dialog names the element to inspect once its neighbourhood is drawn.
+      if (r.inspect && cyRef.value) cyRef.value.inspectNext(r.inspect.kind, r.inspect.id);
+      showNeighbourhood(r.ids[0]);
     });
     watch(layout, (v) => storage.set('graph.layout', v));
     watch(edgeLabels, (v) => storage.set('graph.edgeLabels', v));

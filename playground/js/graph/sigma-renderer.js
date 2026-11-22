@@ -5,6 +5,9 @@
 // edges, click = inspector, double click = expand the selection (graph-canvas.js), straight edges
 // with arrow heads, positions from the engine's force layout (or the cheap Circle / Grid here).
 // No edge labels otherwise, no curves or loops, no Tree/Concentric, no schema drawing.
+// A layer's drawing marks added and modified elements (js/graph/origin-style.js): a ring around
+// the vertex on the hover layer (solid: added, dashed: modified; the vertex is `highlighted`),
+// edges in the origin colours and widths, the origin in the edge's hover label.
 //
 // Loading: the scripts come from cdnjs as their UMD builds with Subresource Integrity, injected
 // on first use (`loadFastLibraries`), so a page that never draws a large graph loads nothing.
@@ -22,6 +25,7 @@ import { TIER_CAPABILITIES } from './renderer.js';
 import { detectWebGL } from './tiers.js';
 import { SIZE_RANGE, sizeOf } from './size-by.js';
 import { loadScript } from '../cdn-script.js';
+import { originColors, sigmaNodeOrigin, sigmaEdgeOrigin, fastRings, originCaption } from './origin-style.js';
 
 /** The pinned scripts (cdnjs, exact versions, SRI hashes from cdnjs). */
 export const FAST_LIBRARIES = Object.freeze([
@@ -184,6 +188,7 @@ export class SigmaRenderer {
       this.slotFaded.push(mix(c, this.theme.surface, 0.22));
     }
     this.edgeFaded = mix(this.theme.edge, this.theme.surface, 0.3);
+    this.originColors = originColors(this.dark, (name) => cssVar(name, ''));
   }
 
   /** A vertex label: the caption next to the vertex, outlined in the surface colour. */
@@ -200,8 +205,22 @@ export class SigmaRenderer {
     ctx.fillText(data.label, x, y);
   }
 
-  /** A hovered or highlighted vertex: a ring in the selection colour and its label on the surface. */
+  /**
+   * A hovered or highlighted vertex: a ring in the selection colour and its label on the surface.
+   * A layer's changed vertex that is not hovered (highlighted for its ring) gets only its origin
+   * ring: solid (added) or dashed (modified).
+   */
   drawHover(ctx, data, settings) {
+    if (data.ringColor && !this.hoverNodes.has(data.i)) {
+      ctx.beginPath();
+      ctx.arc(data.x, data.y, data.size + 2, 0, Math.PI * 2);
+      ctx.lineWidth = 2;
+      ctx.strokeStyle = data.ringColor;
+      ctx.setLineDash(data.ringDash || []);
+      ctx.stroke();
+      ctx.setLineDash([]);
+      return;
+    }
     ctx.beginPath();
     ctx.arc(data.x, data.y, data.size + 2.5, 0, Math.PI * 2);
     ctx.lineWidth = 2;
@@ -246,7 +265,7 @@ export class SigmaRenderer {
 
   reduceNode(attrs) {
     const i = attrs.i;
-    if (this.selNodes && !this.selNodes[i]) return { ...attrs, color: attrs.fadedColor || this.slotFaded[attrs.slot], label: null };
+    if (this.selNodes && !this.selNodes[i]) return { ...attrs, color: attrs.fadedColor || this.slotFaded[attrs.slot], label: null, highlighted: false };
     if (this.hoverNodes.has(i)) return { ...attrs, highlighted: true };
     return attrs;
   }
@@ -316,6 +335,7 @@ export class SigmaRenderer {
       const [n, m] = this.counts();
       const sizeAt = this.sizer(n);
       const slots = view.labels.map((l) => (this.palette ? this.palette.slot(l) : PALETTE_SIZE));
+      const ringed = fastRings(view);
       for (let i = 0; i < n; i++) {
         const slot = slots[view.vertexLabel[i]];
         const attrs = {
@@ -328,6 +348,7 @@ export class SigmaRenderer {
           label: vertexCaption(view, i, this.options.showIds),
         };
         if (view.nodeStyle) Object.assign(attrs, this.styledNode(view.nodeStyle[i], attrs.size));
+        if (view.vertexOrigin) Object.assign(attrs, sigmaNodeOrigin(view.vertexOrigin[i], this.originColors, ringed));
         graph.addNode(String(i), attrs);
       }
       for (let j = 0; j < m; j++) {
@@ -338,6 +359,10 @@ export class SigmaRenderer {
           caption: edgeCaption(view, j, false),
         };
         if (view.edgeStyle) Object.assign(attrs, this.styledEdge(view.edgeStyle[j]));
+        if (view.edgeOrigin) {
+          const origin = sigmaEdgeOrigin(view.edgeOrigin[j], this.originColors);
+          if (origin) Object.assign(attrs, origin, { caption: originCaption(attrs.caption, origin.origin) });
+        }
         graph.addDirectedEdgeWithKey(String(j), String(view.edgeSource[j]), String(view.edgeTarget[j]), attrs);
       }
       this.sigma.setSetting('enableEdgeEvents', m <= FAST_EDGE_EVENTS_MAX);
@@ -521,10 +546,12 @@ export class SigmaRenderer {
       // with the theme's colours (components/profile-graph.js).
       this.graph.updateEachNodeAttributes((key, attrs) => {
         if (!attrs.styled) attrs.color = this.slotColors[attrs.slot];
+        if (attrs.ringColor) attrs.ringColor = this.originColors[attrs.origin];
         return attrs;
-      }, { attributes: ['color'] });
+      }, { attributes: ['color', 'ringColor'] });
       this.graph.updateEachEdgeAttributes((key, attrs) => {
-        if (!attrs.styled) attrs.color = this.theme.edge;
+        if (attrs.origin) attrs.color = this.originColors[attrs.origin];
+        else if (!attrs.styled) attrs.color = this.theme.edge;
         return attrs;
       }, { attributes: ['color'] });
     }

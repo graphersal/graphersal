@@ -155,7 +155,9 @@ export const state = reactive({
   catalogDialogScript: null, // the tab text "Save as query…" hands to the saved-query editor
   catalogDialogJournal: null, // {seq, level, source}: the record the System journal opens at (a toast's click)
   focusPanel: null, // {panel, tab, n}: a request to reveal a panel/tab
-  graphRequest: null, // {source, ids, n}: a request to the Graph panel (showNeighbourhood)
+  graphRequest: null, // {source, ids, n, inspect?}: a request to the Graph panel (showNeighbourhood)
+  layerDiffN: 0, // bumped by every openLayerDiff: the Layer changes dialog opens (a layer only)
+  layerBusy: false, // Start / Drop layer in progress (WebAssembly playground)
   jumpTo: null, // {line, column, n}: a request to move the editor cursor
   // The graph's vocabulary for the GQL completion (`gqlVocabulary`): {vertexLabels, edgeLabels,
   // keys} of the data version `version`; not reactive (markRaw), read by the completion source.
@@ -1780,9 +1782,51 @@ export function reveal(panel, tab = null) {
 }
 
 /** Shows the neighbourhood of vertex `id` in the Graph panel (and reveals it). */
-export function showNeighbourhood(id) {
-  state.graphRequest = { source: 'neighbourhood', ids: [String(id)], n: (state.graphRequest ? state.graphRequest.n : 0) + 1 };
+export function showNeighbourhood(id, inspect = null) {
+  state.graphRequest = {
+    source: 'neighbourhood', ids: [String(id)], n: (state.graphRequest ? state.graphRequest.n : 0) + 1,
+    // `{kind, id}`: the element the drawing then opens in its inspector (the Layer changes dialog).
+    ...(inspect ? { inspect: { kind: inspect.kind, id: String(inspect.id) } } : {}),
+  };
   reveal('graph');
+}
+
+// ------------------------------------------------------------------ layers
+
+/** Opens the Layer changes dialog (components/layer-diff.js; the layer badge's click). */
+export function openLayerDiff() {
+  state.layerDiffN++;
+}
+
+/**
+ * Start / Drop layer of the WebAssembly playground (`engine.startLayer()` / `dropLayer()`): the
+ * graph is swapped like a store view (every panel reloads, results become stale); a refusal is
+ * an error toast. Resolves to the engine's answer (`{ok, info}` / `{ok: false, error}`).
+ * @param {'start'|'drop'} which
+ */
+export async function switchLayer(which) {
+  if (state.running || state.layerBusy) return { ok: false, error: 'busy' };
+  const engine = state.engine;
+  const method = which === 'drop' ? 'dropLayer' : 'startLayer';
+  if (!engine || typeof engine[method] !== 'function') return { ok: false, error: 'This engine has no layers.' };
+  state.layerBusy = true;
+  try {
+    const res = await engine[method]();
+    if (!res || !res.ok) {
+      toast(`${which === 'drop' ? 'Drop layer' : 'Start layer'} failed: ${(res && res.error) || 'no answer'}`, 'error', 9000);
+      return res || { ok: false, error: 'no answer' };
+    }
+    storeGraphSwapped(res.info, null);
+    toast(which === 'drop'
+      ? 'Layer dropped: the base graph is back, unchanged.'
+      : `Layer started over ${res.info && res.info.layer ? res.info.layer.base : 'the graph'}: writes go to the layer, the base stays unchanged. The layer badge shows the changes.`, 'info', 7000);
+    return res;
+  } catch (err) {
+    toast(`${which === 'drop' ? 'Drop layer' : 'Start layer'} failed: ${err && err.message ? err.message : err}`, 'error', 9000);
+    return { ok: false, error: err && err.message ? err.message : String(err) };
+  } finally {
+    state.layerBusy = false;
+  }
 }
 
 export function jumpTo(position) {

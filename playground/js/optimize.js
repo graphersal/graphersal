@@ -393,9 +393,29 @@ export function bucketLabel(start, tier) {
  */
 export const MEMORY_LIST_LIMIT = 500;
 
-/** The memory report spec the Memory tab asks for. */
-export function memoryReportSpec() {
-  return { limit: MEMORY_LIST_LIMIT };
+/**
+ * The memory report spec the Memory tab asks for; `delta` (a layer's "Delta only" toggle) adds
+ * `scope: 'delta'`: only the layer's own added and modified elements are walked, the base is the
+ * one figure `shared_bytes`.
+ */
+export function memoryReportSpec(delta = false) {
+  return delta ? { limit: MEMORY_LIST_LIMIT, scope: 'delta' } : { limit: MEMORY_LIST_LIMIT };
+}
+
+/**
+ * What a layer's memory report says about the base (`report.scope`, `report.shared_bytes`), or
+ * null for a report that shares nothing (every plain graph): `{scope, sharedBytes, text}`.
+ * @param {Object|null} report
+ * @param {(n:number) => string} [format]
+ */
+export function memoryScopeNote(report, format = (n) => `${n} B`) {
+  const shared = report && typeof report.shared_bytes === 'number' ? report.shared_bytes : 0;
+  if (!report || !(shared > 0)) return null;
+  const scope = report.scope === 'delta' ? 'delta' : 'all';
+  const text = scope === 'delta'
+    ? `Delta only: the rows list the layer's own added and modified elements; the base it shares with other layers (${format(shared)}) is not walked.`
+    : `The rows describe the whole visible graph, base included; the totals are the layer's own memory, the shared base is ${format(shared)}.`;
+  return { scope, sharedBytes: shared, text };
 }
 
 /** The property rows of a memory report, the most bytes first, at most `MEMORY_LIST_LIMIT`. */

@@ -82,6 +82,13 @@ impl Session {
         }
     }
 
+    /// Lets go of the scheduler of a store that is being closed (its system jobs hold the
+    /// store's graph): [`Session::start_layer`] needs the session to own the graph alone. A
+    /// scheduler with a run under way is parked as on any store switch.
+    pub(crate) fn release_scheduler(&mut self) {
+        self.retire_scheduler();
+    }
+
     /// The scheduler of the active store, built when the active store changed (`None`: no
     /// store). Fails when the catalog or the store's jobs cannot be read, the time zone set
     /// before no longer resolves, or a system job is refused by the scheduler.

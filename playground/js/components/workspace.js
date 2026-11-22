@@ -11,6 +11,9 @@
 // A profile's top-bar module (`header`, components/profile-header.js) sits right of the spacer,
 // left of the bar's buttons, on every tab.
 // The built-in `full` profile has one tab (the workspace): the page as it always was.
+// A layered graph (`state.graph.layer`) adds the layer badge after the counts (its Layer changes
+// dialog: components/layer-diff.js); the WebAssembly playground's layer has no store (no Store
+// menu while it is shown).
 
 import { reactive, ref, computed, watch, nextTick, onMounted, onBeforeUnmount } from 'vue';
 import { state, reveal, cycleTheme, saveGraph, saveCurrentSnapshot, registerSnapshotChoice, saveSchema, saveToSource, isServerMode, can, onWorkspaceTab, backToLiveGraph, runStoreTask, toast, refreshSavedQueries, refreshCompressions, refreshIndexes, registerShareDialog, openShareDialog, openOptimize } from '../store.js';
@@ -35,6 +38,7 @@ import { JournalToasts } from './journal-toasts.js';
 import { McpStatsDialog } from './mcp-stats.js';
 import { ProfileTab } from './profile-tab.js';
 import { ProfileHeader } from './profile-header.js';
+import { LayerBadge, LayerDiffDialog } from './layer-diff.js';
 
 export const PANELS = [
   { id: 'editor', title: 'Query', column: 'left', key: 'Alt+1' },
@@ -79,7 +83,7 @@ const elementStyle = (dimension, size, gutterSize) => ({ 'flex-basis': `calc(${s
 const gutterStyle = (dimension, gutterSize) => ({ 'flex-basis': `${gutterSize}px` });
 
 export const Workspace = {
-  components: { QueryEditor, ResultsPanel, GraphPanel, SchemaPanel, ProfilePanel, DropMenu, StoreMenu, CatalogMenu, CatalogDialogs, OptimizePanel, ShareDialog, SnapshotChoiceDialog, ChangeBurstBanner, JournalToasts, McpStatsDialog, ProfileTab, ProfileHeader },
+  components: { QueryEditor, ResultsPanel, GraphPanel, SchemaPanel, ProfilePanel, DropMenu, StoreMenu, CatalogMenu, CatalogDialogs, OptimizePanel, ShareDialog, SnapshotChoiceDialog, ChangeBurstBanner, JournalToasts, McpStatsDialog, ProfileTab, ProfileHeader, LayerBadge, LayerDiffDialog },
   emits: ['help', 'settings'],
   setup(props, { emit }) {
     const layout = reactive(loadLayout());
@@ -361,6 +365,7 @@ export const Workspace = {
         <span class="badge" :title="state.graph.vertexCount + ' vertices, ' + state.graph.edgeCount + ' edges'">
           {{ formatCount(state.graph.vertexCount) }} V · {{ formatCount(state.graph.edgeCount) }} E
         </span>
+        <layer-badge></layer-badge>
       </template>
       <span class="spacer"></span>
       <profile-header v-if="ui.header" :header="ui.header"></profile-header>
@@ -395,7 +400,7 @@ export const Workspace = {
       <catalog-menu v-if="state.graph && can('catalog')"></catalog-menu>
       <button v-if="state.graph && can('optimize')" type="button" class="btn hide-narrow" @click="openOptimize()"
               title="Optimize: the storage advisor's recommendations (indexes, compression) with Apply, the workload statistics with charts, the memory report">Optimize</button>
-      <store-menu v-if="can('store') && ((serverMode && state.engineInfo.store) || (state.engineInfo && state.engineInfo.storeMemory && state.graph))"></store-menu>
+      <store-menu v-if="can('store') && ((serverMode && state.engineInfo.store) || (state.engineInfo && state.engineInfo.storeMemory && state.graph && !state.graph.layer))"></store-menu>
       <drop-menu v-if="state.graph && can('save')" class="hide-narrow" button-class="btn" title="Download the graph data, its schema or a snapshot: one file per entry" menu-style="min-width: 300px">
         <template #trigger>{{ state.saving ? 'Saving…' : 'Save ▾' }}</template>
           <div class="menu-title">Graph data (no schema inside)</div>
@@ -475,6 +480,7 @@ export const Workspace = {
     <catalog-dialogs></catalog-dialogs>
     <journal-toasts v-if="ui.hasWorkspace"></journal-toasts>
     <optimize-panel></optimize-panel>
+    <layer-diff-dialog></layer-diff-dialog>
     <share-dialog ref="shareDialog"></share-dialog>
     <snapshot-choice-dialog ref="snapshotChoice"></snapshot-choice-dialog>
     <mcp-stats-dialog ref="mcpStatsDialog"></mcp-stats-dialog>

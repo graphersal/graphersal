@@ -15,6 +15,10 @@
 
 import { vertexCount, edgeCount } from '../graph-data.js';
 
+// A layer's drawing carries origin columns (graph-data.js `ORIGIN_COLUMNS`): an element created
+// here is new in the layer ('added'); removals keep the columns aligned.
+const appendOrigin = (column) => (Array.isArray(column) ? [...column, 'added'] : undefined);
+
 /** Tuning of the gestures. */
 export const EDIT_TUNING = Object.freeze({
   /** A press on a vertex that moves less than this many pixels is a click, not a drag. */
@@ -154,6 +158,7 @@ export function applyEdit(view, change) {
       vertexIds: [...Array.from(base.vertexIds), String(d.id)],
       vertexLabel: appendU32(base.vertexLabel, labelIndex(d.label || '')),
       vertexName: [...Array.from(base.vertexName || []), d.caption ?? null],
+      ...(Array.isArray(base.vertexOrigin) ? { vertexOrigin: appendOrigin(base.vertexOrigin) } : {}),
       totalNodes: (base.totalNodes ?? n) + 1,
     };
   }
@@ -170,6 +175,7 @@ export function applyEdit(view, change) {
       edgeSource: appendU32(base.edgeSource, s),
       edgeTarget: appendU32(base.edgeTarget, t),
       edgeLabel: appendU32(base.edgeLabel, labelIndex(d.label || '')),
+      ...(Array.isArray(base.edgeOrigin) ? { edgeOrigin: appendOrigin(base.edgeOrigin) } : {}),
       totalEdges: (base.totalEdges ?? m) + 1,
     };
   }
@@ -194,6 +200,7 @@ export function applyEdit(view, change) {
       vertexIds: without(base.vertexIds),
       vertexLabel: Uint32Array.from(without(base.vertexLabel)),
       vertexName: without(base.vertexName || []),
+      ...(Array.isArray(base.vertexOrigin) ? { vertexOrigin: without(base.vertexOrigin) } : {}),
       edgeSource: Uint32Array.from(edges.edgeSource, (s) => map[s]),
       edgeTarget: Uint32Array.from(edges.edgeTarget, (t) => map[t]),
       totalNodes: Math.max(0, (base.totalNodes ?? n) - 1),
@@ -228,6 +235,7 @@ function withEdges(view, keep) {
     edgeSource: Uint32Array.from(keep, (j) => view.edgeSource[j]),
     edgeTarget: Uint32Array.from(keep, (j) => view.edgeTarget[j]),
     edgeLabel: Uint32Array.from(keep, (j) => view.edgeLabel[j]),
+    ...(Array.isArray(view.edgeOrigin) ? { edgeOrigin: keep.map((j) => view.edgeOrigin[j] ?? null) } : {}),
   };
 }
 

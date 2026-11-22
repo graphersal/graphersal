@@ -243,7 +243,8 @@ unless something asks for another one. A profile names:
 | `files` | where the module files are: `""` (next to the page) or a path ending in `/` on the same origin |
 
 The `can` keys: the top bar's `devBadge`, `mcp`, `share`, `view`, `catalog`, `optimize`, `store`,
-`save`, `saveToFile`, `changeGraph`, `settings`, `theme`, `help`; the panels `panel.editor`,
+`save`, `saveToFile`, `changeGraph`, `settings`, `theme`, `help`, `layerDiff` (a layer's badge
+and Layer changes dialog, Start / Drop layer in the browser); the panels `panel.editor`,
 `panel.results`, `panel.graph`, `panel.schema`, `panel.profile`; the Query panel's `examples`
 and its tab kinds `tab.query`, `tab.gql`, `tab.ai`. What the engine cannot do stays off whatever
 the profile says (the Store menu needs a store, the MCP badge an MCP endpoint, Save to file a
@@ -797,6 +798,10 @@ Every graph you load is kept as a Store in memory: every run that changes the gr
 and the **Store** menu in the top bar checkpoints, marks, opens past states read-only, forks and
 rolls back. **Everything in memory is lost on page reload**: download a `.gsnap` to keep a state.
 The details are on the page [The Store in the Playground](../persistence/playground_store.md).
+
+**Store ▸ Start a layer over this graph** freezes the loaded graph as the base of a layer: writes
+go to the layer, a top-bar badge shows the changes, and the drawing outlines added and modified
+elements. See [Layered graphs: In the playground](layered_graphs.md#in-the-playground).
 
 ## The schema editor
 
