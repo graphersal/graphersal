@@ -120,6 +120,8 @@ machine and are compared with the previous release, not per change.
    `graphersal-storage-tests`, `graphersal-session`, `graphersal-mcp`, `graphersal-serve` and `graphersal-cli`.
    Before `graphersal-serve`, run `crates/graphersal-serve/prepare-package.sh`: it copies the playground UI
    the crate embeds into its git-ignored `ui/` (check with `cargo package -p graphersal-serve --list`).
+   Its `cargo publish -p graphersal-serve` needs `--allow-dirty`: Cargo counts the git-ignored `ui/` copy as
+   uncommitted changes.
 3. The workflow `release.yml`, started on the tag: `gh workflow run Release --ref v0.2.0`. It checks that the
    tag matches the version and that the version's release notes exist, then runs two independent parts:
    - **PyPI.** It builds the four-platform wheels and the sdist through `python.yml` (which also runs the

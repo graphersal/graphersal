@@ -1,7 +1,7 @@
 # Storage Conformance Tests
 
 > `GraphStorage` is **experimental in 0.7.x**: its methods and associated types may change in any
-> 0.7.x release (a layered storage with snapshot reads is planned). The trait's own rustdoc
+> 0.7.x release (`LayeredGraph`, a layer over a frozen base, implements it since 0.7.0). The trait's own rustdoc
 > is the implementer's guide: handles, units, capabilities, change capture and statistics.
 
 The crate `graphersal-storage-tests` (on crates.io, **EXPERIMENTAL** like the trait: it may break in any minor
