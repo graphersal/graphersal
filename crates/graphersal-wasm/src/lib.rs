@@ -519,6 +519,33 @@ impl Playground {
         Ok(to_text(&self.session.memory_report(&spec)))
     }
 
+    /// What a layered graph changed against its base, from a spec (JSON text, `{kinds?,
+    /// labels?, limit?}`; `{}`: the whole diff): `{ok: true, diff: {added, removed, modified,
+    /// truncated}}` or `{ok: false, error}`; an empty diff on a graph without layers (see
+    /// [`Session::layer_diff`]).
+    #[wasm_bindgen(js_name = layerDiff)]
+    pub fn layer_diff(&self, spec: &str) -> Result<String, JsError> {
+        let spec = body_json(spec)?;
+        Ok(to_text(&self.session.layer_diff(&spec)))
+    }
+
+    /// Freezes the loaded graph as the base of a new, empty layer in memory and serves the
+    /// layer ("Start a layer over this graph"): `{ok: true, info}` (the graph info, now with
+    /// `layer`) or `{ok: false, error}`. The graph's store in memory is closed: a layer has no
+    /// Store menu (see [`Session::start_layer`]).
+    #[wasm_bindgen(js_name = startLayer)]
+    pub fn start_layer(&mut self) -> String {
+        to_text(&self.session.start_layer())
+    }
+
+    /// Discards the layer [`Self::start_layer`] started (its changes are lost) and serves the
+    /// base again, kept as a store in memory: `{ok: true, info}` or `{ok: false, error}` (see
+    /// [`Session::drop_layer`]).
+    #[wasm_bindgen(js_name = dropLayer)]
+    pub fn drop_layer(&mut self) -> String {
+        to_text(&self.session.drop_layer())
+    }
+
     /// The workload statistics of the served graph (JSON text, see
     /// [`Session::workload_report`]); with `history` (`minutes`, `hours`, `days`) every row's
     /// buckets of that tier ([`Session::workload_report_with_history`]).
@@ -1069,6 +1096,50 @@ mod tests {
         p.switch_database("main").unwrap();
         let closed = json(p.close_database(&id).unwrap());
         assert_eq!(closed["store"]["databases"].as_array().unwrap().len(), 1);
+    }
+
+    /// A layer over the loaded graph, natively: start (info gains `layer`, the store in memory
+    /// is closed), a write lands in the layer and shows in the diff and the drawing's origins,
+    /// drop (the base is back unchanged, kept as a store again).
+    #[test]
+    fn a_layer_starts_over_the_loaded_graph_and_is_dropped() {
+        let json = |text: String| -> Value { serde_json::from_str(&text).expect("JSON") };
+        let mut p = Playground::new();
+        p.load_sample("modern").unwrap();
+        assert!(json(p.info().unwrap()).get("layer").is_none());
+        let started = json(p.start_layer());
+        assert_eq!(started["ok"], true, "{started}");
+        assert_eq!(
+            started["info"]["layer"]["base"], "Modern (TinkerPop)",
+            "{started}"
+        );
+        assert!(!p.session.has_store());
+        let run = json(
+            p.execute(
+                r#"g.add_v("person").property("name", "ada").iterate()"#,
+                "{}",
+            )
+            .unwrap(),
+        );
+        assert_eq!(run["ok"], true, "{run}");
+        let diff = json(p.layer_diff("{}").unwrap());
+        assert_eq!(
+            diff["diff"]["added"][0]["properties"]["name"], "ada",
+            "{diff}"
+        );
+        let view = json(p.graph_view(100, 100).unwrap());
+        assert_eq!(view["vertexOrigin"].as_array().unwrap().len(), 7, "{view}");
+        assert_eq!(json(p.start_layer())["ok"], false);
+        let dropped = json(p.drop_layer());
+        assert_eq!(dropped["ok"], true, "{dropped}");
+        assert!(dropped["info"].get("layer").is_none(), "{dropped}");
+        assert_eq!(dropped["info"]["vertexCount"], 6);
+        assert!(p.session.has_store());
+        assert_eq!(json(p.drop_layer())["ok"], false);
+        assert_eq!(
+            json(p.layer_diff("{}").unwrap())["diff"]["added"],
+            serde_json::json!([])
+        );
     }
 
     /// The saved-query methods, natively: define, list, call text, file round trip, move, drop.

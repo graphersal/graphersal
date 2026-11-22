@@ -10,8 +10,8 @@ use graphersal::ElementProperty;
 use graphersal::storage::{
     ChangeSet, CommitHook, CommitMetadata, CompactString, Definition, DefinitionKind,
     ExecutionPolicy, GraphError, GraphNodeType, GraphSchema, GraphStatistics, GraphStorage,
-    JsonPath, LayerDiff, LayerDiffRequest, LayerOrigin, Mark, MemoryStats, PropertyMap,
-    PropertySchema, RollbackReason, StorageCapabilities, UnitChanges, UnitMark,
+    JsonPath, LayerDiff, LayerDiffRequest, LayerOrigin, LayerSummary, Mark, MemoryStats,
+    PropertyMap, PropertySchema, RollbackReason, StorageCapabilities, UnitChanges, UnitMark,
 };
 use graphersal_storage_tests::forwarding::{
     ForwardEdgeId as Fe, ForwardVertexId as Fv, Forwarding,
@@ -228,6 +228,9 @@ impl GraphStorage for NoCompression {
     }
     fn layer_diff(&self, request: &LayerDiffRequest) -> Result<LayerDiff, GraphError> {
         GraphStorage::layer_diff(&self.0, request)
+    }
+    fn layer_summary(&self) -> Result<Option<LayerSummary>, GraphError> {
+        GraphStorage::layer_summary(&self.0)
     }
     fn memory_footprint_bytes(&self) -> Result<Option<u64>, GraphError> {
         GraphStorage::memory_footprint_bytes(&self.0)

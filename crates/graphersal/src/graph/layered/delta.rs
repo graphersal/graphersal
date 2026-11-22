@@ -827,6 +827,27 @@ impl Delta {
         self.gained_edge_labels.values().flatten().copied()
     }
 
+    /// `(added, modified, removed)`, each as `(vertices, edges)`: the layer's change counts
+    /// from its own counters (O(1); stubs are not vertices). Disjoint: a removed base element
+    /// has no image, so it is never also counted as modified.
+    pub(crate) fn change_counts(&self) -> [(u64, u64); 3] {
+        let count = |n: usize| n as u64;
+        [
+            (
+                count(self.graph.node_count().saturating_sub(self.stubs.len())),
+                count(self.graph.edge_count()),
+            ),
+            (
+                count(self.vertex_image_count),
+                count(self.edge_images.len()),
+            ),
+            (
+                count(self.removed_vertex_count),
+                count(self.removed_edge_count),
+            ),
+        ]
+    }
+
     /// `true` while the layer holds an added vertex (stubs are not vertices).
     #[inline]
     pub(crate) fn has_added_vertices(&self) -> bool {

@@ -20,10 +20,10 @@ use graphersal::storage::{
     ChangeSet, CommitHook, CommitMetadata, CompactString, CompressionEstimate,
     CompressionEstimateRequest, CompressionStats, Definition, DefinitionKind, EdgeHandle,
     ElementKind, ExecutionPolicy, GraphError, GraphNodeType, GraphSchema, GraphStatistics,
-    GraphStorage, JsonPath, LayerDiff, LayerDiffRequest, LayerOrigin, Mark, MemoryStats,
-    PropertyIndexInfo, PropertyIndexRange, PropertyIndexTransform, PropertyMap, PropertySchema,
-    RollbackReason, StorageCapabilities, UniqueIndexDuplicates, UnitChanges, UnitMark,
-    VertexHandle,
+    GraphStorage, JsonPath, LayerDiff, LayerDiffRequest, LayerOrigin, LayerSummary, Mark,
+    MemoryStats, PropertyIndexInfo, PropertyIndexRange, PropertyIndexTransform, PropertyMap,
+    PropertySchema, RollbackReason, StorageCapabilities, UniqueIndexDuplicates, UnitChanges,
+    UnitMark, VertexHandle,
 };
 
 /// The vertex handle of [`Forwarding`]: a newtype around the wrapped graph's [`VertexHandle`],
@@ -409,6 +409,9 @@ impl GraphStorage for Forwarding {
     }
     fn layer_diff(&self, request: &LayerDiffRequest) -> Result<LayerDiff, GraphError> {
         GraphStorage::layer_diff(&self.0, request)
+    }
+    fn layer_summary(&self) -> Result<Option<LayerSummary>, GraphError> {
+        GraphStorage::layer_summary(&self.0)
     }
     fn memory_footprint_bytes(&self) -> Result<Option<u64>, GraphError> {
         GraphStorage::memory_footprint_bytes(&self.0)

@@ -118,6 +118,11 @@ pub trait AnyGraph: Send + Sync + 'static + sealed::Sealed {
         request: &crate::graph::LayerDiffRequest,
     ) -> Result<crate::graph::LayerDiff, GraphError>;
 
+    /// [`GraphStorage::layer_summary`] of the storage, under one read lock: the base's name and
+    /// identity, the change counts and the memory of a layered storage; `None` for any other
+    /// storage. Cheap (no diff walk). Fails like [`Self::capabilities`].
+    fn layer_summary(&self) -> Result<Option<crate::graph::LayerSummary>, GraphError>;
+
     /// [`Graph::shrink_to_fit`]: releases the storage's spare capacity under the write lock
     /// and reports its memory total before and after; changes no data, commits nothing.
     /// Unauthorized: the front end asks its authorizer first.
@@ -437,6 +442,10 @@ where
         request: &crate::graph::LayerDiffRequest,
     ) -> Result<crate::graph::LayerDiff, GraphError> {
         self.read_checked()?.layer_diff(request)
+    }
+
+    fn layer_summary(&self) -> Result<Option<crate::graph::LayerSummary>, GraphError> {
+        self.read_checked()?.layer_summary()
     }
 
     fn shrink_to_fit(&self) -> Result<crate::graph::ShrinkReport, GraphError> {

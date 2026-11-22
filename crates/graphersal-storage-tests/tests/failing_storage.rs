@@ -971,6 +971,20 @@ fn layer_reads_are_forwarded_and_can_fail() {
     );
 }
 
+/// `layer_summary` is forwarded (`None`: no layer under `Forwarding`) and fails with the layer
+/// fault, never a made-up summary.
+#[test]
+fn the_layer_summary_is_forwarded_and_can_fail() {
+    use graphersal::storage::GraphStorage;
+    let storage = modern();
+    assert_eq!(storage.layer_summary().unwrap(), None);
+    Faults::set(&storage.faults().layer, true);
+    let err = storage.layer_summary().unwrap_err();
+    assert!(matches!(err, GraphError::StorageFailed { .. }), "{err}");
+    Faults::set(&storage.faults().layer, false);
+    assert_eq!(storage.layer_summary().unwrap(), None);
+}
+
 /// A failing layer read fails the `layer()` / `has_layer()` step that reads it (vertices and
 /// edges), as a storage error at that step, never a panic or a made-up origin; once the backend
 /// is back the same queries answer.

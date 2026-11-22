@@ -191,7 +191,7 @@ pub struct Session {
     /// The host's storage: how loaded graphs and stores are built.
     pub(crate) factory: Arc<dyn GraphFactory>,
     pub(crate) name: String,
-    kind: String,
+    pub(crate) kind: String,
     pub(crate) engine: rhai::Engine,
     /// The host presets every run gets ([`Self::with_presets`]).
     presets: SessionPresets,
@@ -219,6 +219,9 @@ pub struct Session {
     pub(crate) jobs: crate::jobs::SessionJobs,
     /// Runs open no whole-run unit ([`Self::set_read_only_runs`]).
     read_only_runs: bool,
+    /// The base of the layer [`Self::start_layer`] started (`crate::layer`): what
+    /// [`Self::drop_layer`] serves again. `None` otherwise (also for a layer the host gave).
+    pub(crate) layer_base: Option<graphersal::storage::LayerBase>,
 }
 
 /// The session's part of a memory report (`session`: its layout jobs and cached layouts,
@@ -464,6 +467,7 @@ impl Session {
             memory,
             jobs: crate::jobs::SessionJobs::default(),
             read_only_runs,
+            layer_base: None,
         }
     }
 
@@ -807,6 +811,7 @@ impl Session {
     ) -> Result<Value, SessionError> {
         self.warnings.clear();
         self.graph = graph.into_session_graph();
+        self.layer_base = None;
         self.name = name.to_string();
         self.kind = kind.to_string();
         self.info()
@@ -817,9 +822,10 @@ impl Session {
         Ok(self.graph.definitions(None)?)
     }
 
-    fn replace(&mut self, graph: Arc<dyn SessionGraph>, name: &str, kind: &str) {
+    pub(crate) fn replace(&mut self, graph: Arc<dyn SessionGraph>, name: &str, kind: &str) {
         self.warnings.clear();
         self.graph = graph;
+        self.layer_base = None;
         self.name = name.to_string();
         self.kind = kind.to_string();
         if self.memory_stores {
@@ -830,9 +836,10 @@ impl Session {
     }
 
     /// `{name, kind, vertexCount, edgeCount, schemaMode, savedQueries, compressionRules,
-    /// propertyIndexes, catalog, warnings}` of the loaded graph (`savedQueries`,
+    /// propertyIndexes, catalog, warnings, layer?}` of the loaded graph (`savedQueries`,
     /// `compressionRules`, `propertyIndexes`: how many of each its catalog holds; `catalog`:
-    /// every kind's count by kind name). Fails when the graph cannot be read
+    /// every kind's count by kind name; `layer` only on a layered graph:
+    /// [`crate::layer::layer_info`]). Fails when the graph cannot be read
     /// ([`SessionError::Graph`]).
     pub fn info(&self) -> Result<Value, SessionError> {
         let g = &self.graph;
@@ -844,7 +851,7 @@ impl Session {
                 .or_insert(json!(0));
             *count = json!(count.as_u64().unwrap_or(0) + 1);
         }
-        Ok(json!({
+        let mut info = json!({
             "name": self.name,
             "kind": self.kind,
             "vertexCount": g.vertex_count()?,
@@ -864,7 +871,11 @@ impl Session {
                 .count(),
             "catalog": catalog,
             "warnings": self.warnings,
-        }))
+        });
+        if let Some(layer) = self.layer_info()? {
+            info["layer"] = layer;
+        }
+        Ok(info)
     }
 
     /// The memory the process holds beside the graph: `{models: [{name, model, dimension,

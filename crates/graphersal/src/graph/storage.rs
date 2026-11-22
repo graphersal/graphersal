@@ -7,7 +7,7 @@ use crate::graph::change::{ChangeSet, CommitMetadata};
 use crate::graph::clock::CommitClock;
 use crate::graph::definition::{Definition, DefinitionKind};
 use crate::graph::hooks::{Mark, RollbackReason};
-use crate::graph::layer_diff::{LayerDiff, LayerDiffRequest, LayerOrigin};
+use crate::graph::layer_diff::{LayerDiff, LayerDiffRequest, LayerOrigin, LayerSummary};
 use crate::graph::schema::defaults::CreateContext;
 use crate::graph::schema::{GraphSchema, PropertySchema, SchemaInferer};
 use crate::graph::undo::UndoEntry;
@@ -533,6 +533,17 @@ pub trait GraphStorage: Send + Sync {
     fn layer_diff(&self, request: &LayerDiffRequest) -> Result<LayerDiff, GraphError> {
         let _ = request;
         Ok(LayerDiff::default())
+    }
+
+    /// A layered storage at a glance ([`LayerSummary`]: the base's name and identity, the
+    /// counts of added, modified and removed vertices and edges, its own bytes beside the
+    /// shared base's), for front ends that show whether a graph is a layer. `Err` when the
+    /// backend cannot answer.
+    ///
+    /// Default: `None`, the answer of a storage without layers. A layered storage answers from
+    /// its own bookkeeping (counters, cached footprints), never from a diff walk.
+    fn layer_summary(&self) -> Result<Option<LayerSummary>, GraphError> {
+        Ok(None)
     }
 
     /// The element counts this storage keeps up to date (see [`GraphStatistics`]), or `None` if
@@ -4015,6 +4026,11 @@ impl<G: GraphStorage> GraphStorage for &G {
     }
 
     #[inline]
+    fn layer_summary(&self) -> Result<Option<LayerSummary>, GraphError> {
+        (**self).layer_summary()
+    }
+
+    #[inline]
     fn memory_footprint_bytes(&self) -> Result<Option<u64>, GraphError> {
         (**self).memory_footprint_bytes()
     }
@@ -4492,6 +4508,11 @@ impl<G: GraphStorage> GraphStorage for Box<G> {
     #[inline]
     fn layer_diff(&self, request: &LayerDiffRequest) -> Result<LayerDiff, GraphError> {
         (**self).layer_diff(request)
+    }
+
+    #[inline]
+    fn layer_summary(&self) -> Result<Option<LayerSummary>, GraphError> {
+        (**self).layer_summary()
     }
 
     #[inline]
@@ -5024,6 +5045,11 @@ impl<G: GraphStorage> GraphStorage for &mut G {
     #[inline]
     fn layer_diff(&self, request: &LayerDiffRequest) -> Result<LayerDiff, GraphError> {
         (**self).layer_diff(request)
+    }
+
+    #[inline]
+    fn layer_summary(&self) -> Result<Option<LayerSummary>, GraphError> {
+        (**self).layer_summary()
     }
 
     #[inline]
@@ -5711,6 +5737,11 @@ impl GraphStorage for Arc<TraversalGraph> {
     #[inline]
     fn layer_diff(&self, request: &LayerDiffRequest) -> Result<LayerDiff, GraphError> {
         self.as_ref().layer_diff(request)
+    }
+
+    #[inline]
+    fn layer_summary(&self) -> Result<Option<LayerSummary>, GraphError> {
+        self.as_ref().layer_summary()
     }
 
     #[inline]

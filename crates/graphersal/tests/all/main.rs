@@ -139,6 +139,7 @@ mod journal_panic_tests;
 mod jpath_tests;
 mod layer_diff_tests;
 mod layer_steps_tests;
+mod layer_summary_tests;
 mod layered_graph_tests;
 mod layered_index_tests;
 mod layered_memory_report_tests;

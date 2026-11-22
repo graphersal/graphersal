@@ -13,6 +13,7 @@
 
 use compact_str::CompactString;
 
+use crate::graph::layered::BaseRef;
 use crate::graph::schema::ElementKind;
 use crate::value::{ElementProperty, PropertyMap};
 
@@ -426,6 +427,164 @@ impl LayerDiffChange {
         }
         map.insert("properties", ElementProperty::Object(Box::new(properties)));
         ElementProperty::Object(Box::new(map))
+    }
+}
+
+/// Vertex and edge counts of one kind of layer change ([`LayerSummary`]).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub struct LayerCounts {
+    /// Vertices.
+    pub vertices: u64,
+    /// Edges.
+    pub edges: u64,
+}
+
+impl LayerCounts {
+    /// `vertices` vertices and `edges` edges.
+    pub fn new(vertices: u64, edges: u64) -> Self {
+        Self { vertices, edges }
+    }
+
+    /// The counts as a value: `#{vertices, edges}`.
+    pub fn to_property(&self) -> ElementProperty {
+        let mut map = PropertyMap::default();
+        map.insert("vertices", count_value(self.vertices));
+        map.insert("edges", count_value(self.edges));
+        ElementProperty::Object(Box::new(map))
+    }
+}
+
+/// A count as a value (an integer; a count beyond `i64::MAX` cannot occur in memory).
+fn count_value(count: u64) -> ElementProperty {
+    ElementProperty::from(i64::try_from(count).unwrap_or(i64::MAX))
+}
+
+/// What a layered storage is at a glance ([`GraphStorage::layer_summary`]): the base's display
+/// name and identity, how many elements the layer added, modified and removed, and its own
+/// memory beside the shared base's. Cheap: the counts come from the delta's own bookkeeping
+/// (never a diff walk) and the bytes from the cached footprints. `None` for a storage without
+/// layers.
+///
+/// The counts follow [`LayerDiff`]: `added` + `modified` + `removed` of a kind equal the
+/// lengths of an unlimited diff's lists of that kind (a modified element whose image differs
+/// from the base only in property order counts, as it is listed there).
+///
+/// [`GraphStorage::layer_summary`]: crate::graph::GraphStorage::layer_summary
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct LayerSummary {
+    /// The base's display name ([`LayerBase::name`](crate::graph::LayerBase::name); `"base"`
+    /// for a layer made without a named base).
+    pub base: CompactString,
+    /// The base's identity, `None` when the storage cannot tell it.
+    pub base_ref: Option<BaseRef>,
+    /// Elements the layer created.
+    pub added: LayerCounts,
+    /// Base elements whose labels or properties the layer changed.
+    pub modified: LayerCounts,
+    /// Base elements the layer removed.
+    pub removed: LayerCounts,
+    /// The layer's own memory ([`MemoryStats::total_bytes`] of the storage:
+    /// `GraphStorage::memory_footprint_bytes`).
+    ///
+    /// [`MemoryStats::total_bytes`]: crate::graph::MemoryStats::total_bytes
+    pub own_bytes: u64,
+    /// The memory of the shared base, outside `own_bytes`
+    /// ([`MemoryStats::shared_bytes`](crate::graph::MemoryStats::shared_bytes)).
+    pub shared_bytes: u64,
+}
+
+impl LayerSummary {
+    /// A summary of a layer over the base named `base`, with no change and no memory counted
+    /// yet (the `with_*` builders fill them).
+    pub fn new(base: impl Into<CompactString>, base_ref: Option<BaseRef>) -> Self {
+        Self {
+            base: base.into(),
+            base_ref,
+            added: LayerCounts::default(),
+            modified: LayerCounts::default(),
+            removed: LayerCounts::default(),
+            own_bytes: 0,
+            shared_bytes: 0,
+        }
+    }
+
+    /// The summary with these change counts.
+    pub fn with_counts(
+        mut self,
+        added: LayerCounts,
+        modified: LayerCounts,
+        removed: LayerCounts,
+    ) -> Self {
+        self.added = added;
+        self.modified = modified;
+        self.removed = removed;
+        self
+    }
+
+    /// The summary with these memory figures.
+    pub fn with_bytes(mut self, own_bytes: u64, shared_bytes: u64) -> Self {
+        self.own_bytes = own_bytes;
+        self.shared_bytes = shared_bytes;
+        self
+    }
+
+    /// The summary as a value, the form every front end shows:
+    ///
+    /// ```text
+    /// #{base, base_ref: #{graph_id, commit_seq, committed_at} | (), added: #{vertices, edges},
+    ///   modified: #{..}, removed: #{..}, own_bytes, shared_bytes}
+    /// ```
+    ///
+    /// `graph_id` is the canonical UUID text, `committed_at` microseconds since the epoch.
+    ///
+    /// ```
+    /// use graphersal::prelude::*;
+    /// use graphersal::storage::{LayerCounts, LayerSummary};
+    ///
+    /// let summary = LayerSummary::new("modern", None)
+    ///     .with_counts(LayerCounts::new(1, 0), LayerCounts::default(), LayerCounts::new(0, 2));
+    /// let ElementProperty::Object(map) = summary.to_property() else { unreachable!() };
+    /// let keys: Vec<&str> = map.keys().map(|k| k.as_str()).collect();
+    /// assert_eq!(
+    ///     keys,
+    ///     ["base", "base_ref", "added", "modified", "removed", "own_bytes", "shared_bytes"]
+    /// );
+    /// ```
+    pub fn to_property(&self) -> ElementProperty {
+        let mut map = PropertyMap::default();
+        map.insert("base", ElementProperty::from(self.base.as_str()));
+        let base_ref = match &self.base_ref {
+            Some(base_ref) => {
+                let mut identity = PropertyMap::default();
+                identity.insert(
+                    "graph_id",
+                    ElementProperty::from(
+                        crate::value::uuid::format_canonical(base_ref.graph_id()).as_str(),
+                    ),
+                );
+                identity.insert("commit_seq", count_value(base_ref.commit_seq()));
+                identity.insert(
+                    "committed_at",
+                    ElementProperty::from(base_ref.committed_at()),
+                );
+                ElementProperty::Object(Box::new(identity))
+            }
+            None => ElementProperty::Null,
+        };
+        map.insert("base_ref", base_ref);
+        map.insert("added", self.added.to_property());
+        map.insert("modified", self.modified.to_property());
+        map.insert("removed", self.removed.to_property());
+        map.insert("own_bytes", count_value(self.own_bytes));
+        map.insert("shared_bytes", count_value(self.shared_bytes));
+        ElementProperty::Object(Box::new(map))
+    }
+
+    /// The summary as compact JSON text: [`Self::to_property`] written by the physical codec.
+    pub fn to_json(&self) -> String {
+        crate::value::physical::to_json_text(&self.to_property()).unwrap_or_default()
     }
 }
 

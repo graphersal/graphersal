@@ -33,7 +33,8 @@
 //! [`GraphStorage::vertex_layer`] / [`GraphStorage::edge_layer`] answer an element's
 //! [`LayerOrigin`] and [`GraphStorage::layer_diff`] a [`LayerDiff`] (request
 //! [`LayerDiffRequest`]; entries [`LayerDiffEntry`], [`LayerDiffChange`],
-//! [`LayerPropertyChange`]); every other storage answers `Base` and an empty diff. A
+//! [`LayerPropertyChange`]) and [`GraphStorage::layer_summary`] a [`LayerSummary`] (counts
+//! [`LayerCounts`]); every other storage answers `Base`, an empty diff and no summary. A
 //! [`LayerBase`] is the shareable base itself: the frozen graph with its database's embedding
 //! models, a display name and its identity ([`BaseRef`]: lineage id, commit sequence number
 //! and commit time); [`LayerBase::new_layer`] makes a `Graph<LayeredGraph>` that serves those models.
@@ -232,11 +233,11 @@ pub use crate::graph::{
     AnyGraph, BaseRef, ChangeSet, ChangeSetBuilder, CommitClock, CommitHook, CommitHooks,
     CommitMetadata, Definition, DefinitionKind, EdgeHandle, EdgeState, ElementRef, ExecutionPolicy,
     Graph, GraphNodeType, GraphRead, GraphStatistics, GraphStorage, GraphWrite, HookError,
-    IntoAnyGraph, IsolationLevel, JournalSlot, LayerBase, LayerDiff, LayerDiffChange,
-    LayerDiffEntry, LayerDiffRequest, LayerOrigin, LayerPropertyChange, LayeredEdge, LayeredGraph,
-    LayeredVertex, Mark, MemoryStats, Mutation, RollbackReason, ShrinkReport, StorageCapabilities,
-    StorageIdentity, Transactional, TraversalGraph, UnitChanges, UnitMark, VertexHandle,
-    VertexState,
+    IntoAnyGraph, IsolationLevel, JournalSlot, LayerBase, LayerCounts, LayerDiff, LayerDiffChange,
+    LayerDiffEntry, LayerDiffRequest, LayerOrigin, LayerPropertyChange, LayerSummary, LayeredEdge,
+    LayeredGraph, LayeredVertex, Mark, MemoryStats, Mutation, RollbackReason, ShrinkReport,
+    StorageCapabilities, StorageIdentity, Transactional, TraversalGraph, UnitChanges, UnitMark,
+    VertexHandle, VertexState,
 };
 #[cfg(feature = "persist")]
 pub use crate::graph::{BasePatch, LayerParts, PersistentStorage};

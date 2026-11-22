@@ -25,9 +25,9 @@ use graphersal::storage::{
     ChangeSet, CommitHook, CommitMetadata, CompactString, CompressionEstimate,
     CompressionEstimateRequest, CompressionStats, Definition, DefinitionKind, ElementKind,
     ExecutionPolicy, GraphError, GraphNodeType, GraphSchema, GraphStatistics, GraphStorage,
-    JsonPath, LayerDiff, LayerDiffRequest, LayerOrigin, Mark, MemoryStats, PropertyIndexInfo,
-    PropertyIndexRange, PropertyIndexTransform, PropertyMap, PropertySchema, RollbackReason,
-    StorageCapabilities, UniqueIndexDuplicates, UnitChanges, UnitMark,
+    JsonPath, LayerDiff, LayerDiffRequest, LayerOrigin, LayerSummary, Mark, MemoryStats,
+    PropertyIndexInfo, PropertyIndexRange, PropertyIndexTransform, PropertyMap, PropertySchema,
+    RollbackReason, StorageCapabilities, UniqueIndexDuplicates, UnitChanges, UnitMark,
 };
 
 /// The fault switches of a [`Failing`] storage: while a switch is on, the methods of its group
@@ -560,6 +560,12 @@ impl GraphStorage for Failing {
         self.faults
             .check(&self.faults.layer, "read the layer diff")?;
         GraphStorage::layer_diff(&self.inner, request)
+    }
+
+    fn layer_summary(&self) -> Result<Option<LayerSummary>, GraphError> {
+        self.faults
+            .check(&self.faults.layer, "read the layer summary")?;
+        GraphStorage::layer_summary(&self.inner)
     }
 
     fn memory_footprint_bytes(&self) -> Result<Option<u64>, GraphError> {

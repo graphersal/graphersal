@@ -11,7 +11,7 @@ use crate::graph::{Graph, TraversalGraph};
 use crate::value::vector::embed::registry::ModelRegistry;
 
 /// The name of a base nobody named ([`LayerBase::name`]).
-const DEFAULT_NAME: &str = "base";
+pub(super) const DEFAULT_NAME: &str = "base";
 
 /// The frozen base of any number of layers: a [`TraversalGraph`] nobody writes any more, the
 /// embedding models of its database, a display name and its identity ([`Self::base_ref`]).
@@ -206,6 +206,52 @@ impl LayerBase {
         self.inner.models.is_some()
     }
 
+    /// The base graph back as a writable [`Graph`] serving the base's embedding models, when
+    /// this is the last handle of the base: every clone of it and every layer over it are gone.
+    /// Otherwise `Err` with the base itself, unchanged (like `Arc::try_unwrap`: nothing failed,
+    /// the base is still shared). The way back from [`Self::from_graph`] once the layers are
+    /// dropped (the playground's "drop the layer").
+    ///
+    /// ```
+    /// use graphersal::prelude::*;
+    /// use graphersal::storage::LayerBase;
+    ///
+    /// let base = LayerBase::from_graph(Graph::new(TraversalGraph::tinkerpop_modern())).unwrap();
+    /// let layer = base.new_layer().unwrap();
+    /// let base = base.into_graph().unwrap_err(); // the layer still reads it
+    /// drop(layer);
+    /// let graph = base.into_graph().unwrap();
+    /// GraphTraversalSource::new(&mut *graph.write()).add_v("person").iterate().unwrap();
+    /// assert_eq!(graph.read().vertex_count(), 7);
+    /// ```
+    pub fn into_graph(self) -> Result<Graph<TraversalGraph>, Self> {
+        let inner = Arc::try_unwrap(self.inner).map_err(|inner| Self { inner })?;
+        let BaseInner {
+            graph,
+            models,
+            name,
+            base_ref,
+        } = inner;
+        match Arc::try_unwrap(graph) {
+            Ok(storage) => {
+                let graph = Graph::new(storage);
+                if let Some(models) = models {
+                    // A fresh graph has no registry yet, so the attach cannot be refused.
+                    graph.attach_model_registry(models);
+                }
+                Ok(graph)
+            }
+            Err(graph) => Err(Self {
+                inner: Arc::new(BaseInner {
+                    graph,
+                    models,
+                    name,
+                    base_ref,
+                }),
+            }),
+        }
+    }
+
     /// A new, empty layer over the base, shared as a [`Graph`] that serves the base's embedding
     /// models (see the type's docs).
     ///
@@ -254,7 +300,15 @@ impl LayeredGraph {
     ///
     /// As [`LayeredGraph::over`].
     pub fn over_base(base: &LayerBase) -> Result<Self, GraphError> {
-        Self::over(Arc::clone(base.graph()))
+        let mut layer = Self::over(Arc::clone(base.graph()))?;
+        layer.base_name = base.name().into();
+        Ok(layer)
+    }
+
+    /// The display name of the base the layer was made over ([`LayerBase::name`]; `"base"`
+    /// for a layer made by [`LayeredGraph::over`]).
+    pub fn base_name(&self) -> &str {
+        &self.base_name
     }
 
     /// The identity of the layer's base ([`BaseRef::of`] the shared base graph): what a layer
