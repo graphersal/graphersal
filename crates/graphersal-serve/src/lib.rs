@@ -27,6 +27,13 @@
 //! databases of a host serving several (each [`Context`] is still one graph), answering what
 //! they found as data ([`OpenNote`]) and the embedding models per database.
 //!
+//! A host serving several graphs mounts each [`Context`] under a URL prefix (`/db/<name>/`,
+//! EXPERIMENTAL): it strips the prefix when it builds the [`Request`] and picks the context in
+//! its [`GraphResolver`]; [`ContextBuilder::mount_path`] only tells the clients where they are
+//! (`GET /api/info` `mountPath`, the MCP endpoint `<mount>/mcp`), [`HostCheck::with_hint`]
+//! puts the host's own advice into the `403` answers, and [`Request::copy_body_to`] streams an
+//! upload into a sink of the host.
+//!
 //! A host may also turn a served graph read-only and back while it is served, without
 //! reopening it (EXPERIMENTAL): [`ContextBuilder::runtime_read_only`],
 //! [`Context::set_read_only`], [`Context::is_read_only`]; every modifying request (HTTP API, MCP
@@ -89,6 +96,8 @@ mod ui;
 mod extension_tests;
 #[cfg(test)]
 mod launch_tests;
+#[cfg(test)]
+mod mount_tests;
 #[cfg(test)]
 mod read_only_tests;
 

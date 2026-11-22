@@ -836,6 +836,12 @@ fn info_fields(context: &Context) -> Value {
     if let Some(profile) = &context.ui_profile {
         info["uiProfile"] = profile.clone();
     }
+    // The URL prefix the host serves this context under (`ContextBuilder::mount_path`); absent
+    // at the root, so the answer of a host that mounts nothing is unchanged.
+    if let Some(mount) = &context.mount_path {
+        info["mountPath"] = json!(mount);
+        info["openapi"] = json!(format!("{mount}/openapi.json"));
+    }
     context.hooks.add_info(context, &mut info);
     info
 }

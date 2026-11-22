@@ -534,6 +534,9 @@ pub struct Context {
     /// The playground UI profile `GET /api/info` names (`uiProfile`), or `None`: the field is
     /// absent and the UI shows its built-in `full` profile.
     pub(crate) ui_profile: Option<Value>,
+    /// The URL prefix a multi-graph host serves this context under (`/db/acme`, no trailing
+    /// `/`; [`ContextBuilder::mount_path`]), or `None`: the server's root.
+    pub(crate) mount_path: Option<String>,
     /// The session presets, as `GET /api/info` reports them.
     pub(crate) presets: Value,
     /// `--read-only` (or a Store opened read-only): the graph refuses every write and
@@ -582,6 +585,16 @@ pub(crate) struct AllowList {
     pub(crate) policy: AccessPolicy,
 }
 
+/// `path` as a mount path: one leading `/`, no trailing `/`; `None` for the root (`""`, `/`).
+fn normalize_mount_path(path: &str) -> Option<String> {
+    let trimmed = path.trim().trim_matches('/');
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(format!("/{trimmed}"))
+    }
+}
+
 /// Builds a [`Context`].
 pub struct ContextBuilder {
     runner: Runner,
@@ -606,6 +619,7 @@ pub struct ContextBuilder {
     filter: Option<Arc<dyn RequestFilter>>,
     memory_tracked: bool,
     ui_profile: Option<Value>,
+    mount_path: Option<String>,
     allow_list: Option<AllowList>,
 }
 
@@ -788,6 +802,24 @@ impl ContextBuilder {
         self
     }
 
+    /// The URL prefix a host serving several graphs mounts this context under (`/db/acme`),
+    /// EXPERIMENTAL. The core does not route by it: the HOST strips the prefix from the request
+    /// target when it builds the [`crate::Request`] (`/db/acme/api/info` -> `/api/info`, `/db/acme/`
+    /// -> `/`) and picks the context in its [`crate::GraphResolver`]. The core only tells the
+    /// clients where they are: `GET /api/info` answers it as `mountPath` (and `openapi` as
+    /// `<mount>/openapi.json`), the MCP status (`/api/info` and `/api/changes` `mcp.endpoint`)
+    /// as `<mount>/mcp`. The playground's own URLs are relative, so its pages work under the
+    /// prefix as long as the host redirects `/db/acme` to `/db/acme/`.
+    ///
+    /// The path is normalised to one leading `/` and no trailing `/` (`db/acme/` ->
+    /// `/db/acme`); an empty path or `/` means the root (`None`). Default: `None`, the server's root
+    /// (`mountPath` absent, `endpoint` `/mcp`: the answers of a host that sets none are
+    /// unchanged).
+    pub fn mount_path(mut self, path: Option<String>) -> Self {
+        self.mount_path = path.and_then(|path| normalize_mount_path(&path));
+        self
+    }
+
     /// The **allow-list mode** of the HTTP API (EXPERIMENTAL, like this crate): the context
     /// answers only `GET /api/info` (with `apiMode: "allow-list"`), `GET /api/changes` and
     /// `POST /api/query` `{name, params}` for the saved queries `selection` selects, each run
@@ -825,6 +857,7 @@ impl ContextBuilder {
             filter: self.filter,
             memory_tracked: self.memory_tracked,
             ui_profile: self.ui_profile,
+            mount_path: self.mount_path,
             presets: self.presets,
             read_only: read_only.clone(),
             read_only_toggle: self
@@ -876,8 +909,15 @@ impl Context {
             filter: None,
             memory_tracked: false,
             ui_profile: None,
+            mount_path: None,
             allow_list: None,
         }
+    }
+
+    /// The URL prefix the host mounts this context under ([`ContextBuilder::mount_path`],
+    /// normalised: `/db/acme`), or `None`: the server's root.
+    pub fn mount_path(&self) -> Option<&str> {
+        self.mount_path.as_deref()
     }
 
     /// Whether the graph is served read-only now: the builder's [`ContextBuilder::read_only`],

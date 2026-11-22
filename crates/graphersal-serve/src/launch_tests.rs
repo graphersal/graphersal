@@ -114,19 +114,19 @@ fn a_sample_launches_with_its_title_and_a_filled_builder() {
 
 #[test]
 fn an_unknown_sample_and_a_failing_extra_setup_are_setup_errors() {
-    let err = launched(ServedSource::Sample("nope".to_string()))
-        .err()
-        .expect("refused");
+    let Err(err) = launched(ServedSource::Sample("nope".to_string())) else {
+        panic!("refused");
+    };
     assert!(matches!(err, ServeError::Setup(_)), "{err:?}");
     assert_eq!(err.to_string(), "Unknown sample graph: nope");
-    let err = launch(
+    let Err(err) = launch(
         ServedSource::Sample("empty".to_string()),
         SessionPresets::new(),
         |_: &mut Session| Err::<(), _>("the host's setup failed".to_string()),
         None,
-    )
-    .err()
-    .expect("refused");
+    ) else {
+        panic!("refused");
+    };
     assert!(matches!(err, ServeError::Setup(_)), "{err:?}");
     assert_eq!(err.to_string(), "the host's setup failed");
 }
@@ -166,9 +166,9 @@ fn graph_files_load_by_their_extension_with_the_import_warnings() {
     assert_eq!(info_json["name"], "modern.json");
     assert_eq!(info_json["vertexCount"], 5);
     // A file that cannot be read.
-    let err = launched(ServedSource::File(dir.join("missing.json")))
-        .err()
-        .expect("refused");
+    let Err(err) = launched(ServedSource::File(dir.join("missing.json"))) else {
+        panic!("refused");
+    };
     assert!(matches!(err, ServeError::Setup(_)), "{err:?}");
     assert!(err.to_string().starts_with("Error: cannot read '"), "{err}");
     let _ = std::fs::remove_dir_all(&dir);
@@ -274,28 +274,27 @@ fn a_layer_store_opens_over_a_given_base_and_refuses_another() {
     let base = LayerBase::from_graph(GraphSource::tinkerpop_modern()).expect("a base");
     let dir = MemDir::named("given-base-layer");
     // Not a store yet, and not asked to create one.
-    let err = open_layer_store(&dir, &base, OpenStore::new())
-        .err()
-        .expect("refused");
+    let Err(err) = open_layer_store(&dir, &base, OpenStore::new()) else {
+        panic!("refused");
+    };
     let ServeError::Open(open) = &err else {
         panic!("an open error: {err:?}");
     };
     assert_eq!(open.kind(), OpenErrorKind::NotAStore);
     let opened = open_layer_store(&dir, &base, OpenStore::new().create(true)).expect("created");
-    Arc::try_unwrap(opened.store)
-        .ok()
-        .expect("the only handle")
-        .close()
-        .expect("closed");
+    let Ok(store) = Arc::try_unwrap(opened.store) else {
+        panic!("the only handle");
+    };
+    store.close().expect("closed");
     // Over the same base again: a clean open, nothing to say.
     let opened = open_layer_store(&dir, &base, OpenStore::new()).expect("reopened");
     assert!(opened.notes.is_empty(), "{:?}", opened.notes);
     drop(opened);
     // Over another base: refused with the engine's error.
     let other = LayerBase::from_graph(GraphSource::empty()).expect("another base");
-    let err = open_layer_store(&dir, &other, OpenStore::new())
-        .err()
-        .expect("refused");
+    let Err(err) = open_layer_store(&dir, &other, OpenStore::new()) else {
+        panic!("refused");
+    };
     let ServeError::Open(open) = &err else {
         panic!("an open error: {err:?}");
     };
@@ -308,7 +307,9 @@ fn a_layer_store_opens_over_a_given_base_and_refuses_another() {
 fn open_store_answers_its_notes_as_data() {
     let dir = MemDir::named("open-notes");
     // Not a store, not asked to create one.
-    let err = open_store(&dir, OpenStore::new()).err().expect("refused");
+    let Err(err) = open_store(&dir, OpenStore::new()) else {
+        panic!("refused");
+    };
     let ServeError::Open(open) = &err else {
         panic!("an open error: {err:?}");
     };
@@ -332,11 +333,10 @@ fn open_store_answers_its_notes_as_data() {
     // A backup of it opens read-only, with a note and the commands that help.
     let backup = MemDir::named("open-notes-backup");
     opened.store.backup(&backup).expect("a backup");
-    Arc::try_unwrap(opened.store)
-        .ok()
-        .expect("the only handle")
-        .close()
-        .expect("closed");
+    let Ok(store) = Arc::try_unwrap(opened.store) else {
+        panic!("the only handle");
+    };
+    store.close().expect("closed");
     let restored = open_store(&backup, OpenStore::new()).expect("the backup opens");
     assert!(restored.store.backup_marker().is_some());
     let note = &restored.notes[0];
@@ -350,9 +350,9 @@ fn open_store_answers_its_notes_as_data() {
         "graphersal store restore open-notes-backup"
     );
     // The damage policy is fixed at creation: another one is refused, none asked opens.
-    let err = open_store(&dir, OpenStore::new().on_damage(DamagePolicy::Maintenance))
-        .err()
-        .expect("refused");
+    let Err(err) = open_store(&dir, OpenStore::new().on_damage(DamagePolicy::Maintenance)) else {
+        panic!("refused");
+    };
     let ServeError::Open(open) = &err else {
         panic!("an open error: {err:?}");
     };
@@ -373,7 +373,9 @@ fn open_store_answers_its_notes_as_data() {
 #[test]
 fn a_base_needs_a_store() {
     let dir = MemDir::named("no-base");
-    let err = layer_base_of_store(&dir).err().expect("refused");
+    let Err(err) = layer_base_of_store(&dir) else {
+        panic!("refused");
+    };
     let ServeError::Open(open) = &err else {
         panic!("an open error: {err:?}");
     };
