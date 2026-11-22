@@ -309,7 +309,7 @@ pub fn run(cli: &Cli) -> i32 {
     let shared = store
         .as_ref()
         .map(|store| (store.clone(), store.location()));
-    let (jobs, cancel, commit_seq, statistics) = match start_session(
+    let (jobs, cancel, commit_seq, statistics, layered) = match start_session(
         &cli.graph,
         source.as_deref(),
         presets,
@@ -660,6 +660,7 @@ pub fn run(cli: &Cli) -> i32 {
         .read_only(read_only)
         .store(store)
         .commit_seq(commit_seq)
+        .layered(layered)
         .mcp(mcp)
         .hooks(hooks);
     // `--ui-profile`: what the playground pages show (`GET /api/info` `uiProfile`).
@@ -1103,9 +1104,10 @@ fn presets_summary(presets: &Value) -> String {
 
 /// Starts the session thread with the graph of `spec` loaded and `presets` applied (or the
 /// Store `shared`, or the graph `preloaded` with its title); returns its job queue, its
-/// cancellation token, the commit position of the loaded graph and its statistics
-/// ([`Session::statistics`] with `process.memory` added, printed at start), or the diagnostic
-/// of a graph that could not be loaded.
+/// cancellation token, the commit position of the loaded graph, its statistics
+/// ([`Session::statistics`] with `process.memory` added, printed at start) and whether it is a
+/// layer (`--layer`, `--layer-store`: the MCP instructions name the layer steps), or the
+/// diagnostic of a graph that could not be loaded.
 ///
 /// With a `pool` (the read-only serving mode) the thread loads the graph, then serves as the
 /// pool's first worker; the other workers start here, each with a session of its own over the
@@ -1117,11 +1119,12 @@ fn start_session(
     shared: Option<(Arc<Store>, String)>,
     preloaded: Option<(Arc<dyn graphersal_session::storage::SessionGraph>, String)>,
     pool: Option<Arc<pool::Pool>>,
-) -> Result<(Sender<Job>, CancelToken, u64, Value), String> {
+) -> Result<(Sender<Job>, CancelToken, u64, Value, bool), String> {
     type Started = (
         CancelToken,
         u64,
         Value,
+        bool,
         Option<graphersal_session::SessionTemplate>,
     );
     let spec = spec.clone();
@@ -1174,13 +1177,18 @@ fn start_session(
                 Some(template)
             }
         };
-        Ok((session.cancel_token(), seq, statistics, template))
+        let layered = session
+            .graph()
+            .capabilities()
+            .map_err(|err| err.to_string())?
+            .layered;
+        Ok((session.cancel_token(), seq, statistics, layered, template))
     };
     // The pool's first worker is the session thread itself, once the graph is loaded.
     let takeover = pool
         .clone()
         .map(|pool| Box::new(move |session: &mut Session| pool.work(session)) as Job);
-    let (jobs, (cancel, commit_seq, statistics, template)) =
+    let (jobs, (cancel, commit_seq, statistics, layered, template)) =
         graphersal_serve::spawn_session(presets, setup, takeover).map_err(|err| err.to_string())?;
     if let (Some(pool), Some(template)) = (pool, template) {
         for worker in 1..pool.config().workers {
@@ -1202,7 +1210,7 @@ fn start_session(
                 .map_err(|err| format!("Error: cannot start a worker thread: {err}"))?;
         }
     }
-    Ok((jobs, cancel, commit_seq, statistics))
+    Ok((jobs, cancel, commit_seq, statistics, layered))
 }
 
 /// Force-layout jobs the pages of the read-only serving mode share (at least one per worker).

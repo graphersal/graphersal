@@ -310,6 +310,30 @@ fn layer_context() -> Arc<Context> {
     Context::builder(Runner::Session(jobs), check()).build()
 }
 
+/// The MCP host knows whether its session serves a layer (`Host::serves_layer`, the layer
+/// note of the instructions) without running a job: from the builder (`layered`), else from
+/// the first job, refreshed by every job that swaps the graph.
+#[cfg(feature = "mcp")]
+#[test]
+fn the_mcp_host_knows_whether_it_serves_a_layer() {
+    use graphersal_mcp::Host;
+    let plain = context();
+    assert!(!plain.serves_layer(), "unknown: a plain graph");
+    handle(&plain, request(Method::Get, "/api/graph", b""));
+    assert!(!plain.serves_layer());
+    let layer = layer_context();
+    assert!(!layer.serves_layer(), "unknown before the first job");
+    handle(&layer, request(Method::Get, "/api/graph", b""));
+    assert!(layer.serves_layer(), "seen by the first job");
+    // A host that knows says so when it builds the context: no job needed.
+    let (jobs, ()) = spawn_session(SessionPresets::new(), |_| Ok::<(), String>(()), None)
+        .expect("the session thread starts");
+    let told = Context::builder(Runner::Session(jobs), check())
+        .layered(true)
+        .build();
+    assert!(told.serves_layer());
+}
+
 /// `POST /api/layer/diff`: the session's `layer_diff` (an empty diff on a plain graph, the
 /// layer's changes on a layer, `{ok: false, error}` for a bad spec), JSON bodies only, POST
 /// only, behind the Host/Origin checks like every API route.

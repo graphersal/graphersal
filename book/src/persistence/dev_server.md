@@ -749,7 +749,7 @@ The list is the same on every `--graph` source; there are no persistence tools:
 | `advise` `{everything?}` | The [storage advisor](optimize.md)'s recommendations, each with its command, and their `groups` (`dedup: 74 keys, total -400.1 MiB` with the ids); changes nothing (also in read-only mode) |
 | `apply_recommendations` `{ids, everything?}` | Applies the recommendations the user picked (ids from `advise`) in ONE commit, all new compression rules in one pass over the data; all or nothing (an id no longer advised or a refused change applies nothing); refused in read-only mode |
 | `usage_statistics` `{max_rows?}` | Opt-in (only when `tools.include` of the [configuration](#the-mcp-configuration-file---mcp-config) names it): the endpoint's [usage statistics](#mcp-usage-statistics) since the server started (memory only) |
-| `statistics`, `graph_info` | Counts per label, memory and limits; what the server serves (name, counts, schema mode, source file or Store directory, `view` and a `note` while a read-only view is open, `damageFound`, `mcpReadOnly`, `answerLimitChars`) |
+| `statistics`, `graph_info` | Counts per label, memory and limits; what the server serves (name, counts, schema mode, source file or Store directory, `view` and a `note` while a read-only view is open, `damageFound`, `mcpReadOnly`, `answerLimitChars`, and on a layered graph `layer`: base name and `baseRef`, `added`/`modified`/`removed` counts, `ownBytes`, `sharedBytes`) |
 
 ### Answer size and paging
 

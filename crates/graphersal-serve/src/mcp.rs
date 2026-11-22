@@ -193,6 +193,16 @@ mod enabled {
             self.ui.read("js/examples.json").map(|(bytes, _)| bytes)
         }
 
+        /// What the host said when it built the context (`ContextBuilder::layered`) or the
+        /// last session job saw (every job refreshes it when the session serves another
+        /// graph, the first job always); runs no job (`initialize` must not wait for a busy
+        /// session): unknown counts as a plain graph.
+        fn serves_layer(&self) -> bool {
+            use crate::context::Layered;
+            use std::sync::atomic::Ordering;
+            self.layered.load(Ordering::Relaxed) == Layered::LAYER
+        }
+
         fn run_started(&self, client: &ClientRef, cancel: &CancelToken) -> u64 {
             self.run_started_with_text(client, cancel, "")
         }

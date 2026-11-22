@@ -35,6 +35,7 @@ use std::collections::VecDeque;
 use std::fmt;
 use std::panic::AssertUnwindSafe;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::sync::{Arc, Mutex};
 
@@ -469,6 +470,26 @@ fn serve_jobs(session: &mut Session, queue: Receiver<Job>) {
     }
 }
 
+/// The states of [`Context::layered`].
+pub(crate) struct Layered;
+
+impl Layered {
+    /// No job has run yet.
+    pub(crate) const UNKNOWN: u8 = 0;
+    /// A graph without layers (or one whose capabilities cannot be read).
+    pub(crate) const PLAIN: u8 = 1;
+    /// A layer over a frozen base (`StorageCapabilities::layered`).
+    pub(crate) const LAYER: u8 = 2;
+
+    /// The state of the graph `session` serves.
+    fn of(session: &Session) -> u8 {
+        match session.graph().capabilities() {
+            Ok(capabilities) if capabilities.layered => Self::LAYER,
+            _ => Self::PLAIN,
+        }
+    }
+}
+
 /// Where a [`Context`]'s jobs go (the [`Runner`], the session sender behind a lock).
 enum Jobs {
     Session(Mutex<Sender<Job>>),
@@ -513,6 +534,9 @@ pub struct Context {
     pub(crate) view: Mutex<Option<Value>>,
     /// The change feed (`GET /api/changes`), updated by the session jobs.
     pub(crate) feed: Arc<Mutex<Feed>>,
+    /// Whether the session serves a layered graph, as the last job saw it ([`Layered`]),
+    /// refreshed by every job after which the session serves another graph.
+    pub(crate) layered: Arc<AtomicU8>,
     /// The threads that do the work of the scheduled jobs ([`job_workers`]).
     pub(crate) job_workers: job_workers::JobWorkers,
     /// The MCP endpoint (`--mcp`), or `None`; possibly shared with the contexts of other
@@ -550,6 +574,7 @@ pub struct ContextBuilder {
     read_only: bool,
     store: Option<Arc<Store>>,
     commit_seq: u64,
+    layered: u8,
     mcp: Option<Arc<mcp::Mcp>>,
     #[cfg(feature = "mcp")]
     mcp_profile: Option<graphersal_mcp::Profile>,
@@ -616,6 +641,20 @@ impl ContextBuilder {
     /// The commit position of the loaded graph (the change feed starts there).
     pub fn commit_seq(mut self, commit_seq: u64) -> Self {
         self.commit_seq = commit_seq;
+        self
+    }
+
+    /// Whether the loaded graph is a layer over a frozen base (`StorageCapabilities::layered`),
+    /// as the host knows it from loading it: the MCP instructions then name the layer steps
+    /// (`graphersal_mcp::Host::serves_layer`). Every job after which the session serves
+    /// another graph refreshes it. Default: unknown until the first job, answered as a plain
+    /// graph.
+    pub fn layered(mut self, layered: bool) -> Self {
+        self.layered = if layered {
+            Layered::LAYER
+        } else {
+            Layered::PLAIN
+        };
         self
     }
 
@@ -726,6 +765,7 @@ impl ContextBuilder {
                 commit_seq: self.commit_seq,
                 ..Feed::default()
             })),
+            layered: Arc::new(AtomicU8::new(self.layered)),
             job_workers: job_workers::JobWorkers::default(),
             mcp: self.mcp,
             #[cfg(feature = "mcp")]
@@ -752,6 +792,7 @@ impl Context {
             read_only: false,
             store: None,
             commit_seq: 0,
+            layered: Layered::UNKNOWN,
             mcp: None,
             #[cfg(feature = "mcp")]
             mcp_profile: None,
@@ -879,6 +920,7 @@ impl Context {
     ) -> Result<T, ServeError> {
         let (reply, answer) = channel();
         let feed = self.feed.clone();
+        let layered = self.layered.clone();
         let client = CLIENT.with(|c| c.borrow().clone());
         // The workload statistics count only the queries a client runs (`Session::execute*`)
         // under its channel; the page's drawing and panels are technical.
@@ -891,6 +933,14 @@ impl Context {
             let before = position(session);
             let out = graphersal::workload::scope(channel, true, || job(session));
             let after = position(session);
+            // Another graph (or the first job): whether it is a layer, for the MCP instructions.
+            let swapped = match (&before, &after) {
+                (Ok(before), Ok(after)) => before.0 != after.0,
+                _ => true,
+            };
+            if swapped || layered.load(Ordering::Relaxed) == Layered::UNKNOWN {
+                layered.store(Layered::of(session), Ordering::Relaxed);
+            }
             // The change feed is a notification for the other clients: a position that cannot
             // be read before or after counts as a change (they reload and see for themselves).
             let changed = match (&before, &after) {

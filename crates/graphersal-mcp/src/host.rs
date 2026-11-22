@@ -119,6 +119,16 @@ pub trait Host: Executor {
     /// when the host has none.
     fn examples_json(&self) -> Option<Vec<u8>>;
 
+    /// Whether the served graph is a layer over a frozen base (`StorageCapabilities::layered`,
+    /// `graphersal::storage::LayeredGraph`): `initialize` then adds a note on the layer steps
+    /// (`layer()`, `has_layer()`, `g.layer_diff()`) to the built-in instructions. Asked once
+    /// per `initialize`, which runs no session job of its own: answer from what the host
+    /// knows (a host that must run a job should not wait for a busy session). Default:
+    /// `false`, the instructions of a plain graph.
+    fn serves_layer(&self) -> bool {
+        false
+    }
+
     /// A query of `client` is about to be queued: it runs under `cancel`, a token of this run
     /// alone (the caller's own, an AI Chat turn's, or a new one). The host keeps it until
     /// [`Host::run_ended`] with the returned id, so it can cancel the run, also while the run
