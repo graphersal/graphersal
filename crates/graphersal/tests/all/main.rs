@@ -60,6 +60,7 @@ mod compression_coded_tests;
 mod compression_dedup_tests;
 mod compression_estimate_tests;
 mod compression_load_tests;
+mod convert_fill_blobs_tests;
 mod custom_id_storage_tests;
 mod dedup_tests;
 mod definition_store_tests;

@@ -69,7 +69,7 @@ use crate::graph::{Graph, TraversalGraph};
 use graph::{GraphMaker, JournalCell, LiveWrite, LoadPlan, StoreGraph, TraversalGraphs};
 
 pub use backup::BackupMode;
-pub use blob_restore::{BlobSource, RestoreBlobsReport};
+pub use blob_restore::{BlobSource, ConvertOptions, ConvertReport, RestoreBlobsReport};
 use blobs::PendingBlob;
 pub use closed_commit::ClosedCommitOptions;
 pub use compaction::{AdviceRule, CompactReport, CompactionAdvice, CompactionPolicy};
@@ -746,6 +746,42 @@ impl Store {
         from: impl IntoStoreDir,
         to: impl IntoStoreDir,
     ) -> Result<(usize, u64), PersistError> {
+        let report = Self::convert_with(from, to, ConvertOptions::new())?;
+        Ok((report.files_copied, report.bytes_copied))
+    }
+
+    /// [`Store::convert`] with options: with [`ConvertOptions::with_fill_missing_blobs`], every
+    /// blob the copy's retained history references that `from` lacks (or holds damaged) is
+    /// taken from the given [`BlobSource`] into the COPY, checked by length, CRC-32C and hash
+    /// before it is renamed into place (a host's shared model directory laid out as
+    /// `blobs/<2 hex>/<hash>`: [`BlobSource::store`]). A blob the source does not hold, or holds
+    /// with other bytes, fails the conversion with [`StoreFailure::BlobUnavailable`] /
+    /// [`StoreFailure::BlobDamaged`] naming it, and the copy is removed. The copy is verified
+    /// as [`Store::convert`] verifies it; nothing of `from` changes and the source is only
+    /// read. Each filled blob is recorded in the copy's system journal (`blob.repaired`, `how`
+    /// = `restored`). The report says what was copied and what was filled.
+    ///
+    /// ```
+    /// use graphersal::persist::{BlobSource, ConvertOptions, MemDir, Store, StoreOptions};
+    ///
+    /// let models = MemDir::new(); // e.g. a host's shared `models/` directory
+    /// let from = MemDir::new();
+    /// Store::create(&from, StoreOptions::new())?.close()?;
+    /// let to = MemDir::new();
+    /// let report = Store::convert_with(
+    ///     &from,
+    ///     &to,
+    ///     ConvertOptions::new().with_fill_missing_blobs(BlobSource::store(&models)),
+    /// )?;
+    /// assert!(report.blobs_filled.is_empty()); // nothing was missing
+    /// Store::open(&to, StoreOptions::new())?.close()?;
+    /// # Ok::<(), graphersal::persist::PersistError>(())
+    /// ```
+    pub fn convert_with(
+        from: impl IntoStoreDir,
+        to: impl IntoStoreDir,
+        options: ConvertOptions,
+    ) -> Result<ConvertReport, PersistError> {
         let from = DirPath::root(from.into_store_dir());
         let to = DirPath::root(to.into_store_dir());
         // A layer store too (format spec 7.5): its files, the base's identity in its
@@ -768,8 +804,8 @@ impl Store {
             copy_tree(&from, &to, &from, false, &mut copied, &mut graph_files)?;
             // GRAPH last, with a NEW store identity (format spec 5.1): the copy is another
             // store, so it cannot continue the original's backups (12.7).
+            let mut file = read_graph_file(&from)?.file;
             if !graph_files.is_empty() {
-                let mut file = read_graph_file(&from)?.file;
                 file.store_id = crate::value::uuid::new_v7();
                 let bytes = file.encode();
                 for name in graph_files {
@@ -779,6 +815,45 @@ impl Store {
                 }
             }
             files::sync_dir(&to)?;
+            let mut report = ConvertReport {
+                files_copied: copied.0,
+                bytes_copied: copied.1,
+                ..ConvertReport::default()
+            };
+            if let Some(source) = options.fill_from {
+                let filled = blob_restore::restore_into(&to, &file, source)?;
+                if let Some(name) = filled.not_found.first() {
+                    return Err(PersistError::store(
+                        "convert the store",
+                        StoreFailure::BlobUnavailable,
+                        format!(
+                            "the blob {name} is missing from {} and from {} ({} missing: {})",
+                            from.display(),
+                            filled.source,
+                            filled.not_found.len(),
+                            filled.not_found.join(", ")
+                        ),
+                    ));
+                }
+                if let Some(name) = filled.damaged_in_source.first() {
+                    return Err(PersistError::store(
+                        "convert the store",
+                        StoreFailure::BlobDamaged,
+                        format!(
+                            "the blob {name} is missing from {} and damaged in {} (its bytes \
+                             do not match its name; {} damaged: {})",
+                            from.display(),
+                            filled.source,
+                            filled.damaged_in_source.len(),
+                            filled.damaged_in_source.join(", ")
+                        ),
+                    ));
+                }
+                files::sync_dir(&to)?;
+                report.fill_source = Some(filled.source);
+                report.blobs_filled = filled.restored;
+                report.bytes_filled = filled.bytes_restored;
+            }
             let verified = maintenance::verify_as(&to, None, maintenance::VerifyAs::Either)?;
             if !verified.is_ok() {
                 return Err(PersistError::store(
@@ -791,7 +866,7 @@ impl Store {
                     ),
                 ));
             }
-            Ok(copied)
+            Ok(report)
         })();
         if result.is_err() {
             undo_create(&to, existed);

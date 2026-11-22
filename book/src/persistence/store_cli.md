@@ -745,7 +745,7 @@ no compaction needed: the store is smaller than the minimum of 64.0 MiB
 ### convert
 
 ```text
-graphersal store convert <DIR> <NEW> [--single-file]
+graphersal store convert <DIR> <NEW> [--single-file] [--fill-blobs <SOURCE>]
 ```
 
 Copies the whole closed store (snapshots, WAL, marks, attic) into `NEW`, byte for byte: a directory
@@ -753,6 +753,15 @@ into a single file (`NEW` ending in `.gstore`, or `--single-file`) or back. `NEW
 (or be an empty directory); the copy is verified; `DIR` is not changed. The copy is a new store
 with its own store id ([creation parameters](creation_parameters.md)): it does not continue the
 backups of `DIR` (its first backup is a full one into a new directory).
+
+A store whose catalog references a blob missing from its `blobs/` (a model blob, say) does not
+verify, so its copy is refused. `--fill-blobs <SOURCE>` takes every such blob from `SOURCE` into
+the copy, checked by length, CRC-32C and hash: a directory laid out as `blobs/<2 hex>/<hash>` (a
+shared model directory, another store, a backup), a ZIP backup or a `.gsnap`, as for
+[`store restore-blobs`](store_blobs.md#damage). `SOURCE` is only read; the note adds
+`blobs filled: <n> (<size>) from <SOURCE>`. A blob `SOURCE` lacks too, or holds with other bytes,
+fails the command (exit 1) and leaves no copy. Rust: `Store::convert_with` with
+`ConvertOptions::with_fill_missing_blobs`.
 
 ```text
 $ graphersal store convert data/ graph.gstore

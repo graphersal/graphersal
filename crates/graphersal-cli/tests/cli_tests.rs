@@ -5343,6 +5343,94 @@ mod embed_models {
         let _ = std::fs::remove_dir_all(&base);
     }
 
+    /// `store convert --fill-blobs SOURCE` copies a store whose model blob is missing, taking
+    /// the blob from SOURCE (here a backup holding it) into the copy; a source without it
+    /// fails with exit 1 and no copy; a source that does not exist is a usage error.
+    #[test]
+    fn store_convert_fills_a_missing_model_blob() {
+        let base = fresh_dir("m2v_convert_fill");
+        let model = base.join("model");
+        write_model(&model);
+        let store = base.join("store");
+        create_store(&store);
+        let (model_text, store_text) = (model.display().to_string(), store.display().to_string());
+        let res = run_env(
+            &[
+                "embed-model",
+                "import",
+                &model_text,
+                "--into",
+                &store_text,
+                "--repo",
+                "acme/tiny",
+                "--license",
+                "mit",
+            ],
+            &[],
+        );
+        assert_eq!(res.code, 0, "{} {}", res.stdout, res.stderr);
+        let backup = base.join("backup").display().to_string();
+        let res = run_env(&["store", "backup", &store_text, &backup], &[]);
+        assert_eq!(res.code, 0, "{}", res.stderr);
+        for entry in std::fs::read_dir(store.join("blobs")).unwrap().flatten() {
+            if entry.path().is_dir() {
+                std::fs::remove_dir_all(entry.path()).unwrap();
+            }
+        }
+        // A source that does not exist: usage error.
+        let missing = base.join("nowhere").display().to_string();
+        let copy = base.join("copy.gstore").display().to_string();
+        let res = run_env(
+            &[
+                "store",
+                "convert",
+                &store_text,
+                &copy,
+                "--fill-blobs",
+                &missing,
+            ],
+            &[],
+        );
+        assert_eq!(res.code, 2, "{} {}", res.stdout, res.stderr);
+        // A source without the blob: exit 1, no copy.
+        let empty = base.join("empty");
+        std::fs::create_dir_all(&empty).unwrap();
+        let empty = empty.display().to_string();
+        let res = run_env(
+            &[
+                "store",
+                "convert",
+                &store_text,
+                &copy,
+                "--fill-blobs",
+                &empty,
+            ],
+            &[],
+        );
+        assert_eq!(res.code, 1, "{} {}", res.stdout, res.stderr);
+        assert!(res.stderr.contains("missing"), "{}", res.stderr);
+        assert!(!Path::new(&copy).exists());
+        // The backup holds it: the copy is made, verified and lists the model.
+        let res = run_env(
+            &[
+                "store",
+                "convert",
+                &store_text,
+                &copy,
+                "--fill-blobs",
+                &backup,
+            ],
+            &[],
+        );
+        assert_eq!(res.code, 0, "{} {}", res.stdout, res.stderr);
+        assert!(res.stdout.contains("blobs filled"), "{}", res.stdout);
+        let res = run_env(&["store", "verify", &copy], &[]);
+        assert_eq!(res.code, 0, "{} {}", res.stdout, res.stderr);
+        let res = run_env(&["store", "models", &copy], &[]);
+        assert!(res.stdout.contains("acme/tiny"), "{}", res.stdout);
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
     #[test]
     fn download_into_a_store_keeps_the_licence_with_the_model() {
         let mock = Mock::start(|port| routes_with_metadata(port, model_safetensors(), false));

@@ -91,13 +91,14 @@ pub use store::read_snapshot_file;
 pub use store::{
     AdviceRule, AtticEntry, BackupMarker, BackupMode, BackupReport, BlobSource, ChangesSince,
     CheckpointReport, ClosedCommitOptions, CompactReport, CompactionAdvice, CompactionPolicy,
-    ConvertedModel, CutTail, DEFAULT_CHECKPOINT_AFTER_BYTES, DEFAULT_CHECKPOINT_MERGE_BYTES,
-    DEFAULT_STORE_SEGMENT_BYTES, DEFAULT_WAL_SEGMENT_BYTES, Damage, DamageKind, DamagePolicy,
-    DamageReport, Diverged, Donor, ForkReport, FoundDamage, IdRange, ImportModelOptions,
-    ImportModelReport, LineageEntry, MissingModel, ModelChangeReport, ModelCopy, ModelInfo,
-    ModelRole, ModelSource, ModelState, NewModel, OpenReport, PruneReport, RepairOptions,
-    RepairReport, RestoreBlobsReport, RollbackMode, RollbackReport, SnapshotLoadReport, Store,
-    StoreInfo, StoreOptions, UpgradeReport, VectorWithoutRule, VerifyProblem, VerifyReport,
+    ConvertOptions, ConvertReport, ConvertedModel, CutTail, DEFAULT_CHECKPOINT_AFTER_BYTES,
+    DEFAULT_CHECKPOINT_MERGE_BYTES, DEFAULT_STORE_SEGMENT_BYTES, DEFAULT_WAL_SEGMENT_BYTES, Damage,
+    DamageKind, DamagePolicy, DamageReport, Diverged, Donor, ForkReport, FoundDamage, IdRange,
+    ImportModelOptions, ImportModelReport, LineageEntry, MissingModel, ModelChangeReport,
+    ModelCopy, ModelInfo, ModelRole, ModelSource, ModelState, NewModel, OpenReport, PruneReport,
+    RepairOptions, RepairReport, RestoreBlobsReport, RollbackMode, RollbackReport,
+    SnapshotLoadReport, Store, StoreInfo, StoreOptions, UpgradeReport, VectorWithoutRule,
+    VerifyProblem, VerifyReport,
 };
 pub use store::{NotScheduledJob, UserJobs};
 
