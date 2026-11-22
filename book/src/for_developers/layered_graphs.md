@@ -104,6 +104,8 @@ that registry, a display name and the base's identity:
 - `BaseRef` is `Copy + Hash + Eq`: a host serving many layers pools its bases in a
   `HashMap<BaseRef, LayerBase>` (or `Weak` handles) and drops a second load of a pooled commit.
   The `LayerBase` rustdoc has a pool example; the pool's lifetime and eviction stay the host's.
+  [Serving Layers](serving_layers.md) shows a whole server: pool, catalog of names and
+  aliases, and MCP sessions pinned to a version.
 
 ```rust
 use std::sync::Arc;

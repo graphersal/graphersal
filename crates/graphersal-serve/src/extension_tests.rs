@@ -2,7 +2,8 @@
 //! resolves two graphs, observes and cancels runs, refuses requests in its filter and attaches
 //! an identity, serves an extra route, sees the lifecycle (ready, stopping, activity), and runs
 //! the jobs on a queue of its own; plus the lifecycle's probe answers while loading, ready and
-//! stopping. Real session threads on the sample graphs, no HTTP library.
+//! stopping; and the reference multi-graph resolver over layers (module `reference_resolver`).
+//! Real session threads on the sample graphs, no HTTP library.
 
 use std::io::Cursor;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -1230,5 +1231,595 @@ fn a_resolver_reading_the_session_route_keeps_a_session_on_its_version() {
         assert_eq!(status, 404, "signed {signed}");
         assert_eq!(mcp.verified_session_route(&forged), None);
         assert_eq!(mcp.verified_session_route(&old), Some("acme@1"));
+    }
+}
+
+/// The reference multi-graph resolver (layered-graph plan S5.3; book page "Serving Layers" for
+/// developers): how a host serves many versioned graphs behind one MCP endpoint with this
+/// repository's pieces, without a base pool or alias catalog in this crate (one graph per
+/// process is its rule; the full multi-graph server is a future server's).
+///
+/// - a **base pool** keyed by [`BaseRef`]: one [`LayerBase`] per base commit, loaded read-only
+///   from a versioned base store at a mark, shared by every layer over it;
+/// - a **catalog**: versions (`acme@2026.3` = a layer over `product@2026.3`), aliases (`acme`
+///   -> its current version) and explicit pins the host keeps;
+/// - the host's **path rewrite** (`/mcp/acme` -> `/mcp` + the name in a header the client
+///   cannot set);
+/// - one context per version, built with `.layered(true)`,
+///   `.mcp_session_route(Some("<name>@<version>"))`, the one shared `Arc<Mcp>` and a profile
+///   of its own;
+/// - the **name check**: a session's route ([`graphersal_mcp::Mcp::verified_session_route`])
+///   must be a version of the name in the path;
+/// - the **retirement** of versions no alias, pin or recent request needs, and the eviction of
+///   bases no layer reads any more.
+#[cfg(feature = "mcp")]
+mod reference_resolver {
+    use std::collections::{HashMap, HashSet};
+    use std::sync::Weak;
+
+    use graphersal::auth::AccessPolicy;
+    use graphersal::persist::{MemDir, RecoveryTarget, Store, StoreOptions};
+    use graphersal::prelude::*;
+    use graphersal::storage::{BaseRef, LayerBase, LayeredGraph};
+    use graphersal_mcp::{Mcp, Profile, SessionKey};
+
+    use super::*;
+
+    /// The header carrying the graph name of the path. The host sets it from the path and drops
+    /// any copy the client sent, so only the path names the graph.
+    const GRAPH_HEADER: &str = "X-Graphersal-Graph";
+
+    /// One served version: its context, the base it reads and when a request last used it.
+    struct Served {
+        context: Arc<Context>,
+        base: BaseRef,
+        last_used: Instant,
+    }
+
+    /// Versions, aliases and the explicit pins the host keeps (never retired).
+    #[derive(Default)]
+    struct Catalog {
+        versions: HashMap<String, Served>,
+        aliases: HashMap<String, String>,
+        kept: HashSet<String>,
+    }
+
+    /// The reference resolver: base pool + catalog + the shared MCP endpoint.
+    struct LayerHost {
+        mcp: Arc<Mcp>,
+        pool: Mutex<HashMap<BaseRef, LayerBase>>,
+        catalog: Mutex<Catalog>,
+    }
+
+    /// `acme@2026.3` -> (`acme`, `2026.3`).
+    fn split(version: &str) -> Option<(&str, &str)> {
+        version.split_once('@')
+    }
+
+    impl LayerHost {
+        fn new(mcp: Arc<Mcp>) -> Self {
+            Self {
+                mcp,
+                pool: Mutex::new(HashMap::new()),
+                catalog: Mutex::new(Catalog::default()),
+            }
+        }
+
+        /// The base of the store `dir` at `mark`, from the pool when that commit is loaded
+        /// already (same `BaseRef`), else loaded read-only and pooled.
+        fn base(&self, dir: &MemDir, mark: &str) -> LayerBase {
+            let loaded = LayerBase::from_store_read_only(dir, RecoveryTarget::Mark(mark.into()))
+                .expect("the base store opens at the mark")
+                .with_name(format!("product@{mark}"));
+            let key = *loaded.base_ref().expect("a base identity");
+            self.pool
+                .lock()
+                .unwrap()
+                .entry(key)
+                .or_insert(loaded)
+                .clone()
+        }
+
+        /// Publishes `version` (`<name>@<version>`) as a new layer over `base` that `setup`
+        /// fills, served by a context of its own with `profile`. Returns the layer (to watch it
+        /// go away).
+        fn publish(
+            &self,
+            version: &str,
+            base: &LayerBase,
+            profile: Profile,
+            setup: impl FnOnce(&Graph<LayeredGraph>),
+        ) -> Weak<Graph<LayeredGraph>> {
+            let layer = Arc::new(base.new_layer().expect("a layer over the base"));
+            setup(&layer);
+            let watched = Arc::downgrade(&layer);
+            let name = version.to_string();
+            let (jobs, ()) = spawn_session(
+                SessionPresets::new(),
+                move |session| {
+                    session
+                        .load_shared(layer, &name, "layer")
+                        .map(|_| ())
+                        .map_err(|err| err.to_string())
+                },
+                None,
+            )
+            .expect("the session thread starts");
+            let context = Context::builder(Runner::Session(jobs), check())
+                .layered(true)
+                .shared_mcp(self.mcp.clone())
+                .mcp_profile(profile)
+                .mcp_session_route(Some(version.to_string()))
+                .build();
+            let served = Served {
+                context,
+                base: *base.base_ref().expect("a base identity"),
+                last_used: Instant::now(),
+            };
+            self.catalog
+                .lock()
+                .unwrap()
+                .versions
+                .insert(version.to_string(), served);
+            watched
+        }
+
+        /// The release: `alias` names `version` for every new session from now on.
+        fn flip(&self, alias: &str, version: &str) {
+            let mut catalog = self.catalog.lock().unwrap();
+            assert!(catalog.versions.contains_key(version), "{version}");
+            catalog.aliases.insert(alias.into(), version.into());
+        }
+
+        /// Drops every version that no alias names, no explicit pin keeps and no request used
+        /// for `grace`: its context goes, so its session thread ends and its layer is dropped;
+        /// a session still routed to it gets `404` and starts again on the current version.
+        /// Returns the retired versions.
+        fn retire_idle(&self, grace: Duration) -> Vec<String> {
+            let mut catalog = self.catalog.lock().unwrap();
+            let needed: HashSet<String> = catalog
+                .aliases
+                .values()
+                .chain(catalog.kept.iter())
+                .cloned()
+                .collect();
+            let retired: Vec<String> = catalog
+                .versions
+                .iter()
+                .filter(|(version, served)| {
+                    !needed.contains(*version) && served.last_used.elapsed() >= grace
+                })
+                .map(|(version, _)| version.clone())
+                .collect();
+            for version in &retired {
+                catalog.versions.remove(version);
+            }
+            retired
+        }
+
+        /// Drops the pooled bases no served version reads any more. Returns how many.
+        fn evict_unused_bases(&self) -> usize {
+            let read: HashSet<BaseRef> = {
+                let catalog = self.catalog.lock().unwrap();
+                catalog
+                    .versions
+                    .values()
+                    .map(|served| served.base)
+                    .collect()
+            };
+            let mut pool = self.pool.lock().unwrap();
+            let before = pool.len();
+            pool.retain(|key, _| read.contains(key));
+            before - pool.len()
+        }
+    }
+
+    impl GraphResolver for LayerHost {
+        fn resolve(&self, request: &Request<'_>) -> Result<Arc<Context>, HttpError> {
+            let name = request
+                .header(GRAPH_HEADER)
+                .ok_or_else(|| HttpError::new(404, "no graph name"))?;
+            let routed = match request.header("Mcp-Session-Id") {
+                Some(id) => {
+                    // Known to the endpoint (a signed id: its signature; table mode: in the
+                    // table), and a version of the name in the path.
+                    let route = self
+                        .mcp
+                        .verified_session_route(id)
+                        .ok_or_else(|| HttpError::new(404, "unknown MCP session"))?;
+                    let belongs = if name.contains('@') {
+                        route == name
+                    } else {
+                        split(route).is_some_and(|(of, _)| of == name)
+                    };
+                    if !belongs {
+                        return Err(HttpError::new(404, "unknown MCP session"));
+                    }
+                    Some(route)
+                }
+                None => None,
+            };
+            let mut catalog = self.catalog.lock().unwrap();
+            let version = match routed {
+                Some(route) => route.to_string(),
+                None if name.contains('@') => name.to_string(),
+                None => catalog
+                    .aliases
+                    .get(name)
+                    .cloned()
+                    .ok_or_else(|| HttpError::new(404, format!("unknown graph {name}")))?,
+            };
+            let served = catalog
+                .versions
+                .get_mut(&version)
+                .ok_or_else(|| HttpError::new(404, format!("unknown graph {name}")))?;
+            served.last_used = Instant::now();
+            Ok(served.context.clone())
+        }
+    }
+
+    /// The host's listener side: `POST /mcp/<name>` becomes `POST /mcp` with the name in
+    /// [`GRAPH_HEADER`] (a client's own copy of that header is dropped); any other path is a
+    /// `404` of the host.
+    fn rewrite<'a>(
+        path: &str,
+        body: &'a [u8],
+        client_headers: &[(&str, &str)],
+    ) -> Result<Request<'a>, HttpError> {
+        let name = path
+            .strip_prefix("/mcp/")
+            .filter(|name| {
+                !name.is_empty()
+                    && name.len() <= 64
+                    && name
+                        .bytes()
+                        .all(|b| b.is_ascii_alphanumeric() || b"._-@".contains(&b))
+            })
+            .ok_or_else(|| HttpError::new(404, "no such endpoint"))?;
+        let mut request = post("/mcp", body).with_header("Accept", "application/json");
+        for (field, value) in client_headers {
+            if !field.eq_ignore_ascii_case(GRAPH_HEADER) {
+                request = request.with_header(field, value);
+            }
+        }
+        Ok(request.with_header(GRAPH_HEADER, name))
+    }
+
+    /// One client request on the host: the status, the minted session id and the JSON answer.
+    fn exchange(
+        server: &Server,
+        path: &str,
+        body: &Value,
+        headers: &[(&str, &str)],
+    ) -> (u16, Option<String>, Value) {
+        let text = body.to_string();
+        let request = match rewrite(path, text.as_bytes(), headers) {
+            Ok(request) => request,
+            Err(err) => return (err.status(), None, Value::Null),
+        };
+        let answer = server.handle(request);
+        let id = answer
+            .headers()
+            .iter()
+            .find(|(field, _)| field.eq_ignore_ascii_case("mcp-session-id"))
+            .map(|(_, value)| value.clone());
+        let json = serde_json::from_slice(answer.body()).unwrap_or(Value::Null);
+        (answer.status(), id, json)
+    }
+
+    fn initialize() -> Value {
+        json!({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {
+            "protocolVersion": "2025-06-18", "capabilities": {},
+            "clientInfo": {"name": "tester", "version": "1"}}})
+    }
+
+    /// A new session at `path`: its id (which carries the version's route).
+    fn start(server: &Server, path: &str) -> String {
+        let (status, id, answer) = exchange(server, path, &initialize(), &[]);
+        assert_eq!(status, 200, "{path}: {answer}");
+        id.expect("a session id")
+    }
+
+    /// `MATCH (n) RETURN count(n)` in `session` at `path`: the status and the count (`None`
+    /// when refused).
+    fn count(server: &Server, path: &str, session: &str) -> (u16, Option<u64>) {
+        let call = tool_call("gql", json!({"query": "MATCH (n) RETURN count(n) AS c"}));
+        let (status, _, answer) = exchange(server, path, &call, &[("Mcp-Session-Id", session)]);
+        let text = tool_text(&answer);
+        let count = text
+            .split("\"c\":")
+            .nth(1)
+            .and_then(|rest| rest.split(|c: char| !c.is_ascii_digit()).next())
+            .and_then(|digits| digits.parse().ok());
+        (status, count)
+    }
+
+    /// The versioned base store `product`: the modern graph at mark `2026.2` (6 vertices), one
+    /// vertex more at `2026.3`, two more at `2026.4`.
+    fn product_store() -> MemDir {
+        let dir = MemDir::named("product");
+        let store = Store::create_with(
+            &dir,
+            TraversalGraph::tinkerpop_modern(),
+            StoreOptions::new(),
+        )
+        .expect("the base store");
+        store.mark("2026.2").expect("a mark");
+        for mark in ["2026.3", "2026.4"] {
+            GraphTraversalSource::new(&mut *store.graph().write())
+                .add_v("feature")
+                .iterate()
+                .expect("a base commit");
+            store.mark(mark).expect("a mark");
+        }
+        store.close().expect("closed");
+        dir
+    }
+
+    /// `n` vertices labelled `label` into a layer (the customer's own data).
+    fn add(label: &'static str, n: usize) -> impl FnOnce(&Graph<LayeredGraph>) {
+        move |layer| {
+            for _ in 0..n {
+                GraphTraversalSource::new(&mut *layer.write())
+                    .add_v(label)
+                    .iterate()
+                    .expect("a layer write");
+            }
+        }
+    }
+
+    /// The writing customer's profile and the read-only one.
+    fn writer() -> Profile {
+        Profile::new(false)
+    }
+
+    fn reader() -> Profile {
+        Profile::new(true).with_access_policy(AccessPolicy::read_only())
+    }
+
+    /// The catalog of design section 6, on one host:
+    ///
+    /// ```text
+    /// product@2026.2/.3/.4 -> bases (one store, three marks)
+    /// acme@2026.2          -> layer over product@2026.2, kept (explicit pin)
+    /// acme@2026.3          -> layer over product@2026.3
+    /// globex@2026.3        -> another layer over the SAME base product@2026.3 (read-only)
+    /// product@2026.3       -> an empty layer over that base: the base itself, read-only
+    /// acme@2026.4          -> layer over product@2026.4 (the next release)
+    /// acme -> acme@2026.3, globex -> globex@2026.3, product -> product@2026.3
+    /// ```
+    ///
+    /// Vertex counts: acme@2026.2 7, acme@2026.3 8, acme@2026.4 9, globex@2026.3 10,
+    /// product@2026.3 7.
+    struct Fixture {
+        host: Arc<LayerHost>,
+        server: Server,
+        acme_3: Weak<Graph<LayeredGraph>>,
+        globex_3: Weak<Graph<LayeredGraph>>,
+    }
+
+    fn fixture(mcp: Mcp) -> Fixture {
+        let host = Arc::new(LayerHost::new(Arc::new(mcp)));
+        let dir = product_store();
+        let base_2 = host.base(&dir, "2026.2");
+        host.publish("acme@2026.2", &base_2, writer(), add("acme", 1));
+        let acme_3 = host.publish(
+            "acme@2026.3",
+            &host.base(&dir, "2026.3"),
+            writer(),
+            add("acme", 1),
+        );
+        // A second load of the same commit: the pooled base.
+        let globex_3 = host.publish(
+            "globex@2026.3",
+            &host.base(&dir, "2026.3"),
+            reader(),
+            add("globex", 3),
+        );
+        host.publish(
+            "product@2026.3",
+            &host.base(&dir, "2026.3"),
+            reader(),
+            |_| {},
+        );
+        host.publish(
+            "acme@2026.4",
+            &host.base(&dir, "2026.4"),
+            writer(),
+            add("acme", 1),
+        );
+        host.catalog
+            .lock()
+            .unwrap()
+            .kept
+            .insert("acme@2026.2".into());
+        host.flip("acme", "acme@2026.3");
+        host.flip("globex", "globex@2026.3");
+        host.flip("product", "product@2026.3");
+        let server = Server::new();
+        server.ready_with(host.clone()).expect("ready once");
+        Fixture {
+            host,
+            server,
+            acme_3,
+            globex_3,
+        }
+    }
+
+    /// The endpoint in table mode and with signed ids (a key shared by the replicas).
+    fn both_modes() -> [(&'static str, Mcp); 2] {
+        let key = SessionKey::new(b"a shared secret of the replicas, 32+ bytes").expect("a key");
+        [
+            ("table", Mcp::new(false, None, false)),
+            ("signed", Mcp::new(false, None, false).with_session_key(key)),
+        ]
+    }
+
+    #[test]
+    fn two_layers_over_one_pooled_base_share_it() {
+        let Fixture {
+            host,
+            acme_3,
+            globex_3,
+            ..
+        } = fixture(Mcp::new(false, None, false));
+        // Three bases for five versions: the three loads of mark 2026.3 are one base.
+        assert_eq!(host.pool.lock().unwrap().len(), 3);
+        let (acme, globex) = (acme_3.upgrade().unwrap(), globex_3.upgrade().unwrap());
+        let (acme, globex) = (acme.read(), globex.read());
+        assert!(Arc::ptr_eq(acme.base(), globex.base()));
+        assert_eq!(acme.base_ref(), globex.base_ref());
+        let shared = |layer: &LayeredGraph| {
+            layer
+                .memory_usage()
+                .expect("readable")
+                .expect("measured")
+                .shared_bytes
+        };
+        assert!(shared(&acme) > 0);
+        assert_eq!(shared(&acme), shared(&globex));
+    }
+
+    #[test]
+    fn an_alias_flip_keeps_open_sessions_on_their_version() {
+        for (mode, mcp) in both_modes() {
+            let Fixture { host, server, .. } = fixture(mcp);
+            let old = start(&server, "/mcp/acme");
+            assert_eq!(graphersal_mcp::session_route(&old), Some("acme@2026.3"));
+            assert_eq!(count(&server, "/mcp/acme", &old), (200, Some(8)), "{mode}");
+            // The release: new sessions get 2026.4, the open one finishes on 2026.3.
+            host.flip("acme", "acme@2026.4");
+            assert_eq!(count(&server, "/mcp/acme", &old), (200, Some(8)), "{mode}");
+            let new = start(&server, "/mcp/acme");
+            assert_eq!(graphersal_mcp::session_route(&new), Some("acme@2026.4"));
+            assert_eq!(count(&server, "/mcp/acme", &new), (200, Some(9)), "{mode}");
+            // The instructions of a layer name the layer steps (`.layered(true)`).
+            let (_, _, answer) = exchange(&server, "/mcp/acme", &initialize(), &[]);
+            let instructions = answer["result"]["instructions"].as_str().unwrap_or("");
+            assert!(instructions.contains("layer_diff"), "{mode}: {answer}");
+        }
+    }
+
+    #[test]
+    fn an_explicit_pin_reaches_its_version_whatever_the_alias() {
+        for (mode, mcp) in both_modes() {
+            let Fixture { server, .. } = fixture(mcp);
+            let pinned = start(&server, "/mcp/acme@2026.2");
+            assert_eq!(graphersal_mcp::session_route(&pinned), Some("acme@2026.2"));
+            assert_eq!(
+                count(&server, "/mcp/acme@2026.2", &pinned),
+                (200, Some(7)),
+                "{mode}"
+            );
+            // The same session also answers at its name's alias path (it is acme's version).
+            assert_eq!(
+                count(&server, "/mcp/acme", &pinned),
+                (200, Some(7)),
+                "{mode}"
+            );
+            // A session of the alias does not answer at the pin of another version.
+            let current = start(&server, "/mcp/acme");
+            assert_eq!(
+                count(&server, "/mcp/acme@2026.2", &current).0,
+                404,
+                "{mode}"
+            );
+            // The base itself, read-only, and the per-context profiles.
+            let product = start(&server, "/mcp/product");
+            assert_eq!(count(&server, "/mcp/product", &product), (200, Some(7)));
+            let write = tool_call("query", json!({"script": "g.add_v(\"x\").iterate()"}));
+            let globex = start(&server, "/mcp/globex");
+            let (_, _, refused) = exchange(
+                &server,
+                "/mcp/globex",
+                &write,
+                &[("Mcp-Session-Id", &globex)],
+            );
+            assert_eq!(refused["result"]["isError"], true, "{mode}: {refused}");
+            let (_, _, allowed) = exchange(
+                &server,
+                "/mcp/acme",
+                &write,
+                &[("Mcp-Session-Id", &current)],
+            );
+            assert_eq!(allowed["result"]["isError"], false, "{mode}: {allowed}");
+            // acme's write stays in its layer: the shared base and globex do not see it.
+            assert_eq!(count(&server, "/mcp/acme", &current), (200, Some(9)));
+            assert_eq!(count(&server, "/mcp/globex", &globex), (200, Some(10)));
+            assert_eq!(count(&server, "/mcp/product", &product), (200, Some(7)));
+        }
+    }
+
+    #[test]
+    fn a_session_of_another_name_or_a_forged_route_is_refused() {
+        for (mode, mcp) in both_modes() {
+            let Fixture { server, .. } = fixture(mcp);
+            let globex = start(&server, "/mcp/globex");
+            assert_eq!(count(&server, "/mcp/globex", &globex), (200, Some(10)));
+            // A valid session of globex sent to acme's path: refused by the name check (the
+            // endpoint alone would accept it, the id is genuine).
+            assert_eq!(count(&server, "/mcp/acme", &globex).0, 404, "{mode}");
+            // An edited route (the id of globex relabelled as acme's): unknown to the endpoint.
+            let forged = globex.replacen("globex@2026.3~", "acme@2026.3~", 1);
+            assert_ne!(forged, globex);
+            assert_eq!(count(&server, "/mcp/acme", &forged).0, 404, "{mode}");
+            assert_eq!(count(&server, "/mcp/globex", &forged).0, 404, "{mode}");
+            // Unknown names and versions, a bad path, and a client's own graph header.
+            let (status, _, _) = exchange(&server, "/mcp/initech", &initialize(), &[]);
+            assert_eq!(status, 404, "{mode}");
+            let (status, _, _) = exchange(&server, "/mcp/acme@2025.1", &initialize(), &[]);
+            assert_eq!(status, 404, "{mode}");
+            let (status, _, _) = exchange(&server, "/mcp/acme/../globex", &initialize(), &[]);
+            assert_eq!(status, 404, "{mode}");
+            let smuggled = exchange(
+                &server,
+                "/mcp/acme",
+                &initialize(),
+                &[(GRAPH_HEADER, "globex")],
+            );
+            assert_eq!(
+                smuggled
+                    .1
+                    .as_deref()
+                    .and_then(graphersal_mcp::session_route),
+                Some("acme@2026.3"),
+                "{mode}: the path names the graph, not the client's header"
+            );
+        }
+    }
+
+    #[test]
+    fn a_retired_version_drops_its_context_layer_and_finally_its_base() {
+        let Fixture {
+            host,
+            server,
+            acme_3,
+            globex_3,
+        } = fixture(Mcp::new(false, None, false));
+        let old = start(&server, "/mcp/acme");
+        host.flip("acme", "acme@2026.4");
+        assert_eq!(count(&server, "/mcp/acme", &old), (200, Some(8)));
+        // Used a moment ago: a grace period keeps it.
+        assert!(host.retire_idle(Duration::from_secs(3600)).is_empty());
+        let context = Arc::downgrade(&host.catalog.lock().unwrap().versions["acme@2026.3"].context);
+        // No grace: the version no alias or pin names goes.
+        assert_eq!(host.retire_idle(Duration::ZERO), vec!["acme@2026.3"]);
+        wait_until("the retired context is dropped", || {
+            context.upgrade().is_none()
+        });
+        wait_until("its layer is dropped", || acme_3.upgrade().is_none());
+        // The open session learns it is gone (a 404 makes an MCP client start again) and the
+        // new session is on the current version.
+        assert_eq!(count(&server, "/mcp/acme", &old).0, 404);
+        let new = start(&server, "/mcp/acme");
+        assert_eq!(count(&server, "/mcp/acme", &new), (200, Some(9)));
+        // globex and product still read base 2026.3: it stays pooled.
+        assert!(globex_3.upgrade().is_some());
+        assert_eq!(host.evict_unused_bases(), 0);
+        // Unpinning acme@2026.2 lets it go, and then its base, which nothing else reads.
+        host.catalog.lock().unwrap().kept.remove("acme@2026.2");
+        assert_eq!(host.retire_idle(Duration::ZERO), vec!["acme@2026.2"]);
+        assert_eq!(host.evict_unused_bases(), 1);
+        assert_eq!(host.pool.lock().unwrap().len(), 2);
     }
 }
