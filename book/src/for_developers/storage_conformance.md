@@ -6,7 +6,7 @@
 
 The crate `graphersal-storage-tests` (on crates.io, **EXPERIMENTAL** like the trait: it may break in any minor
 release before 1.0, so pin the exact version) runs one contract against any `GraphStorage` implementation. Add it
-as a dev-dependency (`graphersal-storage-tests = "=0.7.0"`) and, in a test of the implementing crate:
+as a dev-dependency (`graphersal-storage-tests = "=0.7.1"`) and, in a test of the implementing crate:
 
 ```rust,ignore
 graphersal_storage_tests::conformance!(my_storage, base = MyStorage::new() => base);
