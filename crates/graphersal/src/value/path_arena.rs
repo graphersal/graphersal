@@ -3,7 +3,11 @@
 //! A traverser does not own its path. It holds a [`PathRef`] into the [`PathArena`] of the
 //! execution it belongs to, and every path is a chain of [`PathNode`]s linked to their parent.
 //! Siblings produced by one fan-out share the prefix they came from, so cloning a traverser copies
-//! four bytes and extending a path is a single `Vec::push`.
+//! four bytes and extending a path is a single `Vec::push`. The nodes live in fixed-size chunks
+//! ([`CHUNK_NODES`]): a full chunk is never grown nor moved, a new one is allocated at its final
+//! size, so a large arena never grows by `realloc` (the macOS allocator keeps a large block that
+//! `realloc` grew after it is freed, so repeated runs of a path-heavy query would keep growing the
+//! process; `traversal::capacity::reserve_out_of_place`) and never copies its nodes.
 //!
 //! Which positions are recorded at all is decided at compile time by the path requirement
 //! analysis (`traversal/optimizer/path_analysis.rs`): a query with no path consumer never pushes a
@@ -50,12 +54,21 @@ pub(crate) struct PathNode<S: GraphStorage> {
     pub(crate) labels: Option<Arc<[CompactString]>>,
 }
 
+/// Nodes per chunk of a [`PathArena`] (a power of two): about 64 KiB of nodes, below the size
+/// from which the macOS allocator may serve a large block. The first chunk grows by pushes up to
+/// it, so a small query allocates no more than before.
+const CHUNK_NODES: usize = 1 << 10;
+
 /// Arena of path nodes owned by one traversal execution.
 ///
 /// Nested traversals run on the same context and therefore share the arena. The arena is dropped
 /// together with the context, so a [`PathRef`] never outlives the execution it was created in.
 pub(crate) struct PathArena<S: GraphStorage> {
-    nodes: Vec<PathNode<S>>,
+    /// The nodes in chunks of [`CHUNK_NODES`]: node `i` is item `i % CHUNK_NODES` of chunk
+    /// `i / CHUNK_NODES`; every chunk but the last is full.
+    chunks: Vec<Vec<PathNode<S>>>,
+    /// Number of nodes pushed so far.
+    len: usize,
     /// Maximum number of nodes; `u32::MAX - 1` in production, smaller in tests.
     capacity: u32,
     /// Estimated heap bytes of the values the nodes own (`0` for element handles, so a path of
@@ -75,7 +88,8 @@ impl<S: GraphStorage> PathArena<S> {
     /// Creates an empty arena. It allocates nothing until the first node is pushed.
     pub(crate) fn new() -> Self {
         Self {
-            nodes: Vec::new(),
+            chunks: Vec::new(),
+            len: 0,
             capacity: u32::MAX - 1,
             value_bytes: 0,
         }
@@ -85,7 +99,8 @@ impl<S: GraphStorage> PathArena<S> {
     #[cfg(test)]
     pub(crate) fn with_capacity_limit(capacity: u32) -> Self {
         Self {
-            nodes: Vec::new(),
+            chunks: Vec::new(),
+            len: 0,
             capacity: capacity.min(u32::MAX - 1),
             value_bytes: 0,
         }
@@ -100,7 +115,7 @@ impl<S: GraphStorage> PathArena<S> {
     /// Number of nodes pushed so far.
     #[allow(dead_code)]
     pub(crate) fn node_count(&self) -> usize {
-        self.nodes.len()
+        self.len
     }
 
     #[inline]
@@ -108,7 +123,10 @@ impl<S: GraphStorage> PathArena<S> {
         if path.is_none() {
             None
         } else {
-            self.nodes.get(path.0 as usize)
+            let index = path.0 as usize;
+            self.chunks
+                .get(index / CHUNK_NODES)?
+                .get(index % CHUNK_NODES)
         }
     }
 
@@ -123,7 +141,7 @@ impl<S: GraphStorage> PathArena<S> {
         value: TraverserValue<S>,
         labels: Option<Arc<[CompactString]>>,
     ) -> TraverserResult<PathRef> {
-        let index = self.nodes.len();
+        let index = self.len;
         if index >= self.capacity as usize {
             return Err(Box::new(TraverserError::PathArenaExhausted {
                 capacity: u64::from(self.capacity),
@@ -133,11 +151,26 @@ impl<S: GraphStorage> PathArena<S> {
         self.value_bytes = self.value_bytes.saturating_add(
             crate::traversal::step::profile::estimate_traverser_value_bytes(&value),
         );
-        self.nodes.push(PathNode {
+        let node = PathNode {
             parent,
             value,
             labels,
-        });
+        };
+        match self.chunks.last_mut() {
+            Some(chunk) if chunk.len() < CHUNK_NODES => chunk.push(node),
+            // The first chunk grows by pushes (a small query stays small); a later one is
+            // allocated at its final size and never grows.
+            last => {
+                let mut chunk = if last.is_none() {
+                    Vec::new()
+                } else {
+                    Vec::with_capacity(CHUNK_NODES)
+                };
+                chunk.push(node);
+                self.chunks.push(chunk);
+            }
+        }
+        self.len += 1;
         Ok(PathRef(index as u32))
     }
 
@@ -533,6 +566,34 @@ mod tests {
         assert_eq!(arena.node_count(), 0);
         assert_eq!(arena.len(PathRef::NONE), 0);
         assert!(arena.materialize(PathRef::NONE).steps.is_empty());
+    }
+
+    #[test]
+    fn paths_cross_chunk_boundaries() {
+        let mut arena: PathArena<TraversalGraph> = PathArena::new();
+        let mut last = PathRef::NONE;
+        let total = 3 * CHUNK_NODES + 7;
+        for index in 0..total {
+            last = arena.push(last, vertex(index as u32), None).unwrap();
+        }
+        assert_eq!(arena.node_count(), total);
+        assert_eq!(arena.len(last), total);
+        // Every full chunk was allocated at its final size, so none ever grew.
+        assert!(
+            arena.chunks[1..]
+                .iter()
+                .all(|chunk| chunk.capacity() == CHUNK_NODES)
+        );
+        let values: Vec<_> = arena
+            .iter_rev(last)
+            .map(|node| node.value.clone())
+            .collect();
+        assert_eq!(values.first(), Some(&vertex(total as u32 - 1)));
+        assert_eq!(values.last(), Some(&vertex(0)));
+        assert_eq!(
+            values.get(total - CHUNK_NODES),
+            Some(&vertex(CHUNK_NODES as u32 - 1))
+        );
     }
 
     #[test]
