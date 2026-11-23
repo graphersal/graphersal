@@ -27,7 +27,7 @@
 use super::super::super::eval::{Env, EvalError, Value, status};
 use super::super::super::lexer::Span;
 use super::super::super::parser::{Between, TemporalFunction};
-use super::super::{Arg, any_null};
+use super::super::{Arg, Args, any_null};
 use super::{cypher_name, kind_name};
 use crate::ElementProperty;
 use crate::value::temporal::arith;
@@ -40,7 +40,7 @@ use crate::value::temporal::{
 /// `duration.between(a, b)` or one of its `in*` forms (`form`).
 pub(crate) fn between<En: Env>(
     form: Between,
-    args: Vec<Arg<En::Element>>,
+    args: Args<En::Element>,
     _env: &En,
     span: Span,
 ) -> Result<Value<En::Element>, EvalError> {

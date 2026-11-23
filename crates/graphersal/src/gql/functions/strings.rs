@@ -26,10 +26,11 @@ use super::super::eval::{Env, EvalError, Truth, Value, equals, status};
 use super::super::lexer::Span;
 use super::super::parser::Function;
 use super::{
-    Arg, any_null, function_not_implemented, integer_arg, list_bytes, reserve, string_arg,
+    Arg, Args, any_null, function_not_implemented, integer_arg, list_bytes, reserve, string_arg,
     wrong_kind,
 };
-use crate::CompactString;
+use crate::value::number::{N, Number};
+use crate::{CompactString, ElementProperty};
 
 /// The default trim character (design F11).
 const SPACE: char = ' ';
@@ -38,7 +39,7 @@ const SPACE: char = ' ';
 /// with a list first argument goes to `lists.rs`) on its evaluated arguments.
 pub(crate) fn call<En: Env>(
     function: Function,
-    args: Vec<Arg<En::Element>>,
+    args: Args<En::Element>,
     env: &En,
     span: Span,
 ) -> Result<Value<En::Element>, EvalError> {
@@ -179,7 +180,7 @@ fn strip(text: &str, side: TrimSide, remove: impl Fn(char) -> bool) -> &str {
 }
 
 /// `nullif(a, b)`: `NULL` when `a = b` is TRUE, else `a`.
-fn nullif<E: PartialEq>(args: Vec<Arg<E>>) -> Value<E> {
+fn nullif<E: PartialEq>(args: Args<E>) -> Value<E> {
     let mut args = args.into_iter();
     let (Some(a), Some(b)) = (args.next(), args.next()) else {
         return Value::Null;
@@ -192,7 +193,13 @@ fn nullif<E: PartialEq>(args: Vec<Arg<E>>) -> Value<E> {
 
 /// A non-negative character count or position as `usize`, else 22011 at the argument.
 fn count_arg<E>(function: Function, arg: &Arg<E>, what: &str) -> Result<usize, EvalError> {
-    let value = integer_arg(function, arg, &format!("an integer {what}"))?;
+    // The kind text is built only on the error path (no allocation per row).
+    let value = match &arg.value {
+        Value::Scalar(ElementProperty::Number(Number {
+            n: N::NegInt(value),
+        })) => *value,
+        _ => integer_arg(function, arg, &format!("an integer {what}"))?,
+    };
     if value < 0 {
         return Err(EvalError::new(
             status::SUBSTRING,
@@ -325,8 +332,9 @@ fn replace<En: Env>(
         .saturating_sub(count.saturating_mul(search.len() as u64))
         .saturating_add(count.saturating_mul(replacement.len() as u64));
     reserve(env, bytes, span)?;
-    let result = if search.is_empty() {
-        let mut out = String::with_capacity(usize::try_from(bytes).unwrap_or(0));
+    // Built as a `CompactString`: a short result stays inline (no allocation per row).
+    let mut out = CompactString::with_capacity(usize::try_from(bytes).unwrap_or(0));
+    if search.is_empty() {
         let mut left = count;
         for c in text.chars() {
             if left > 0 {
@@ -338,11 +346,17 @@ fn replace<En: Env>(
         if left > 0 {
             out.push_str(replacement);
         }
-        out
     } else {
-        text.replacen(search, replacement, limit)
-    };
-    Ok(Value::string(result))
+        // `str::replacen`: the matches left to right, without overlaps.
+        let mut last = 0;
+        for (at, _) in text.match_indices(search).take(limit) {
+            out.push_str(text.get(last..at).unwrap_or_default());
+            out.push_str(replacement);
+            last = at.saturating_add(search.len());
+        }
+        out.push_str(text.get(last..).unwrap_or_default());
+    }
+    Ok(Value::string(out))
 }
 
 /// Calls `piece` with each component of `text` cut at `delimiters` (see the module docs).
@@ -445,7 +459,7 @@ fn split<En: Env>(
 }
 
 /// `reverse(x)`: a string by characters or a list by items.
-fn reverse<E>(args: Vec<Arg<E>>) -> Result<Value<E>, EvalError> {
+fn reverse<E>(args: Args<E>) -> Result<Value<E>, EvalError> {
     let Some(arg) = args.into_iter().next() else {
         return Ok(Value::Null);
     };

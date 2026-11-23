@@ -829,6 +829,112 @@ fn nested_expansion_step_reuses_its_buffer_across_traversers() {
     assert!(allocs < 100, "line: {row}");
 }
 
+/// The top-level steps of each `.profile()` table in `stdout` (one table per `-e`): the sum of
+/// their `Allocs` and the largest `Out` among them (the rows the query walks).
+fn profile_allocations(stdout: &str) -> Vec<(u64, u64)> {
+    stdout
+        .split("Traversal Metrics")
+        .skip(1)
+        .map(|table| {
+            let mut allocs = 0;
+            let mut rows = 0;
+            // The step rows stand between the first two `====` rules; a nested row, a timing
+            // line and the totals start with a space, a loop summary with `[`.
+            for line in table
+                .lines()
+                .skip_while(|l| !l.starts_with("===="))
+                .skip(1)
+                .take_while(|l| !l.starts_with("===="))
+                .filter(|l| !l.starts_with(' ') && !l.starts_with('['))
+            {
+                let fields: Vec<&str> = line.split_whitespace().collect();
+                // ... In Out Time Mem Retained Allocs %Dur
+                allocs += fields[fields.len() - 2]
+                    .parse::<u64>()
+                    .unwrap_or_else(|_| panic!("Allocs is a number: {line}"));
+                rows = rows.max(
+                    fields[fields.len() - 6]
+                        .parse::<u64>()
+                        .unwrap_or_else(|_| panic!("Out is a number: {line}")),
+                );
+            }
+            (allocs, rows)
+        })
+        .collect()
+}
+
+/// G1 ratchet: the steps of a GQL query call the allocator per row no more often than the steps
+/// of the same query written in Gremlin (the bounds come from the counts measured on the
+/// `large` graph, 111 100 rows: one call per row for the row map in both spellings, which
+/// `project()` makes too). It used to be one more per row for each sort key of `ORDER BY` (a key
+/// vector per row) and for each `toString()` / `substring()` / `toUpper()` (an argument vector
+/// per call, a `String` result, an error text built before the argument was checked). A query
+/// that records path positions (the GQL edge-uniqueness check of a two-hop pattern, sort keys
+/// that read a variable after the row map) stores them in chunks of the path arena, one call
+/// per 1024 positions, which the Gremlin spelling without those positions does not.
+#[test]
+fn gql_steps_allocate_per_row_like_their_gremlin_equivalents() {
+    let rows_map = "g.v().out().project(\"b.id\").by(\"id\")";
+    // (GQL query, Gremlin equivalent, extra calls allowed per 1000 rows).
+    let pairs = [
+        ("MATCH (a)-->(b) RETURN b.id", rows_map, 0),
+        ("MATCH (a)-->(b) RETURN b.id ORDER BY b.id", rows_map, 0),
+        // The keys read `b` after the row map: its positions are recorded (`as("b")`).
+        (
+            "MATCH (a)-->(b) RETURN b.id ORDER BY b.level DESC, b.label, b.id",
+            rows_map,
+            4,
+        ),
+        (
+            "MATCH (a)-->(b) RETURN toUpper(b.label) AS u, toString(b.level) AS l, \
+             substring(b.id, 1, 2) AS s",
+            "g.v().out().project(\"u\", \"l\", \"s\").by(\"label\").by(\"level\").by(\"id\")",
+            0,
+        ),
+        (
+            "MATCH (a)-->(b) WHERE b.level < a.label RETURN b.id",
+            "g.v().as(\"a\").out().where(P.lt(\"a\")).by(\"level\").by(\"label\")\
+             .project(\"b.id\").by(\"id\")",
+            0,
+        ),
+        (
+            "MATCH (a)-->(b) RETURN b.level AS l, count(*) AS n",
+            "g.v().out().group_count().by(\"level\")",
+            0,
+        ),
+        (
+            "MATCH (a)-->(b)-->(c) RETURN c.id",
+            "g.v().out().out().project(\"c.id\").by(\"id\")",
+            4,
+        ),
+    ];
+    let mut args = vec!["--graph".to_string(), "large".to_string()];
+    for (gql, gremlin, _) in &pairs {
+        args.push("-e".into());
+        args.push(format!("g.gql(\"{gql}\").profile(ProfileType::Memory)"));
+        args.push("-e".into());
+        args.push(format!("{gremlin}.profile(ProfileType::Memory)"));
+    }
+    let args: Vec<&str> = args.iter().map(String::as_str).collect();
+    let res = run(&args, "");
+    assert_eq!(res.code, 0, "stderr: {}", res.stderr);
+    let tables = profile_allocations(&res.stdout);
+    assert_eq!(tables.len(), 2 * pairs.len(), "stdout: {}", res.stdout);
+    for ((gql, gremlin, per_mille), measured) in pairs.iter().zip(tables.chunks(2)) {
+        let [(gql_allocs, rows), (gremlin_allocs, _)] = measured else {
+            unreachable!("chunks of two");
+        };
+        assert!(*rows > 100_000, "{gql}: {rows} rows");
+        let bound = gremlin_allocs + rows * per_mille / 1000 + 64;
+        assert!(
+            *gql_allocs <= bound,
+            "{gql}: {gql_allocs} allocator calls over {rows} rows, more than {bound} \
+             ({gremlin}: {gremlin_allocs})\n{}",
+            res.stdout
+        );
+    }
+}
+
 /// Parses a `format_bytes`-style figure (`"208B"`, `"26.00KB"`, `"26.00MB"`, optionally `~`-
 /// prefixed) into a byte count. Panics on anything else, since a test fixture producing a
 /// differently-shaped figure is itself a bug worth surfacing loudly.

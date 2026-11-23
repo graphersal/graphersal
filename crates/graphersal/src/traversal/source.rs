@@ -4732,7 +4732,8 @@ impl<'g, S: GraphStorage + 'g> crate::GraphTraversalSource<'g, S> {
                     // `count` is the logical count (sum of bulks), `kept` the traverser objects.
                     let mut count: u64 = 0;
                     let mut kept: usize = 0;
-                    for v in source.into_iter() {
+                    let inputs = source.len();
+                    for (done, v) in source.into_iter().enumerate() {
                         context.tick().with_step_frame(
                             || step.get_name(),
                             step_at,
@@ -4756,6 +4757,9 @@ impl<'g, S: GraphStorage + 'g> crate::GraphTraversalSource<'g, S> {
                                 if touch_paths {
                                     v.keep_path(mode);
                                 }
+                                // A large buffer grows by a fresh block, not by the push's
+                                // `realloc` (`capacity::reserve_out_of_place`).
+                                capacity::reserve_out_of_place(&mut result, 1, 0, done, inputs);
                                 result.push(v);
                             }
                         }
@@ -4994,7 +4998,8 @@ impl<'g, S: GraphStorage + 'g> crate::GraphTraversalSource<'g, S> {
                                 }
                             }
                         } else {
-                            for mut traverser in source.into_iter() {
+                            let inputs = source.len();
+                            for (done, mut traverser) in source.into_iter().enumerate() {
                                 // Defensive: a plan that mutates never merges (`bulk_merge` is
                                 // off), so the bulk is 1 here. Should one arrive anyway it is
                                 // applied once per unit, and a bulk of 1 costs no clone.
@@ -5015,6 +5020,15 @@ impl<'g, S: GraphStorage + 'g> crate::GraphTraversalSource<'g, S> {
                                     count = count
                                         .saturating_add(bulk::total_bulk(context, &tmp_res, name)?);
                                     if !is_count_next_step {
+                                        // A large buffer grows by a fresh block, not by the
+                                        // pushes' `realloc` (`capacity::reserve_out_of_place`).
+                                        capacity::reserve_out_of_place(
+                                            &mut result,
+                                            tmp_res.len(),
+                                            0,
+                                            done,
+                                            inputs,
+                                        );
                                         for mut item in tmp_res.into_iter() {
                                             if extends {
                                                 item.extend_path(&mut context.paths, mode)?;

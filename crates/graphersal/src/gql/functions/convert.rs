@@ -49,9 +49,11 @@ use super::super::ast::CastTarget;
 use super::super::eval::{Env, EvalError, Value, status};
 use super::super::lexer::Span;
 use super::{Arg, Conversion, Mode, reserve};
+use crate::CompactString;
 use crate::ElementProperty;
 use crate::schema::ValueType;
 use crate::value::number::N;
+use compact_str::ToCompactString;
 
 /// The deepest list / map nesting `toString` renders (recursion bound).
 const MAX_TEXT_DEPTH: usize = 1024;
@@ -495,7 +497,8 @@ fn to_string<En: Env>(
     let mut size = Counter(0);
     write_text(conversion, &arg.value, arg, &mut size, 0)?;
     reserve(env, size.0, span).map_err(Failure::Fatal)?;
-    let mut text = String::with_capacity(usize::try_from(size.0).unwrap_or(0));
+    // A `CompactString`: a short text (a number, a date) stays inline, no allocation per row.
+    let mut text = CompactString::with_capacity(usize::try_from(size.0).unwrap_or(0));
     write_text(conversion, &arg.value, arg, &mut text, 0)?;
     Ok(Value::string(text))
 }
@@ -514,7 +517,7 @@ impl Sink for Counter {
     }
 }
 
-impl Sink for String {
+impl Sink for CompactString {
     fn push(&mut self, text: &str) {
         self.push_str(text);
     }
@@ -581,7 +584,7 @@ fn write_scalar<E>(
         ElementProperty::String(text) => out.push(text),
         ElementProperty::Boolean(flag) => out.push(if *flag { "true" } else { "false" }),
         ElementProperty::Number(number) => match number.n {
-            N::NegInt(value) => out.push(&value.to_string()),
+            N::NegInt(value) => out.push(&value.to_compact_string()),
             N::Float(value) => out.push(&float_text(value.0)),
         },
         // Cypher `toString` writes the Neo4j text of a temporal (stage 3g, U6: `12:00`,
@@ -618,32 +621,32 @@ fn write_scalar<E>(
 /// The Java `Double.toString` form of a float (design F10): a plain decimal with at least one
 /// fraction digit for 1e-3 <= |x| < 1e7, else `d.dddE±n`; `NaN`, `Infinity`, `-Infinity`.
 /// The digits are the shortest that read back as `value` (as Java since JDK 19).
-fn float_text(value: f64) -> String {
+/// A `CompactString`, so the text of a number (at most 24 bytes here) allocates nothing.
+fn float_text(value: f64) -> CompactString {
     if value.is_nan() {
-        return "NaN".to_owned();
+        return CompactString::const_new("NaN");
     }
     if value.is_infinite() {
-        return if value > 0.0 { "Infinity" } else { "-Infinity" }.to_owned();
+        return CompactString::const_new(if value > 0.0 { "Infinity" } else { "-Infinity" });
     }
     if value == 0.0 {
-        return if value.is_sign_negative() {
+        return CompactString::const_new(if value.is_sign_negative() {
             "-0.0"
         } else {
             "0.0"
-        }
-        .to_owned();
+        });
     }
     if (1e-3..1e7).contains(&value.abs()) {
-        let mut text = value.to_string();
+        let mut text = value.to_compact_string();
         if !text.contains('.') {
             text.push_str(".0");
         }
         return text;
     }
-    let scientific = format!("{value:e}");
+    let scientific = compact_str::format_compact!("{value:e}");
     let (mantissa, exponent) = scientific.split_once('e').unwrap_or((&scientific, "0"));
     let point = if mantissa.contains('.') { "" } else { ".0" };
-    format!("{mantissa}{point}E{exponent}")
+    compact_str::format_compact!("{mantissa}{point}E{exponent}")
 }
 
 // ----- errors -----
@@ -669,7 +672,7 @@ fn out_of_range<E>(conversion: Conversion, arg: &Arg<E>) -> Failure {
         Value::Scalar(ElementProperty::String(text)) => quoted(text),
         Value::Scalar(ElementProperty::Number(number)) => match number.n {
             N::NegInt(value) => value.to_string(),
-            N::Float(value) => float_text(value.0),
+            N::Float(value) => float_text(value.0).into(),
         },
         other => other.kind_name().to_owned(),
     };

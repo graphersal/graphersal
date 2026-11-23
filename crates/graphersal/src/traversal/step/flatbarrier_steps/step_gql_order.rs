@@ -169,11 +169,14 @@ impl<'g, S: GraphStorage + 'g> GraphStepFlatBarrier<'g, S> for StepGqlOrder<'g, 
         context: &mut TraverserContext<'_, S>,
         source: Vec<Traverser<S>>,
     ) -> TraverserResult<Option<Vec<Traverser<S>>>> {
-        let mut keyed: Vec<(Vec<OrderValue>, Traverser<S>)> = Vec::with_capacity(source.len());
-        for traverser in source {
+        // The sort keys of every row in one flat buffer (row `i` owns the `width` keys from
+        // `i * width`), so a row allocates no key vector of its own (rule 4).
+        let width = self.keys.len();
+        let mut values: Vec<OrderValue> = Vec::with_capacity(source.len().saturating_mul(width));
+        let mut keyed: Vec<(usize, Traverser<S>)> = Vec::with_capacity(source.len());
+        for (index, traverser) in source.into_iter().enumerate() {
             context.tick()?;
             let mut answers = SubqueryAnswers::default();
-            let mut values = Vec::with_capacity(self.keys.len());
             for key in self.keys.iter() {
                 // A limit error the row kept (a refused `Env::reserve`) wins over the
                 // evaluator's fallback error (`SubqueryHost::evaluate`).
@@ -186,10 +189,16 @@ impl<'g, S: GraphStorage + 'g> GraphStepFlatBarrier<'g, S> for StepGqlOrder<'g, 
                 )?;
                 values.push(value.map_err(|error| Box::new(eval_error(&self.query, error)))?);
             }
-            keyed.push((values, traverser));
+            keyed.push((index, traverser));
         }
+        let row_keys = |row: usize| {
+            let start = row.saturating_mul(width);
+            values
+                .get(start..start.saturating_add(width))
+                .unwrap_or(&[])
+        };
         keyed.sort_by(|(a, _), (b, _)| {
-            for ((a, b), key) in a.iter().zip(b).zip(self.keys.iter()) {
+            for ((a, b), key) in row_keys(*a).iter().zip(row_keys(*b)).zip(self.keys.iter()) {
                 let order = compare_order(a, b);
                 let order = if key.descending {
                     order.reverse()

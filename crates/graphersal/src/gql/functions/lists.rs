@@ -23,8 +23,10 @@ use super::super::ast::Endpoint;
 use super::super::eval::{Env, EvalError, Truth, Value, status};
 use super::super::lexer::Span;
 use super::super::parser::Function;
+#[cfg(test)]
+use super::Arg;
 use super::{
-    Arg, any_null, function_not_implemented, integer_arg, list_bytes, reserve, wrong_kind,
+    Args, any_null, function_not_implemented, integer_arg, list_bytes, reserve, wrong_kind,
 };
 use crate::{ElementKind, ElementProperty};
 
@@ -32,10 +34,11 @@ use crate::{ElementKind, ElementProperty};
 /// [`super::Family::Lists`], and `trim` with a list first argument) on its evaluated arguments.
 pub(crate) fn call<En: Env>(
     function: Function,
-    args: Vec<Arg<En::Element>>,
+    args: impl Into<Args<En::Element>>,
     env: &En,
     span: Span,
 ) -> Result<Value<En::Element>, EvalError> {
+    let args = args.into();
     if any_null(&args) {
         return Ok(Value::Null);
     }
@@ -229,7 +232,7 @@ fn endpoint<En: Env>(env: &En, edge: &En::Element, end: Endpoint) -> Option<En::
 }
 
 /// GQL's list `trim(list, n)`: the list without its last `n` items.
-fn list_trim<E>(args: Vec<Arg<E>>) -> Result<Value<E>, EvalError> {
+fn list_trim<E>(args: Args<E>) -> Result<Value<E>, EvalError> {
     let mut args = args.into_iter();
     let (Some(list), Some(count)) = (args.next(), args.next()) else {
         return Ok(Value::Null);
@@ -251,7 +254,7 @@ fn list_trim<E>(args: Vec<Arg<E>>) -> Result<Value<E>, EvalError> {
 
 /// `range(start, end [, step])`.
 fn range<En: Env>(
-    args: Vec<Arg<En::Element>>,
+    args: Args<En::Element>,
     env: &En,
     span: Span,
 ) -> Result<Value<En::Element>, EvalError> {
@@ -307,7 +310,7 @@ fn range<En: Env>(
 /// `keys(x)` / `properties(x)` of a vertex, an edge or a map.
 fn keys_or_properties<En: Env>(
     function: Function,
-    args: Vec<Arg<En::Element>>,
+    args: Args<En::Element>,
     env: &En,
 ) -> Result<Value<En::Element>, EvalError> {
     let keys = function == Function::Keys;

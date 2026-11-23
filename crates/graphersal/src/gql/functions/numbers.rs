@@ -15,7 +15,7 @@ use std::fmt::{self, Write as _};
 use super::super::eval::{Env, EvalError, Value, float as to_f64, status};
 use super::super::lexer::Span;
 use super::super::parser::Function;
-use super::{Arg, any_null, function_not_implemented, integer_arg, number_arg, string_arg};
+use super::{Arg, Args, any_null, function_not_implemented, integer_arg, number_arg, string_arg};
 use crate::ElementProperty;
 use crate::value::number::{N, Number};
 
@@ -26,7 +26,7 @@ const A_NUMBER: &str = "a number";
 /// evaluated arguments.
 pub(crate) fn call<En: Env>(
     function: Function,
-    args: Vec<Arg<En::Element>>,
+    args: Args<En::Element>,
     env: &En,
     span: Span,
 ) -> Result<Value<En::Element>, EvalError> {

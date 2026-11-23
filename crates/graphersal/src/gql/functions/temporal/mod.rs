@@ -45,7 +45,7 @@
 use super::super::eval::{Env, EvalError, Value, status};
 use super::super::lexer::Span;
 use super::super::parser::{FUNCTIONS, Function, TemporalFunction};
-use super::Arg;
+use super::Args;
 use crate::error::GqlHelpTopic;
 use crate::value::temporal::Temporal;
 
@@ -58,7 +58,7 @@ pub(crate) mod truncate;
 /// Evaluates the temporal function `function` on its evaluated arguments.
 pub(crate) fn call<En: Env>(
     function: TemporalFunction,
-    args: Vec<Arg<En::Element>>,
+    args: Args<En::Element>,
     env: &En,
     span: Span,
 ) -> Result<Value<En::Element>, EvalError> {

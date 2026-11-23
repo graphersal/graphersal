@@ -2677,11 +2677,11 @@ fn call<En: Env>(
         Family::Core | Family::Aggregate
     ) {
         // Stage 1c (`gql/functions/`): every argument, left to right.
-        let args = args
-            .iter()
-            .map(|arg| arg.arg(env))
-            .collect::<Result<Vec<_>, _>>()?;
-        return functions::call(function, args, env, span);
+        let mut evaluated = functions::Args::with_capacity(args.len());
+        for arg in args {
+            evaluated.push(arg.arg(env)?);
+        }
+        return functions::call(function, evaluated, env, span);
     }
     let Some(arg) = args.first() else {
         return Ok(Value::Null);
@@ -2723,8 +2723,11 @@ fn call<En: Env>(
             _ => wrong("an edge"),
         },
         Function::Upper | Function::Lower => match value.as_str() {
-            Some(text) if function == Function::Upper => Ok(Value::string(text.to_uppercase())),
-            Some(text) => Ok(Value::string(text.to_lowercase())),
+            // Built as a `CompactString`: a short result stays inline (no allocation per row).
+            Some(text) if function == Function::Upper => {
+                Ok(Value::string(CompactString::from_str_to_uppercase(text)))
+            }
+            Some(text) => Ok(Value::string(CompactString::from_str_to_lowercase(text))),
             None => wrong("a string"),
         },
         Function::CharLength => match value.as_str() {
@@ -2792,10 +2795,10 @@ fn call<En: Env>(
         | Function::Relationships
         | Function::Temporal(_) => functions::call(
             function,
-            vec![Arg {
+            functions::Args::one(Arg {
                 value: value.into_owned(),
                 span: arg.span,
-            }],
+            }),
             env,
             span,
         ),

@@ -116,6 +116,10 @@ impl UndoLog {
     #[inline]
     pub(crate) fn record(&mut self, entry: UndoEntry) {
         if self.depth > 0 {
+            // A large log grows by a fresh block, never by `realloc`: the macOS allocator keeps
+            // a large block that `realloc` grew after it is freed, so every large unit would
+            // leave its log's size behind (`traversal::capacity::reserve_out_of_place`).
+            crate::traversal::capacity::reserve_out_of_place(&mut self.entries, 1, 0, 0, 0);
             self.entries.push(entry);
             self.changed = true;
         }
