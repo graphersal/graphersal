@@ -245,6 +245,7 @@ mod enabled {
                         kind: Some(RunKind::Tool),
                         text: (!text.is_empty()).then(|| text.to_string()),
                         identity,
+                        mount: self.mount_path.clone(),
                     },
                 )
                 .unwrap_or_else(|err| {

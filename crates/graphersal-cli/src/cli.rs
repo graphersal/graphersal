@@ -244,7 +244,8 @@ USAGE:
     graphersal --graph <SOURCE> --server [--port N] [--host ADDR] [--ui-dir DIR] [--ui-profile P]
                [--mcp [--mcp-read-only] [--mcp-token SECRET] [--mcp-query-tools] [--mcp-instructions FILE]
                [--mcp-max-chars N] [--mcp-config FILE]]
-               [--ai FILE] [--read-only [--workers N] [--queue N] [--queue-timeout S]
+               [--ai FILE] [--admin-runs [--admin-runs-token SECRET]]
+               [--read-only [--workers N] [--queue N] [--queue-timeout S]
                [--max-inflight-per-client N] [--drain-timeout S]] [--max-connections N]
                                          # DEV server: the playground UI over HTTP (unstable),
                                          # optionally an MCP endpoint for AI agents
@@ -480,6 +481,14 @@ OPTIONS:
                            compatible servers: Azure, OpenRouter, Groq, Ollama, LM Studio,
                            vLLM through base_url). The key is read from the environment
                            variable api_key_env names and stays in this process.
+        --admin-runs       With --server: EXPERIMENTAL run administration. GET /api/admin/runs
+                           lists every queued or running query of every client (pages, MCP
+                           agents, the AI Chat) with the beginning of its text, and POST
+                           /api/admin/runs/cancel {"id": N} kills one; the playground shows a
+                           "Runs" button. Off by default: query texts are other users' data.
+        --admin-runs-token <SECRET>
+                           With --admin-runs: every admin request must send the header
+                           "X-Graphersal-Admin-Token: <SECRET>" (the playground asks for it).
         --repl             Start the REPL even when stdin is not a terminal: lines are read
                            without editing, commands (/help, /set ...) work, no history file
                            (for scripted sessions of the shell).
@@ -1449,6 +1458,10 @@ pub struct Cli {
     pub mcp_token: Option<String>,
     /// `--mcp-query-tools`: the MCP endpoint also lists every saved query as a tool.
     pub mcp_query_tools: bool,
+    /// `--admin-runs`: the dev server answers the run administration (`/api/admin/runs`).
+    pub admin_runs: bool,
+    /// `--admin-runs-token`: the token every run administration request must carry.
+    pub admin_runs_token: Option<String>,
     /// `--mcp-max-chars`: the largest MCP tool answer in characters (`None`: the default).
     pub mcp_max_chars: Option<usize>,
     /// `--ai`: the AI Chat configuration file of the dev server.
@@ -1561,6 +1574,8 @@ impl Default for Cli {
             mcp_read_only: false,
             mcp_token: None,
             mcp_query_tools: false,
+            admin_runs: false,
+            admin_runs_token: None,
             mcp_max_chars: None,
             ai: None,
             mcp_instructions: None,
@@ -1687,6 +1702,18 @@ impl Cli {
                 "--mcp" => cli.mcp = true,
                 "--mcp-read-only" => cli.mcp_read_only = true,
                 "--mcp-query-tools" => cli.mcp_query_tools = true,
+                "--admin-runs" => cli.admin_runs = true,
+                "--admin-runs-token" => {
+                    let token = value(&mut args)?;
+                    if token.trim().is_empty() || !token.chars().all(|c| c.is_ascii_graphic()) {
+                        return Err(
+                            "Invalid --admin-runs-token: use visible ASCII characters without \
+                             spaces"
+                                .to_string(),
+                        );
+                    }
+                    cli.admin_runs_token = Some(token);
+                }
                 "--mcp-max-chars" => {
                     let raw = value(&mut args)?;
                     let n = raw
@@ -2007,6 +2034,14 @@ impl Cli {
         }
         if cli.max_connections.is_some() && !server {
             return Err("--max-connections needs --server".to_string());
+        }
+        if cli.admin_runs_token.is_some() && !cli.admin_runs {
+            return Err("--admin-runs-token needs --admin-runs".to_string());
+        }
+        if cli.admin_runs && !server {
+            return Err(
+                "--admin-runs needs --server: it lists and kills the dev server's runs".to_string(),
+            );
         }
         if let Some(arg) = ui_profile_arg {
             if !server {

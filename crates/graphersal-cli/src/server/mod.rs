@@ -624,6 +624,16 @@ pub fn run(cli: &Cli) -> i32 {
     if let Some(ai) = &ai {
         server_section.row("AI Chat", ai.banner());
     }
+    if cli.admin_runs {
+        server_section.row(
+            "run admin",
+            if cli.admin_runs_token.is_some() {
+                "on: GET /api/admin/runs, POST /api/admin/runs/cancel (token required)"
+            } else {
+                "on: GET /api/admin/runs, POST /api/admin/runs/cancel (no token)"
+            },
+        );
+    }
     if !plan.allowed().is_empty() {
         server_section.row("allowed hosts", plan.allowed().join(", "));
     }
@@ -674,6 +684,12 @@ pub fn run(cli: &Cli) -> i32 {
     let context = match cli.ui_profile.clone() {
         Some(profile) => context.ui_profile(profile),
         None => context,
+    };
+    // `--admin-runs`: the run administration (list and kill every client's runs).
+    let context = if cli.admin_runs {
+        context.admin_runs(cli.admin_runs_token.clone())
+    } else {
+        context
     }
     .build();
     // The dev server's own parts of every memory report (MCP sessions, AI Chat
