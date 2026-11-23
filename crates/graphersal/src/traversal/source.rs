@@ -9,6 +9,7 @@ use crate::graph::{
     SchemaDiff, SchemaPatch, SchemaValidation, TraversalGraph, VisualizeFormat,
 };
 use crate::traversal::bulk;
+use crate::traversal::capacity;
 use crate::traversal::context::{
     ExecutionOptions, ProfileType, TraversalStrategy, TraverserContext, tick_deadline,
 };
@@ -160,6 +161,11 @@ fn scale_fused(count: usize, factor: u64) -> TraverserResult<usize> {
         })
     })
 }
+
+/// Spare room a flat-map output buffer keeps before each input, at least (see
+/// [`capacity::reserve_out_of_place`]); it rises to the most children one input has produced so
+/// far.
+const FLAT_MAP_MIN_SPARE: usize = 64;
 
 /// Records that a step folded `total` traversers into the single count traverser of the fused
 /// `count()` after it, and returns `total`. The profile then shows the step's real output (`Out`)
@@ -4858,12 +4864,17 @@ impl<'g, S: GraphStorage + 'g> crate::GraphTraversalSource<'g, S> {
                         ];
                     } else {
                         let extends = step.extends_path();
-                        for v in source.into_iter() {
+                        // The buffer grows here, before an input, not by the step's pushes
+                        // (`capacity::reserve_out_of_place`: no `realloc` of a large block).
+                        let mut spare = FLAT_MAP_MIN_SPARE;
+                        let inputs = source.len();
+                        for (done, v) in source.into_iter().enumerate() {
                             context.tick().with_step_frame(
                                 || step.get_name(),
                                 step_at,
                                 || plan_frame(steps, level, logical_step_idx),
                             )?;
+                            capacity::reserve_out_of_place(&mut result, spare, 0, done, inputs);
                             let before = result.len();
                             step.process(context, v, &mut result).with_step_frame(
                                 || step.get_name(),
@@ -4871,6 +4882,7 @@ impl<'g, S: GraphStorage + 'g> crate::GraphTraversalSource<'g, S> {
                                 || plan_frame(steps, level, logical_step_idx),
                             )?;
                             let produced = result.len() - before;
+                            spare = spare.max(produced);
                             // One tick per produced child, counted in bulk.
                             context.tick_n(produced).with_step_frame(
                                 || step.get_name(),

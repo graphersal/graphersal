@@ -10,6 +10,7 @@ use std::sync::Arc;
 
 use crate::graph::GraphStorage;
 use crate::traversal::bulk;
+use crate::traversal::capacity;
 use crate::traversal::context::{LoopFrame, RepeatOrder};
 use crate::traversal::optimizer::path_analysis::{PathAnalysis, PathRequirement};
 use crate::*;
@@ -332,8 +333,11 @@ impl<'g, S: GraphStorage + 'g> StepRepeat<'g, S> {
             set_loops(context, frame, k);
             let next = if self.until_first || self.emit_first {
                 let mut next = Vec::with_capacity(frontier.len());
-                for traverser in frontier {
+                let (base, inputs) = (out.len(), frontier.len());
+                for (done, traverser) in frontier.into_iter().enumerate() {
                     context.tick()?;
+                    // At most one emitted per input; the pushes never grow `out` by `realloc`.
+                    capacity::reserve_out_of_place(&mut out, 1, base, done, inputs);
                     if let Some(t) = self.prefix(context, traverser, k, &mut out, stats)? {
                         next.push(t);
                     }
@@ -369,8 +373,10 @@ impl<'g, S: GraphStorage + 'g> StepRepeat<'g, S> {
             memory.charge(produced_charge);
             frontier = Vec::with_capacity(produced.len());
             let mut next_charge: u64 = 0;
-            for traverser in produced {
+            let (base, inputs) = (out.len(), produced.len());
+            for (done, traverser) in produced.into_iter().enumerate() {
                 context.tick()?;
+                capacity::reserve_out_of_place(&mut out, 1, base, done, inputs);
                 // The body may wrap the value again on every iteration (`repeat(__.fold())`),
                 // or multiply the traversers: checked with what the new frontier holds so far.
                 next_charge = context.check_loop_traverser(&traverser, next_charge)?;
@@ -431,6 +437,7 @@ impl<'g, S: GraphStorage + 'g> StepRepeat<'g, S> {
                 return Err(self.limit_exceeded(context, body));
             }
             set_loops(context, frame, k);
+            capacity::reserve_out_of_place(&mut out, 1, 0, 0, 0);
             let Some(traverser) = self.prefix(context, traverser, k, &mut out, stats)? else {
                 continue;
             };
@@ -445,6 +452,7 @@ impl<'g, S: GraphStorage + 'g> StepRepeat<'g, S> {
             for child in produced {
                 context.tick()?;
                 context.check_loop_traverser(&child, 0)?;
+                capacity::reserve_out_of_place(&mut out, 1, 0, 0, 0);
                 if let Some(c) = self.postfix(context, child, k_next, &mut out, stats)? {
                     stack.push((c, k_next));
                 }
