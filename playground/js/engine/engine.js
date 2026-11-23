@@ -830,6 +830,15 @@ export class Engine {
   async mcpStats() { throw notImplemented('mcpStats'); }
 
   /**
+   * The run administration of a server that turned it on (`info().adminRuns`): every queued or
+   * running run, whatever its client (`GET /api/admin/runs`); `token` when it needs one.
+   */
+  async adminRuns(token) { throw notImplemented('adminRuns'); }
+
+  /** The run administration's kill of a run by its id (`POST /api/admin/runs/cancel`). */
+  async adminKillRun(id, token) { throw notImplemented('adminKillRun'); }
+
+  /**
    * The storage advisor's recommendations for a spec of thresholds (`{}`: the defaults,
    * `{everything: true}`: every candidate): `{ok: true, advice: {workload_level, observed_since,
    * commit_seq, property_bytes, memory_bytes, graph_bytes, estimates, recommendations: [{id,

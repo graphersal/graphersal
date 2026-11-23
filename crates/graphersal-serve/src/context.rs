@@ -581,6 +581,22 @@ pub struct Context {
     /// The allow-list mode of the HTTP API ([`ContextBuilder::api_allow_list`]); `None`: every
     /// endpoint.
     pub(crate) allow_list: Option<Arc<AllowList>>,
+    /// The run administration ([`ContextBuilder::admin_runs`]); `None`: off.
+    pub(crate) admin_runs: Option<AdminRuns>,
+}
+
+/// The run administration of a context ([`ContextBuilder::admin_runs`]): its token, if any.
+pub(crate) struct AdminRuns {
+    pub(crate) token: Option<String>,
+}
+
+impl fmt::Debug for AdminRuns {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // Never the token itself.
+        f.debug_struct("AdminRuns")
+            .field("token", &self.token.as_ref().map(|_| "<set>"))
+            .finish()
+    }
 }
 
 /// The allow-list mode of a context's HTTP API: the saved queries `POST /api/query` runs and
@@ -629,6 +645,7 @@ pub struct ContextBuilder {
     dev: bool,
     mount_path: Option<String>,
     allow_list: Option<AllowList>,
+    admin_runs: Option<AdminRuns>,
 }
 
 impl ContextBuilder {
@@ -865,6 +882,29 @@ impl ContextBuilder {
         self
     }
 
+    /// The **run administration** (issue #32, EXPERIMENTAL): `GET /api/admin/runs` lists every
+    /// queued or running run of this context's run registry ([`Runs::list`]) whatever its
+    /// client (page, MCP session, AI Chat, a host's), with its id, client key, kind, state,
+    /// start time, duration, the first [`crate::RUN_TEXT_HEAD_CHARS`] characters of its query
+    /// text, identity and mount; `POST /api/admin/runs/cancel` `{"id": n}` cancels one by its
+    /// id ([`Runs::cancel_run`]), separate from a client's own `POST /api/cancel`. Only the
+    /// runs registered under this context's mount path ([`Self::mount_path`]) are listed and
+    /// cancelled, so a host that shares one registry among several mounted graphs offers each
+    /// graph's runs at its own mount; the host's own cross-graph view calls [`Runs::list`].
+    ///
+    /// `token`: when set, every admin request must carry it in the header
+    /// `X-Graphersal-Admin-Token` (else `403`); `None` (or empty): no token, the request
+    /// filter and the [`HostCheck`] are the only gates. `GET /api/info` then answers
+    /// `adminRuns: {"tokenRequired": bool}`. Default: off, the field is absent and both
+    /// endpoints answer `404` (the query texts are other clients' data); the allow-list mode
+    /// refuses them (`403`) like every other endpoint.
+    pub fn admin_runs(mut self, token: Option<String>) -> Self {
+        self.admin_runs = Some(AdminRuns {
+            token: token.filter(|token| !token.is_empty()),
+        });
+        self
+    }
+
     /// The context.
     pub fn build(self) -> Arc<Context> {
         let read_only = Arc::new(AtomicBool::new(self.read_only));
@@ -905,6 +945,7 @@ impl ContextBuilder {
             mcp_session_route: self.mcp_session_route,
             hooks: self.hooks.unwrap_or_else(|| Arc::new(NoHooks)),
             allow_list: self.allow_list.map(Arc::new),
+            admin_runs: self.admin_runs,
         })
     }
 }
@@ -940,7 +981,13 @@ impl Context {
             dev: false,
             mount_path: None,
             allow_list: None,
+            admin_runs: None,
         }
+    }
+
+    /// Whether the run administration is on ([`ContextBuilder::admin_runs`]).
+    pub fn admin_runs_enabled(&self) -> bool {
+        self.admin_runs.is_some()
     }
 
     /// The URL prefix the host mounts this context under ([`ContextBuilder::mount_path`],
@@ -1117,6 +1164,7 @@ impl Context {
                     kind: Some(kind),
                     text: text.map(str::to_string),
                     identity,
+                    mount: self.mount_path.clone(),
                 },
             )
             .map_err(|err| HttpError(500, err.to_string()))
@@ -1150,7 +1198,11 @@ impl Context {
             .read_only_toggle
             .clone()
             .filter(|toggle| toggle.is_on());
+        // The runs this thread registered for this job: running from its start (the run
+        // administration's state).
+        let starting = runs::pending_runs();
         let job: Job = Box::new(move |session| {
+            runs::mark_running(&starting);
             if let Some(toggle) = toggle
                 && let Err(err) = toggle.ensure_registered(session)
             {

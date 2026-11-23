@@ -974,6 +974,94 @@ fn a_stop_reaches_only_the_pages_own_runs_also_while_they_wait() {
     assert_eq!(refused.status, 400, "{}", refused.body);
 }
 
+/// Issue #32: `--admin-runs [--admin-runs-token]` lists every client's runs and kills one by id;
+/// off without the flag (404); the token is checked; the flags need `--server` / `--admin-runs`.
+#[test]
+fn the_run_administration_lists_and_kills_other_clients_runs() {
+    let ui = ui_dir("admin-runs");
+    let ui_arg = ui.to_str().unwrap();
+    // Off by default.
+    let off = start(&["--graph", "modern", "--ui-dir", ui_arg]);
+    assert!(get(off.port, "/api/info").json().get("adminRuns").is_none());
+    let refused = get(off.port, "/api/admin/runs");
+    assert_eq!(refused.status, 404, "{}", refused.body);
+    assert!(refused.body.contains("--admin-runs"), "{}", refused.body);
+    drop(off);
+
+    let server = start(&[
+        "--graph",
+        "modern",
+        "--ui-dir",
+        ui_arg,
+        "--admin-runs",
+        "--admin-runs-token",
+        "s3cret",
+    ]);
+    let port = server.port;
+    assert_eq!(
+        get(port, "/api/info").json()["adminRuns"],
+        serde_json::json!({ "tokenRequired": true })
+    );
+    assert_eq!(get(port, "/api/admin/runs").status, 403);
+    let token = "X-Graphersal-Admin-Token: s3cret";
+    let endless = "let n = 0; loop { n += 1; }";
+    let a = std::thread::spawn(move || page_run(port, "a", endless, Some("r1")));
+    // The admin page sees page a's run once it runs.
+    let deadline = std::time::Instant::now() + Duration::from_secs(20);
+    let run = loop {
+        let listed = request(port, "GET", "/api/admin/runs", None, &[token]);
+        assert_eq!(listed.status, 200, "{}", listed.body);
+        let runs = listed.json()["runs"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
+        if let Some(run) = runs.iter().find(|run| run["state"] == "running") {
+            break run.clone();
+        }
+        assert!(std::time::Instant::now() < deadline, "the run never showed");
+        std::thread::sleep(Duration::from_millis(20));
+    };
+    assert_eq!(run["client"], "page:a");
+    assert_eq!(run["alias"], "r1");
+    assert_eq!(run["kind"], "query");
+    assert_eq!(run["text"], endless);
+    let kill = serde_json::json!({ "id": run["id"] }).to_string();
+    let no_token = request(port, "POST", "/api/admin/runs/cancel", Some(&kill), &[JSON]);
+    assert_eq!(no_token.status, 403, "{}", no_token.body);
+    let killed = request(
+        port,
+        "POST",
+        "/api/admin/runs/cancel",
+        Some(&kill),
+        &[JSON, token, "X-Graphersal-Client: admin"],
+    );
+    assert_eq!(killed.status, 200, "{}", killed.body);
+    assert_eq!(killed.json()["cancelled"], true);
+    let a = a.join().unwrap();
+    assert_eq!(a["ok"], false, "{a}");
+    assert!(a.to_string().contains("cancelled"), "{a}");
+    drop(server);
+
+    for (args, needs) in [
+        (
+            vec!["--admin-runs", "-e", "1"],
+            "--admin-runs needs --server",
+        ),
+        (
+            vec!["--admin-runs-token", "x", "-e", "1"],
+            "--admin-runs-token needs --admin-runs",
+        ),
+    ] {
+        let out = Command::new(env!("CARGO_BIN_EXE_graphersal"))
+            .args(&args)
+            .output()
+            .expect("graphersal runs");
+        assert_eq!(out.status.code(), Some(2), "{args:?}");
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(stderr.contains(needs), "{stderr}");
+    }
+}
+
 /// An MCP client's `notifications/cancelled` cancels its own request of that id, never a
 /// request of the same id of another MCP session.
 #[test]
