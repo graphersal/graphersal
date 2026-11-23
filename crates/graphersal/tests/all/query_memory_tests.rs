@@ -320,3 +320,127 @@ fn root(err: &TraverserError) -> &TraverserError {
     }
     current
 }
+
+/// Environment variable that makes [`footprint_child`] run (set on the child only).
+const FOOTPRINT_CHILD: &str = "GRAPHERSAL_FOOTPRINT_CHILD";
+
+/// The process's physical footprint (what Activity Monitor shows as Memory; it also counts the
+/// blocks the allocator keeps for itself), `None` where the test has no such figure.
+#[cfg(target_os = "macos")]
+fn physical_footprint() -> Option<u64> {
+    let mut info: libc::rusage_info_v2 = unsafe { std::mem::zeroed() };
+    // SAFETY: `info` is a properly sized `rusage_info_v2` for the `RUSAGE_INFO_V2` flavor.
+    let rc = unsafe {
+        libc::proc_pid_rusage(
+            std::process::id() as libc::c_int,
+            libc::RUSAGE_INFO_V2,
+            (&raw mut info).cast(),
+        )
+    };
+    (rc == 0).then_some(info.ri_phys_footprint)
+}
+
+#[cfg(not(target_os = "macos"))]
+fn physical_footprint() -> Option<u64> {
+    None
+}
+
+/// Helper of [`repeated_runs_keep_the_process_footprint_flat`], alone in its own process so no
+/// parallel test moves the figure: builds a graph whose two-hop expansion fills step buffers of
+/// several tens of MB, runs the query once, then `RUNS` more times, and fails when the later runs
+/// together raised the footprint by half of what the first run raised it or more. Before the
+/// fix every run kept about the size of its grown buffers (the macOS allocator never reused a
+/// large block that `realloc` had grown in place), so each later run added about as much as
+/// the first. Does nothing without the variable or a footprint figure.
+#[test]
+#[ignore = "helper: run as a child process by repeated_runs_keep_the_process_footprint_flat()"]
+fn footprint_child() {
+    if std::env::var_os(FOOTPRINT_CHILD).is_none() {
+        return;
+    }
+    let Some(before_build) = physical_footprint() else {
+        return;
+    };
+    const VERTICES: usize = 25_000;
+    const DEGREE: usize = 4;
+    const RUNS: usize = 5;
+    let mut graph = TraversalGraph::new();
+    let handles: Vec<_> = (0..VERTICES)
+        .map(|i| {
+            let props = PropertyMap::from([("k", ElementProperty::from(i as i64 % 7))]);
+            graph
+                .insert_vertex(None, vec!["item".into()], props)
+                .expect("vertex")
+        })
+        .collect();
+    for (i, &from) in handles.iter().enumerate() {
+        for k in 0..DEGREE {
+            let to = handles[(i * 7919 + k * 104_729 + 1) % VERTICES];
+            graph
+                .insert_edge(None, Some("next".into()), from, to, PropertyMap::default())
+                .expect("edge");
+        }
+    }
+    graph.shrink_to_fit();
+    let run = || {
+        GraphTraversalSource::new(&graph)
+            .v(None)
+            .out(None)
+            .out(None)
+            .values("k")
+            .sum()
+            .next()
+            .expect("the query runs")
+    };
+    let start = physical_footprint().expect("footprint");
+    let expected = run();
+    let after_first = physical_footprint().expect("footprint");
+    for _ in 0..RUNS {
+        assert_eq!(run(), expected);
+    }
+    let after_all = physical_footprint().expect("footprint");
+    let first = after_first.saturating_sub(start);
+    let later = after_all.saturating_sub(after_first);
+    eprintln!(
+        "graph {} MB, first run +{} MB, {RUNS} later runs +{} MB",
+        start.saturating_sub(before_build) >> 20,
+        first >> 20,
+        later >> 20
+    );
+    assert!(
+        later < first / 2,
+        "{RUNS} later runs raised the footprint by {later} bytes, the first by {first}"
+    );
+}
+
+/// Executing the same query again keeps the process memory flat: the engine's step buffers grow
+/// without `realloc` once they are large (`traversal/source.rs` `reserve_out_of_place`), so the
+/// allocator reuses what a run freed. Measured in a child process (the figure is process-wide).
+#[test]
+fn repeated_runs_keep_the_process_footprint_flat() {
+    if crate::ci_support::skip_on_ci("memory") || physical_footprint().is_none() {
+        return;
+    }
+    let exe = std::env::current_exe().expect("test binary path");
+    let output = std::process::Command::new(exe)
+        .args([
+            "--exact",
+            "query_memory_tests::footprint_child",
+            "--ignored",
+            "--test-threads=1",
+            "--nocapture",
+        ])
+        .env(FOOTPRINT_CHILD, "1")
+        .output()
+        .expect("run the child");
+    let report = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success(),
+        "child failed:\n{report}\n{}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    assert!(
+        report.contains("later runs"),
+        "the child measured nothing:\n{report}"
+    );
+}
