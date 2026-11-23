@@ -35,6 +35,7 @@
 import { Engine } from './engine.js';
 import { newClientId } from '../change-feed.js';
 import { packGraphView } from '../graph-data.js';
+import { adminRunsOf } from '../admin-runs.js';
 
 /**
  * The protocol ids of the playground HTTP API this engine speaks: a Graphersal host names its
@@ -101,6 +102,15 @@ export function hostHeaders(config = globalThis[HOST_CONFIG_GLOBAL]) {
     }
   }
   return { headers: Object.freeze(headers), problems };
+}
+
+/** The header that carries the run administration's token (graphersal-serve `api/admin.rs`). */
+export const ADMIN_TOKEN_HEADER = 'X-Graphersal-Admin-Token';
+
+/** The run administration's token as request headers (none without one). */
+function adminTokenHeader(token) {
+  const text = typeof token === 'string' ? token.trim() : '';
+  return text ? { [ADMIN_TOKEN_HEADER]: text } : {};
 }
 
 /** The host headers of the page, read once; problems warned by header name only. */
@@ -197,9 +207,12 @@ export class HttpEngine extends Engine {
     return { ...this.hostHeaders, ...own, 'X-Graphersal-Client': this.clientId };
   }
 
-  /** One request; resolves to the parsed JSON answer, rejects with the server's error text. */
-  async request(method, path, body) {
-    const init = { method, cache: 'no-store', headers: this.headers({ Accept: 'application/json' }) };
+  /**
+   * One request; resolves to the parsed JSON answer, rejects with the server's error text.
+   * `own`: headers of this request alone (the run administration's token).
+   */
+  async request(method, path, body, own = {}) {
+    const init = { method, cache: 'no-store', headers: this.headers({ ...own, Accept: 'application/json' }) };
     if (method !== 'GET') {
       init.headers['Content-Type'] = 'application/json';
       init.body = body === undefined ? '' : body;
@@ -260,6 +273,9 @@ export class HttpEngine extends Engine {
       // 'allow-list' (`ContextBuilder::api_allow_list`): the server answers only `info`,
       // `changes` and `query` (runSavedQuery) of its selected saved queries; else 'full'.
       apiMode: i.apiMode === 'allow-list' ? 'allow-list' : 'full',
+      // The run administration (`--admin-runs`, `ContextBuilder::admin_runs`): {tokenRequired},
+      // or null while the host has it off (js/admin-runs.js).
+      adminRuns: adminRunsOf(i),
       // The URL prefix a multi-database server serves this graph under (`/db/<name>`), or null
       // at the root (the dev server): it namespaces the page's storage (js/util.js).
       mountPath: typeof i.mountPath === 'string' && i.mountPath ? i.mountPath : null,
@@ -285,6 +301,21 @@ export class HttpEngine extends Engine {
   /** The MCP endpoint's usage statistics (`--mcp`; memory only, since the server started). */
   async mcpStats() {
     return this.request('GET', 'mcp/stats');
+  }
+
+  /**
+   * The run administration (only when `info().adminRuns` is set: the host turned it on): every
+   * queued or running run of the served graph, whatever its client: `{runs: [{id, client,
+   * alias, kind, state, cancelled, startedAtMs, durationMs, text, identity, mount}],
+   * textHeadChars}`. `token`: the administration's token when `adminRuns.tokenRequired`.
+   */
+  async adminRuns(token = '') {
+    return this.request('GET', 'admin/runs', undefined, adminTokenHeader(token));
+  }
+
+  /** The run administration's kill of the run `id` (any client's): `{cancelled}`. */
+  async adminKillRun(id, token = '') {
+    return this.request('POST', 'admin/runs/cancel', JSON.stringify({ id }), adminTokenHeader(token));
   }
 
   /** AI Chat: a new conversation owned by this page; resolves to `{id}`. */

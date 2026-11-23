@@ -35,12 +35,15 @@ use crate::runs::RunKind;
 use crate::ui::Ui;
 use crate::{job_workers, mcp, runs};
 
+mod admin;
 mod layout;
 mod store;
 
 #[cfg(feature = "mcp")]
 pub(crate) use store::current_view;
 
+#[cfg(test)]
+mod admin_tests;
 #[cfg(test)]
 mod allow_list_tests;
 #[cfg(test)]
@@ -156,6 +159,22 @@ fn route(context: &Arc<Context>, request: &mut Request) -> Result<Response, Http
             }
             .map_err(|err| HttpError(500, err.to_string()))?;
             Ok(Response::json(200, &json!({ "cancelled": cancelled })))
+        }
+        // The run administration (`ContextBuilder::admin_runs`, off: 404): every client's runs.
+        (Method::Get, "admin/runs") => {
+            admin::check(context, request)?;
+            Ok(Response::json(200, &admin::list(context)?))
+        }
+        (Method::Post, "admin/runs/cancel") => {
+            admin::check(context, request)?;
+            Ok(Response::json(200, &admin::cancel(context, request)?))
+        }
+        (_, "admin/runs" | "admin/runs/cancel") => {
+            admin::check(context, request)?;
+            Err(HttpError(
+                405,
+                format!("method {method} is not allowed on {path}"),
+            ))
         }
         // Scheduled jobs belong to a Store, which the read-only serving mode does not open.
         (
@@ -855,6 +874,11 @@ fn info_fields(context: &Context) -> Value {
     if let Some(mount) = &context.mount_path {
         info["mountPath"] = json!(mount);
         info["openapi"] = json!(format!("{mount}/openapi.json"));
+    }
+    // The run administration (`ContextBuilder::admin_runs`): the playground shows its panel;
+    // absent while it is off, so the answer of a host that does not turn it on is unchanged.
+    if let Some(admin) = &context.admin_runs {
+        info["adminRuns"] = json!({ "tokenRequired": admin.token.is_some() });
     }
     context.hooks.add_info(context, &mut info);
     info

@@ -16,14 +16,25 @@
 //!
 //! Stopping another client's runs is an administrative act and not part of this module's
 //! client API. **Extension point "run observer + cancel handle"** ([`RunObserver`], default:
-//! none): a host that wants to see every run (an administrative list, idle tracking, live
-//! progress) gives the registry an observer ([`Runs::with_observer`]); it is told of every run's
-//! start ([`RunInfo`]: client, kind, the head of the query text, identity, start time) with a
-//! [`RunHandle`] that cancels that run, and of its end with its duration. This crate only calls
-//! the observer: it offers no endpoint that lists or stops runs.
+//! none): a host that wants to see every run (idle tracking, live progress, its own list) gives
+//! the registry an observer ([`Runs::with_observer`]); it is told of every run's start
+//! ([`RunInfo`]: client, kind, the head of the query text, identity, mount, start time) with a
+//! [`RunHandle`] that cancels that run, and of its end with its duration.
+//!
+//! **Run administration** (issue #32, off by default): [`Runs::list`] answers every registered
+//! run, queued or running ([`RunEntry`], [`RunState`]), whatever its client, and
+//! [`Runs::cancel_run`] cancels one by the registry's id. A context serves both over HTTP only
+//! when its host turns it on (`ContextBuilder::admin_runs`: `GET /api/admin/runs`, `POST
+//! /api/admin/runs/cancel`), since the query texts are other clients' data.
+//!
+//! A run counts as running once the first session job queued by the thread that registered it
+//! has started (`Context::call` marks the runs of its thread; [`pending_runs`]); before, it is
+//! queued.
 
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::fmt;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant, SystemTime};
 
@@ -54,6 +65,40 @@ pub enum RunKind {
     Other,
 }
 
+impl RunKind {
+    /// The kind's name in the HTTP API: `query`, `layout`, `tool`, `other`.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Query => "query",
+            Self::Layout => "layout",
+            Self::Tool => "tool",
+            Self::Other => "other",
+        }
+    }
+}
+
+/// Whether a listed run waits for its session job or runs ([`RunEntry::state`]).
+///
+/// `#[non_exhaustive]`: further states may be added.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum RunState {
+    /// Registered; its job waits in the queue (of the session thread or the host's).
+    Queued,
+    /// Its first session job has started.
+    Running,
+}
+
+impl RunState {
+    /// The state's name in the HTTP API: `queued`, `running`.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Queued => "queued",
+            Self::Running => "running",
+        }
+    }
+}
+
 /// One run as a [`RunObserver`] sees it.
 #[derive(Debug, Clone)]
 pub struct RunInfo {
@@ -63,6 +108,7 @@ pub struct RunInfo {
     kind: RunKind,
     text: Option<String>,
     identity: Option<String>,
+    mount: Option<String>,
     started_at: SystemTime,
 }
 
@@ -99,9 +145,48 @@ impl RunInfo {
         self.identity.as_deref()
     }
 
+    /// The mount path of the context that registered the run (`ContextBuilder::mount_path`,
+    /// `/db/acme`), or `None`: a context at the server's root, or a run registered through
+    /// [`Runs::start`] / [`Runs::register`].
+    pub fn mount(&self) -> Option<&str> {
+        self.mount.as_deref()
+    }
+
     /// When the run was registered (before its job was queued).
     pub fn started_at(&self) -> SystemTime {
         self.started_at
+    }
+}
+
+/// One run as [`Runs::list`] answers it: what it is, whether it runs, how long since it was
+/// registered.
+#[derive(Debug, Clone)]
+pub struct RunEntry {
+    info: RunInfo,
+    state: RunState,
+    duration: Duration,
+    cancelled: bool,
+}
+
+impl RunEntry {
+    /// What the run is (id, client, kind, query text head, identity, mount, start time).
+    pub fn info(&self) -> &RunInfo {
+        &self.info
+    }
+
+    /// Whether the run waits for its job or runs.
+    pub fn state(&self) -> RunState {
+        self.state
+    }
+
+    /// The time since the run was registered (waiting included).
+    pub fn duration(&self) -> Duration {
+        self.duration
+    }
+
+    /// Whether the run was cancelled (it ends at its next check, or when it starts).
+    pub fn is_cancelled(&self) -> bool {
+        self.cancelled
     }
 }
 
@@ -157,17 +242,47 @@ pub(crate) struct RunDetails {
     pub(crate) kind: Option<RunKind>,
     pub(crate) text: Option<String>,
     pub(crate) identity: Option<String>,
+    pub(crate) mount: Option<String>,
 }
 
 /// One registered run.
 struct Run {
-    /// The client's key (`Client::pool_key`): `page:<tab>`, `mcp:<session>`, `ai:<id>`.
-    client: String,
-    /// The client's own id of the run, if it sent one.
-    alias: Option<String>,
+    /// What the run is (also what the observer was told); `info.client` is the client's key
+    /// (`Client::pool_key`): `page:<tab>`, `mcp:<session>`, `ai:<id>`.
+    info: RunInfo,
     token: CancelToken,
-    /// What the observer was told, and when the run started (only with an observer).
-    observed: Option<(RunInfo, Instant)>,
+    /// When the run was registered.
+    started: Instant,
+    /// Set when its first session job starts ([`pending_runs`]).
+    running: Arc<AtomicBool>,
+}
+
+thread_local! {
+    /// The running flags of the runs this thread registered and has not ended yet: the next
+    /// session job this thread queues marks them running when it starts ([`pending_runs`]).
+    static PENDING: RefCell<Vec<Arc<AtomicBool>>> = const { RefCell::new(Vec::new()) };
+}
+
+/// The running flags of the runs the current thread registered that are not yet running: a
+/// job queued now (`Context::call`) sets them when it starts. A flag whose run ended on
+/// another thread is dropped here (only this list still holds it).
+pub(crate) fn pending_runs() -> Vec<Arc<AtomicBool>> {
+    PENDING.with(|pending| {
+        let mut pending = pending.borrow_mut();
+        pending.retain(|flag| Arc::strong_count(flag) > 1);
+        pending
+            .iter()
+            .filter(|flag| !flag.load(Ordering::Relaxed))
+            .cloned()
+            .collect()
+    })
+}
+
+/// Marks runs of [`pending_runs`] running (on the thread that runs their job).
+pub(crate) fn mark_running(flags: &[Arc<AtomicBool>]) {
+    for flag in flags {
+        flag.store(true, Ordering::Relaxed);
+    }
 }
 
 #[derive(Default)]
@@ -237,33 +352,35 @@ impl Runs {
         let mut state = self.lock();
         state.next += 1;
         let id = state.next;
-        let observed = self.observer.as_ref().map(|_| {
-            (
-                RunInfo {
-                    id,
-                    client: client.to_string(),
-                    alias: alias.map(str::to_string),
-                    kind: details.kind.unwrap_or(RunKind::Other),
-                    text: details
-                        .text
-                        .map(|text| text.chars().take(RUN_TEXT_HEAD_CHARS).collect()),
-                    identity: details.identity,
-                    started_at: SystemTime::now(),
-                },
-                Instant::now(),
-            )
-        });
-        let told = observed.as_ref().map(|(info, _)| info.clone());
+        let info = RunInfo {
+            id,
+            client: client.to_string(),
+            alias: alias.map(str::to_string),
+            kind: details.kind.unwrap_or(RunKind::Other),
+            text: details
+                .text
+                .map(|text| text.chars().take(RUN_TEXT_HEAD_CHARS).collect()),
+            identity: details.identity,
+            mount: details.mount,
+            started_at: SystemTime::now(),
+        };
+        let told = self.observer.as_ref().map(|_| info.clone());
+        let running = Arc::new(AtomicBool::new(false));
         state.runs.insert(
             id,
             Run {
-                client: client.to_string(),
-                alias: alias.map(str::to_string),
+                info,
                 token: token.clone(),
-                observed,
+                started: Instant::now(),
+                running: running.clone(),
             },
         );
         drop(state);
+        PENDING.with(|pending| {
+            let mut pending = pending.borrow_mut();
+            pending.retain(|flag| Arc::strong_count(flag) > 1);
+            pending.push(running);
+        });
         if let (Some(observer), Some(info)) = (&self.observer, told) {
             observer.run_started(&info, RunHandle { token });
         }
@@ -300,30 +417,67 @@ impl Runs {
     /// The run `id` ended.
     pub fn end(&self, id: u64) -> Result<(), ServeError> {
         let ended = self.lock().runs.remove(&id);
-        if let (
-            Some(observer),
-            Some(Run {
-                observed: Some((info, started)),
-                ..
-            }),
-        ) = (&self.observer, ended)
-        {
-            observer.run_ended(&info, started.elapsed());
+        if let Some(run) = ended {
+            // Usually ended on the thread that registered it: forget its flag there.
+            PENDING.with(|pending| {
+                pending
+                    .borrow_mut()
+                    .retain(|flag| !Arc::ptr_eq(flag, &run.running));
+            });
+            if let Some(observer) = &self.observer {
+                observer.run_ended(&run.info, run.started.elapsed());
+            }
         }
         Ok(())
     }
 
+    /// Every registered run, queued or running, whatever its client, in the order they were
+    /// registered: the **run administration**'s list (issue #32). The query texts in it are
+    /// other clients' data: a host answers it only to its administrator (a context serves it
+    /// only with `ContextBuilder::admin_runs`).
+    pub fn list(&self) -> Result<Vec<RunEntry>, ServeError> {
+        let state = self.lock();
+        let mut runs: Vec<RunEntry> = state
+            .runs
+            .values()
+            .map(|run| RunEntry {
+                info: run.info.clone(),
+                state: if run.running.load(Ordering::Relaxed) {
+                    RunState::Running
+                } else {
+                    RunState::Queued
+                },
+                duration: run.started.elapsed(),
+                cancelled: run.token.is_cancelled(),
+            })
+            .collect();
+        drop(state);
+        runs.sort_by_key(|run| run.info.id);
+        Ok(runs)
+    }
+
+    /// Cancels the run `id` ([`RunInfo::id`]) whatever its client: the **run
+    /// administration**'s kill (issue #32), separate from the client's own cancel. Whether
+    /// the run was registered (an ended run is not, and nothing happens).
+    pub fn cancel_run(&self, id: u64) -> Result<bool, ServeError> {
+        Ok(self.cancel_where(|run| run.info.id == id) > 0)
+    }
+
+    /// [`Self::cancel_run`] of a run registered under `mount` only (a context's own runs).
+    pub(crate) fn cancel_run_in(&self, id: u64, mount: Option<&str>) -> bool {
+        self.cancel_where(|run| run.info.id == id && run.info.mount.as_deref() == mount) > 0
+    }
+
     /// Cancels the runs of `client`; whether there was one.
     pub fn cancel_client(&self, client: &str) -> Result<bool, ServeError> {
-        Ok(self.cancel_where(|run| run.client == client) > 0)
+        Ok(self.cancel_where(|run| run.info.client == client) > 0)
     }
 
     /// Cancels the runs of `client` with its own id `alias`; whether there was one.
     pub fn cancel_alias(&self, client: &str, alias: &str) -> Result<bool, ServeError> {
-        Ok(
-            self.cancel_where(|run| run.client == client && run.alias.as_deref() == Some(alias))
-                > 0,
-        )
+        Ok(self.cancel_where(|run| {
+            run.info.client == client && run.info.alias.as_deref() == Some(alias)
+        }) > 0)
     }
 
     /// Cancels every run (the graceful stop); how many there were.
@@ -392,5 +546,67 @@ mod tests {
         assert!(!runs.cancel_alias("page:a", "1").unwrap());
         assert_eq!(runs.cancel_all().unwrap(), 0);
         assert!(!token.is_cancelled());
+    }
+
+    #[test]
+    fn the_list_answers_every_client_and_the_state_and_cancel_by_id() {
+        let runs = Runs::default();
+        let a = CancelToken::new();
+        let b = CancelToken::new();
+        let _a = runs
+            .register_with(
+                "page:a",
+                Some("1"),
+                a.clone(),
+                RunDetails {
+                    kind: Some(RunKind::Query),
+                    text: Some("é".repeat(RUN_TEXT_HEAD_CHARS + 5)),
+                    ..RunDetails::default()
+                },
+            )
+            .unwrap();
+        // The job this thread queues next marks the run running when it starts.
+        let pending = pending_runs();
+        assert_eq!(pending.len(), 1);
+        let _b = runs.register("mcp:s", None, b.clone()).unwrap();
+        let listed = runs.list().unwrap();
+        assert_eq!(listed.len(), 2);
+        assert_eq!(listed[0].info().client(), "page:a");
+        assert_eq!(listed[0].info().kind(), RunKind::Query);
+        assert_eq!(
+            listed[0].info().text().unwrap().chars().count(),
+            RUN_TEXT_HEAD_CHARS
+        );
+        assert_eq!(listed[0].state(), RunState::Queued);
+        assert_eq!(listed[1].info().kind(), RunKind::Other);
+        assert_eq!(listed[1].info().mount(), None);
+        mark_running(&pending);
+        assert_eq!(runs.list().unwrap()[0].state(), RunState::Running);
+        assert_eq!(runs.list().unwrap()[1].state(), RunState::Queued);
+        // Already running: no longer pending; the other one still is.
+        assert_eq!(pending_runs().len(), 1);
+
+        let id_b = listed[1].info().id();
+        assert!(runs.cancel_run(id_b).unwrap());
+        assert!(b.is_cancelled() && !a.is_cancelled());
+        assert!(runs.list().unwrap()[1].is_cancelled());
+        assert!(!runs.cancel_run(999).unwrap());
+    }
+
+    #[test]
+    fn an_ended_run_leaves_the_list_and_the_pending_flags() {
+        let runs = Runs::default();
+        let id = runs.start("page:a", None, CancelToken::new()).unwrap();
+        assert_eq!(pending_runs().len(), 1);
+        runs.end(id).unwrap();
+        assert!(runs.list().unwrap().is_empty());
+        assert!(pending_runs().is_empty());
+        assert!(!runs.cancel_run(id).unwrap());
+        // Ended on another thread: the flag is dropped from this thread's list on its next read.
+        let id = runs.start("page:a", None, CancelToken::new()).unwrap();
+        std::thread::scope(|scope| {
+            scope.spawn(|| runs.end(id).unwrap());
+        });
+        assert!(pending_runs().is_empty());
     }
 }

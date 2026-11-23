@@ -69,7 +69,7 @@
           "Server"
         ],
         "summary": "Server info",
-        "description": "What the page needs to switch to this server: `protocol` (`graphersal/1` in every answer of every Graphersal host: the playground recognizes a host by it, never by `server`; a breaking change of this API bumps the number), `server` (the host's name: `graphersal-dev` for the CLI's dev server, `ContextBuilder::server_name`), `dev` (`true` for a development server such as the CLI's: the playground shows its DEV badge; `ContextBuilder::dev`), `version`, `saveable`, `source`, `presets` (the limits in force), `mcp` (`{endpoint, readOnly, client}` or null), `ai` (`{provider, model, readOnly, sendsDataTo, maxToolCallsPerTurn}` or null; never the key), `damageFound`, `embedders`, `readOnly` (`--read-only`, a Store the process may not write, or the host's runtime read-only toggle on (`ContextBuilder::runtime_read_only`, EXPERIMENTAL; then modifying requests answer the one refusal `the graph is served read-only: writes are refused`, the writes that are no commit with 409): every write is refused), `uiProfile` (only when the host set one: `--ui-profile`, `ContextBuilder::ui_profile`; a built-in profile name or a profile object, EXPERIMENTAL), `apiMode` (only in allow-list mode: `\"allow-list\"`, EXPERIMENTAL; `ContextBuilder::api_allow_list`: the server then answers only `GET /api/info`, `GET /api/changes` and `POST /api/query` for its selected saved queries, every other `/api/` endpoint and `/mcp` answer 403), `mountPath` (only when the host serves this graph under a URL prefix, `ContextBuilder::mount_path`, EXPERIMENTAL: the prefix such as `/db/acme`, no trailing `/`; then `openapi` is `<mountPath>/openapi.json` and `mcp.endpoint` `<mountPath>/mcp`; the host strips the prefix before the server routes, so every path of this description is relative to it). Answered without the session.",
+        "description": "What the page needs to switch to this server: `protocol` (`graphersal/1` in every answer of every Graphersal host: the playground recognizes a host by it, never by `server`; a breaking change of this API bumps the number), `server` (the host's name: `graphersal-dev` for the CLI's dev server, `ContextBuilder::server_name`), `dev` (`true` for a development server such as the CLI's: the playground shows its DEV badge; `ContextBuilder::dev`), `version`, `saveable`, `source`, `presets` (the limits in force), `mcp` (`{endpoint, readOnly, client}` or null), `ai` (`{provider, model, readOnly, sendsDataTo, maxToolCallsPerTurn}` or null; never the key), `damageFound`, `embedders`, `readOnly` (`--read-only`, a Store the process may not write, or the host's runtime read-only toggle on (`ContextBuilder::runtime_read_only`, EXPERIMENTAL; then modifying requests answer the one refusal `the graph is served read-only: writes are refused`, the writes that are no commit with 409): every write is refused), `uiProfile` (only when the host set one: `--ui-profile`, `ContextBuilder::ui_profile`; a built-in profile name or a profile object, EXPERIMENTAL), `adminRuns` (only when the host turned the run administration on: `{tokenRequired}`, EXPERIMENTAL; `--admin-runs`, `ContextBuilder::admin_runs`: `GET /api/admin/runs`, `POST /api/admin/runs/cancel`), `apiMode` (only in allow-list mode: `\"allow-list\"`, EXPERIMENTAL; `ContextBuilder::api_allow_list`: the server then answers only `GET /api/info`, `GET /api/changes` and `POST /api/query` for its selected saved queries, every other `/api/` endpoint and `/mcp` answer 403), `mountPath` (only when the host serves this graph under a URL prefix, `ContextBuilder::mount_path`, EXPERIMENTAL: the prefix such as `/db/acme`, no trailing `/`; then `openapi` is `<mountPath>/openapi.json` and `mcp.endpoint` `<mountPath>/mcp`; the host strips the prefix before the server routes, so every path of this description is relative to it). Answered without the session.",
         "operationId": "getApiInfo",
         "responses": {
           "200": {
@@ -158,6 +158,235 @@
             "content": {
               "application/json": {
                 "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/admin/runs": {
+      "get": {
+        "tags": [
+          "Server"
+        ],
+        "summary": "Run administration: every client's runs (off by default)",
+        "description": "EXPERIMENTAL, off by default (`graphersal --server --admin-runs`, `ContextBuilder::admin_runs`): every run of this graph that is queued or running, whatever its client (pages, MCP sessions, AI Chat turns), oldest first; `textHeadChars` is how much of a query text is shown. The query texts are other clients' data: a host turns it on only for its administrator. A mounted graph lists only its own runs.",
+        "operationId": "getApiAdminRuns",
+        "parameters": [
+          {
+            "name": "X-Graphersal-Admin-Token",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "The run administration's token, when the host set one (`--admin-runs-token`, `ContextBuilder::admin_runs(Some(token))`; `GET /api/info` `adminRuns.tokenRequired`). Missing or wrong: 403."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "JSON answer.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "runs": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "id": {
+                            "type": "integer",
+                            "description": "The registry's id of the run (for `POST /api/admin/runs/cancel`)."
+                          },
+                          "client": {
+                            "type": "string",
+                            "description": "The client's key: `page:<X-Graphersal-Client>`, `mcp:<MCP session id>` (or `mcp`), `ai:<conversation>`."
+                          },
+                          "alias": {
+                            "type": [
+                              "string",
+                              "null"
+                            ],
+                            "description": "The client's own id of the run (a page's `runId`, an MCP request id)."
+                          },
+                          "kind": {
+                            "type": "string",
+                            "enum": [
+                              "query",
+                              "layout",
+                              "tool",
+                              "other"
+                            ]
+                          },
+                          "state": {
+                            "type": "string",
+                            "enum": [
+                              "queued",
+                              "running"
+                            ],
+                            "description": "`queued`: its job waits for the session; `running`: its job has started."
+                          },
+                          "cancelled": {
+                            "type": "boolean",
+                            "description": "Cancelled; it ends when it starts or at its next check."
+                          },
+                          "startedAtMs": {
+                            "type": "integer",
+                            "description": "When the run was registered, milliseconds since the Unix epoch."
+                          },
+                          "durationMs": {
+                            "type": "integer",
+                            "description": "Milliseconds since it was registered (waiting included)."
+                          },
+                          "text": {
+                            "type": [
+                              "string",
+                              "null"
+                            ],
+                            "description": "The first `textHeadChars` characters of the query text, when the run has one."
+                          },
+                          "identity": {
+                            "type": [
+                              "string",
+                              "null"
+                            ],
+                            "description": "The identity the host's request filter attached, if any."
+                          },
+                          "mount": {
+                            "type": [
+                              "string",
+                              "null"
+                            ],
+                            "description": "The mount path of the graph the run belongs to (`/db/<name>`), null at the root."
+                          }
+                        }
+                      }
+                    },
+                    "textHeadChars": {
+                      "type": "integer"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The token is missing or wrong, or the server is in allow-list mode.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "error": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The run administration is off (the default): `the run administration is off: start the server with --admin-runs`.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "error": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/admin/runs/cancel": {
+      "post": {
+        "tags": [
+          "Server"
+        ],
+        "summary": "Run administration: kill a run by id (off by default)",
+        "description": "EXPERIMENTAL, off by default (see `GET /api/admin/runs`): cancels the run `id` whatever its client, an administrative act separate from a page's own `POST /api/cancel`. A run still waiting for the session runs nothing, a running one stops at its next check; both are rolled back. `{cancelled}`: whether such a run was registered (an ended run answers false).",
+        "operationId": "postApiAdminRunsCancel",
+        "parameters": [
+          {
+            "name": "X-Graphersal-Admin-Token",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "The run administration's token, when the host set one (`--admin-runs-token`, `ContextBuilder::admin_runs(Some(token))`; `GET /api/info` `adminRuns.tokenRequired`). Missing or wrong: 403."
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "id"
+                ],
+                "properties": {
+                  "id": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "description": "The run's `id` from `GET /api/admin/runs`."
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "JSON answer.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "cancelled": {
+                      "type": "boolean"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The token is missing or wrong, or the server is in allow-list mode.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "error": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The run administration is off (the default): `the run administration is off: start the server with --admin-runs`.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "error": {
+                      "type": "string"
+                    }
+                  }
+                }
               }
             }
           }

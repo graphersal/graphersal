@@ -46,8 +46,9 @@
 //! # Extension points
 //!
 //! What a host adds goes through these points; each has the core default a host gets without
-//! it. The core never grows several databases, run administration, authentication, quotas or
-//! bounded queues of its own: those belong to the hosts.
+//! it. The core never grows several databases, authentication, quotas or bounded queues of its
+//! own: those belong to the hosts. The run administration is the one administrative surface it
+//! has (issue #32), off unless the host turns it on per context, guarded by an optional token.
 //!
 //! | Point | Core default | Where |
 //! |---|---|---|
@@ -123,6 +124,9 @@ pub use open::{
     OpenedStore, layer_base_of_store, open_layer_store, open_store,
 };
 pub use read_only::{READ_ONLY_HEADLINE, READ_ONLY_HELP};
-pub use runs::{RUN_TEXT_HEAD_CHARS, Registered, RunHandle, RunInfo, RunKind, RunObserver, Runs};
+pub use runs::{
+    RUN_TEXT_HEAD_CHARS, Registered, RunEntry, RunHandle, RunInfo, RunKind, RunObserver, RunState,
+    Runs,
+};
 pub use server::{GraphResolver, Lifecycle, LifecycleHooks, OneGraph, Server};
 pub use ui::Ui;

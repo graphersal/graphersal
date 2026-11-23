@@ -37,6 +37,7 @@ import { SnapshotChoiceDialog } from './snapshot-choice-dialog.js';
 import { ChangeBurstBanner } from './change-burst-banner.js';
 import { JournalToasts } from './journal-toasts.js';
 import { McpStatsDialog } from './mcp-stats.js';
+import { AdminRunsDialog } from './admin-runs.js';
 import { ProfileTab } from './profile-tab.js';
 import { ProfileHeader } from './profile-header.js';
 import { LayerBadge, LayerDiffDialog } from './layer-diff.js';
@@ -84,12 +85,13 @@ const elementStyle = (dimension, size, gutterSize) => ({ 'flex-basis': `calc(${s
 const gutterStyle = (dimension, gutterSize) => ({ 'flex-basis': `${gutterSize}px` });
 
 export const Workspace = {
-  components: { QueryEditor, ResultsPanel, GraphPanel, SchemaPanel, ProfilePanel, DropMenu, StoreMenu, CatalogMenu, CatalogDialogs, OptimizePanel, ShareDialog, SnapshotChoiceDialog, ChangeBurstBanner, JournalToasts, McpStatsDialog, ProfileTab, ProfileHeader, LayerBadge, LayerDiffDialog },
+  components: { QueryEditor, ResultsPanel, GraphPanel, SchemaPanel, ProfilePanel, DropMenu, StoreMenu, CatalogMenu, CatalogDialogs, OptimizePanel, ShareDialog, SnapshotChoiceDialog, ChangeBurstBanner, JournalToasts, McpStatsDialog, AdminRunsDialog, ProfileTab, ProfileHeader, LayerBadge, LayerDiffDialog },
   emits: ['help', 'settings'],
   setup(props, { emit }) {
     const layout = reactive(loadLayout());
     const shareDialog = ref(null);
     const mcpStatsDialog = ref(null);
+    const adminRunsDialog = ref(null);
     onMounted(() => registerShareDialog(() => shareDialog.value && shareDialog.value.open()));
     onBeforeUnmount(() => registerShareDialog(null));
     const snapshotChoice = ref(null);
@@ -320,6 +322,8 @@ export const Workspace = {
     return {
       formatCount, shareDialog, snapshotChoice, saveCurrentSnapshot, openShareDialog, openOptimize, mcpStatsDialog,
       openMcpStats: () => mcpStatsDialog.value && mcpStatsDialog.value.open(),
+      adminRunsDialog,
+      openAdminRuns: () => adminRunsDialog.value && adminRunsDialog.value.open(),
       graphName: computed(() => splitGraphName(state.graph ? state.graph.name : '')),
       state, layout, main, left, right, narrow, leftCount, rightCount, PANELS: availablePanels,
       can, onWorkspaceTab, hashOf,
@@ -369,6 +373,8 @@ export const Workspace = {
             :title="'Connected to the dev server (graphersal --server) on ' + location.host + ': DEV mode, unstable, local only, not for production. ' + (state.engineInfo.store ? 'Queries run in that process on the graph of the Store directory ' + state.engineInfo.store + ': every commit is persisted and survives a restart.' : 'Queries run in that process on its in-memory graph' + (state.engineInfo.source ? ' (from ' + state.engineInfo.source + ')' : '') + '; nothing is saved unless you save it.')">DEV SERVER · unstable</span>
       <button v-if="can('mcp') && state.engineInfo.mcp" type="button" class="badge accent mcp-badge" @click="openMcpStats"
             :title="mcpBadgeTitle(state.engineInfo.mcp, location.host, location.protocol) + '. Click: MCP usage statistics.'">MCP<template v-if="state.engineInfo.mcp.readOnly"> · read-only</template></button>
+      <button v-if="state.engineInfo.adminRuns" type="button" class="badge accent admin-runs-badge" @click="openAdminRuns"
+            title="Run administration (--admin-runs): every client's running queries; kill one.">Runs</button>
       <template v-if="state.graph">
         <span class="graph-name" :title="state.graph.name"><span v-if="graphName.dir" class="graph-name-dir"><bdi>{{ graphName.dir }}</bdi></span><span class="graph-name-base">{{ graphName.base }}</span></span>
         <span class="badge" :title="state.graph.vertexCount + ' vertices, ' + state.graph.edgeCount + ' edges'">
@@ -493,6 +499,7 @@ export const Workspace = {
     <share-dialog ref="shareDialog"></share-dialog>
     <snapshot-choice-dialog ref="snapshotChoice"></snapshot-choice-dialog>
     <mcp-stats-dialog ref="mcpStatsDialog"></mcp-stats-dialog>
+    <admin-runs-dialog v-if="state.engineInfo.adminRuns" ref="adminRunsDialog"></admin-runs-dialog>
   </div>
   `,
 };

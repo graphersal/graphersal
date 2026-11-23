@@ -397,6 +397,44 @@ answer with a JSON error. A request that declares a body larger than 64 MiB (`Co
 ignored without an answer: the HTTP library would otherwise reserve memory for the whole declared
 size.
 
+## Run administration
+
+`--admin-runs` (EXPERIMENTAL, off by default) lets whoever runs the server see and stop every
+query of every client: browser pages, MCP agents and AI Chat turns. A page's Stop button
+(`POST /api/cancel`) reaches only that page's own runs; the run administration reaches all of
+them.
+
+```bash
+graphersal --graph data.gstore --server --admin-runs --admin-runs-token my-admin-secret
+```
+
+- `GET /api/admin/runs` lists every run that waits for the session or runs now, oldest first:
+  `{runs: [{id, client, alias, kind, state, cancelled, startedAtMs, durationMs, text, identity,
+  mount}], textHeadChars}`. `client` is `page:<id>` (a browser tab's `X-Graphersal-Client`),
+  `mcp:<MCP session>` or `ai:<conversation>`; `kind` is `query`, `layout`, `tool` (an MCP or AI
+  Chat tool call) or `other`; `state` is `queued` or `running`; `text` is the first 200
+  characters of the query (`textHeadChars`).
+- `POST /api/admin/runs/cancel` `{"id": 12}` cancels the run `12` whatever its client: a waiting
+  run runs nothing, a running one stops at its next check, and what it changed is rolled back
+  (the client gets its usual "Script cancelled" answer). `{cancelled}` says whether the run was
+  there (an ended run answers `false`).
+- With `--admin-runs-token <SECRET>` every admin request must send the header
+  `X-Graphersal-Admin-Token: <SECRET>` (`403` without it or with another value). Without a token
+  only the [`Host`/`Origin` checks](#safety) protect it, so anyone who can reach the server sees
+  the other users' query texts.
+- Without `--admin-runs` both endpoints answer `404` ("the run administration is off: start the
+  server with --admin-runs") and `GET /api/info` has no `adminRuns` field. With it, `GET
+  /api/info` answers `adminRuns: {"tokenRequired": true|false}` and the playground shows a
+  **Runs** button in its top bar: a list that reloads every 2 seconds while it is open, with a
+  Kill button per run (it asks for the token when the server needs one; the token stays in the
+  page's memory).
+
+The MCP endpoint offers no tool for it: stopping other clients' work is an operator's act, not an
+agent's. A host built on the server's core (`graphersal-serve`) turns it on per graph with
+`ContextBuilder::admin_runs(token)`; a graph served under a mount path (`/db/<name>/`) lists and
+stops only its own runs, and the host's own cross-graph view calls `Runs::list` /
+`Runs::cancel_run`.
+
 ## On a Store
 
 ```bash
@@ -1141,7 +1179,7 @@ workspace (which reads the whole graph) is shown as an error.
 
 | Endpoint | Engine method |
 |---|---|
-| `GET /api/info` | `info()` (`protocol: "graphersal/1"`: the protocol id of this API, by which the page recognizes a Graphersal host; a breaking change of the API bumps the number; `server: "graphersal-dev"`: only the host's name; `dev: true`: a development server, the page shows its DEV SERVER badge; `version`, `saveable`, `source`, `presets`: the limits in force, `mcp`: `{endpoint, readOnly, client}` or null, `ai`: `{provider, model, readOnly, sendsDataTo, maxToolCallsPerTurn}` or null (never the key; `sendsDataTo` is the provider's host, null for one on this machine), `damageFound`: `{text, frozen, foundBy, policy, problems}` or null, `embedders`: `[{name, model, dimension, default}]`, the built-in `hash-ngram/1` and every model of the database) |
+| `GET /api/info` | `info()` (`protocol: "graphersal/1"`: the protocol id of this API, by which the page recognizes a Graphersal host; a breaking change of the API bumps the number; `server: "graphersal-dev"`: only the host's name; `dev: true`: a development server, the page shows its DEV SERVER badge; `version`, `saveable`, `source`, `presets`: the limits in force, `mcp`: `{endpoint, readOnly, client}` or null, `ai`: `{provider, model, readOnly, sendsDataTo, maxToolCallsPerTurn}` or null (never the key; `sendsDataTo` is the provider's host, null for one on this machine), `damageFound`: `{text, frozen, foundBy, policy, problems}` or null, `embedders`: `[{name, model, dimension, default}]`, the built-in `hash-ngram/1` and every model of the database, `adminRuns`: `{tokenRequired}` only with `--admin-runs`) |
 | `GET /api/changes` | `changes()`: the change feed `{version, commitSeq, recent: [{version, by, commitSeq, detail?}], view, mcp, damageFound, readOnly}` (`readOnly` as in `GET /api/info`: it changes while the server runs when its host turns read-only on or off); `by` is the page's `X-Graphersal-Client` header (every request of the page sends it), `mcp`, or `ai` (an AI Chat conversation, its id in `detail`) |
 | `POST /mcp` | the MCP endpoint (with `--mcp`, [above](#mcp-an-ai-agent-on-the-same-graph)) |
 | `POST /api/ai/conversations` | with `--ai` (EXPERIMENTAL): a new AI Chat conversation `{id}` (random, 128 bits) owned by the page's `X-Graphersal-Client` (required); every other client gets `403` for it, an unknown id is `404`, and without `--ai` every `/api/ai/*` is `404` |
@@ -1153,6 +1191,8 @@ workspace (which reads the whole graph) is shown as an error.
 | `POST /api/execute` `{script, options}` | `execute(script, options)` |
 | `POST /api/query` `{name, params?, runId?}` | `runSavedQuery(name, params)`, the profile API's `query`: one run of the saved query `name` with the named arguments `params` (the caller passes every parameter; the server binds none), without the display: `{ok: true, results, mutated, changes}` (every result, never cut) or `{ok: false, error: {message, help?}, mutated, changes}` (an unknown query, a parameter its schema refuses, a denied write; status 200). A malformed call is a 400 |
 | `POST /api/cancel` | `stop(runId)`: cancels the page's run `runId` (body `{"runId": ".."}`, the id given to `POST /api/execute`), or without a body every run of the page (queries, layout slices); never another client's: `{cancelled}` |
+| `GET /api/admin/runs` | with `--admin-runs` (EXPERIMENTAL; [Run administration](#run-administration)): every client's queued and running runs `{runs: [{id, client, alias, kind, state, cancelled, startedAtMs, durationMs, text, identity, mount}], textHeadChars}`; the header `X-Graphersal-Admin-Token` with `--admin-runs-token`; `404` without the flag |
+| `POST /api/admin/runs/cancel` `{id}` | with `--admin-runs`: cancels the run `id` whatever its client: `{cancelled}` |
 | `GET /api/schema` | `schema()` (the schema views) |
 | `GET /api/schema/stored`, `GET /api/schema/infer` | `getSchema()`, `inferSchema()` |
 | `POST /api/schema/view` (body: a schema) | `schemaViewOf(schema)`: the schema views of that schema (the editor's draft) with the graph's label counts, `source: "given"`; nothing stored |
