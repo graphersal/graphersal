@@ -43,7 +43,7 @@
 use super::super::super::eval::{Env, EvalError, Value, function_name, status};
 use super::super::super::lexer::Span;
 use super::super::super::parser::{Clock, Function, TemporalFunction, TemporalType};
-use super::super::{Arg, any_null, integer_arg, wrong_kind};
+use super::super::{Arg, Args, any_null, integer_arg, wrong_kind};
 use super::kind_name;
 use crate::ElementProperty;
 use crate::value::number::N;
@@ -108,7 +108,7 @@ fn engine_kind(of: TemporalType) -> TemporalKind {
 /// `date(..)`, `localtime(..)`, `localdatetime(..)`, `datetime(..)` (zero or one argument).
 pub(crate) fn construct<En: Env>(
     of: TemporalType,
-    args: Vec<Arg<En::Element>>,
+    args: Args<En::Element>,
     env: &En,
     span: Span,
 ) -> Result<Value<En::Element>, EvalError> {
@@ -1065,7 +1065,7 @@ impl Build<'_> {
 
 /// `duration(map | string)`.
 pub(crate) fn duration<En: Env>(
-    args: Vec<Arg<En::Element>>,
+    args: Args<En::Element>,
     _env: &En,
     _span: Span,
 ) -> Result<Value<En::Element>, EvalError> {
@@ -1173,7 +1173,7 @@ fn duration_map<E>(
 pub(crate) fn clock<En: Env>(
     of: TemporalType,
     clock: Clock,
-    args: Vec<Arg<En::Element>>,
+    args: Args<En::Element>,
     env: &En,
     span: Span,
 ) -> Result<Value<En::Element>, EvalError> {
@@ -1191,7 +1191,7 @@ pub(crate) fn clock<En: Env>(
 /// `datetime.fromepoch(seconds, nanoseconds)`: the UTC datetime that many seconds and
 /// nanoseconds after 1970-01-01T00:00Z.
 pub(crate) fn from_epoch<En: Env>(
-    args: Vec<Arg<En::Element>>,
+    args: Args<En::Element>,
     _env: &En,
     span: Span,
 ) -> Result<Value<En::Element>, EvalError> {
@@ -1212,7 +1212,7 @@ pub(crate) fn from_epoch<En: Env>(
 
 /// `datetime.fromepochmillis(milliseconds)`.
 pub(crate) fn from_epoch_millis<En: Env>(
-    args: Vec<Arg<En::Element>>,
+    args: Args<En::Element>,
     _env: &En,
     span: Span,
 ) -> Result<Value<En::Element>, EvalError> {

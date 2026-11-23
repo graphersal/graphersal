@@ -603,6 +603,29 @@ fn element_functions() {
 }
 
 #[test]
+fn case_functions_match_the_standard_library() {
+    // Built as `CompactString`s (no allocation for a short result): the same text as
+    // `str::to_uppercase` / `str::to_lowercase`, special casings and a long text included.
+    for text in [
+        "straße",
+        "ΟΔΟΣ ΣΑΣ",
+        "İstanbul",
+        "ǅungla",
+        "ﬁne ŉ",
+        "a much longer text that does not fit inline: ÄÖÜ ß Σ",
+    ] {
+        assert_eq!(
+            value(&format!("upper('{text}')")),
+            string(&text.to_uppercase())
+        );
+        assert_eq!(
+            value(&format!("lower('{text}')")),
+            string(&text.to_lowercase())
+        );
+    }
+}
+
+#[test]
 fn scalar_functions() {
     assert_eq!(
         value("coalesce(n.missing, null, n.name, 1 / 0)"),

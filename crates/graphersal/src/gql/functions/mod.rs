@@ -68,6 +68,123 @@ impl<E> Arg<E> {
     }
 }
 
+/// The most arguments [`Args`] holds in place: every function but a few (`replace` with a limit,
+/// some temporal constructors) takes at most three.
+const INLINE_ARGS: usize = 3;
+
+/// The evaluated arguments of one function call, read as a slice: up to [`INLINE_ARGS`] of
+/// them in place and more in a vector, so evaluating a call allocates nothing per row (rule 4;
+/// a `Vec` per call was one allocation per row of `RETURN toString(n.x)`).
+pub(crate) struct Args<E> {
+    /// The arguments while they fit (the first `len`); unused slots hold `NULL`.
+    inline: [Arg<E>; INLINE_ARGS],
+    len: usize,
+    /// Every argument once there are more than [`INLINE_ARGS`] (then `len` is 0).
+    spilled: Vec<Arg<E>>,
+}
+
+impl<E> Args<E> {
+    /// Room for `n` arguments: in place for at most [`INLINE_ARGS`].
+    pub(crate) fn with_capacity(n: usize) -> Self {
+        Self {
+            inline: std::array::from_fn(|_| Arg::unused()),
+            len: 0,
+            spilled: if n > INLINE_ARGS {
+                Vec::with_capacity(n)
+            } else {
+                Vec::new()
+            },
+        }
+    }
+
+    /// The single argument `arg`.
+    pub(crate) fn one(arg: Arg<E>) -> Self {
+        let mut args = Self::with_capacity(1);
+        args.push(arg);
+        args
+    }
+
+    /// Appends `arg`.
+    pub(crate) fn push(&mut self, arg: Arg<E>) {
+        if self.spilled.is_empty() {
+            if let Some(slot) = self.inline.get_mut(self.len) {
+                *slot = arg;
+                self.len += 1;
+                return;
+            }
+            // Full: every argument moves to the vector.
+            let held = self.len;
+            self.len = 0;
+            self.spilled.reserve(held + 1);
+            for slot in self.inline.iter_mut().take(held) {
+                self.spilled.push(std::mem::replace(slot, Arg::unused()));
+            }
+        }
+        self.spilled.push(arg);
+    }
+
+    /// The arguments in order.
+    pub(crate) fn as_slice(&self) -> &[Arg<E>] {
+        if self.spilled.is_empty() {
+            self.inline.get(..self.len).unwrap_or_default()
+        } else {
+            &self.spilled
+        }
+    }
+}
+
+impl<E> std::ops::Deref for Args<E> {
+    type Target = [Arg<E>];
+
+    fn deref(&self) -> &[Arg<E>] {
+        self.as_slice()
+    }
+}
+
+impl<E> From<Vec<Arg<E>>> for Args<E> {
+    fn from(args: Vec<Arg<E>>) -> Self {
+        args.into_iter().collect()
+    }
+}
+
+impl<E> FromIterator<Arg<E>> for Args<E> {
+    fn from_iter<I: IntoIterator<Item = Arg<E>>>(items: I) -> Self {
+        let items = items.into_iter();
+        let mut args = Self::with_capacity(items.size_hint().0);
+        for arg in items {
+            args.push(arg);
+        }
+        args
+    }
+}
+
+impl<E> IntoIterator for Args<E> {
+    type Item = Arg<E>;
+    type IntoIter = std::iter::Chain<
+        std::iter::Take<std::array::IntoIter<Arg<E>, INLINE_ARGS>>,
+        std::vec::IntoIter<Arg<E>>,
+    >;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.inline.into_iter().take(self.len).chain(self.spilled)
+    }
+}
+
+impl<E> Arg<E> {
+    /// An unused slot of [`Args`] (never read as an argument).
+    fn unused() -> Self {
+        Arg {
+            value: Value::Null,
+            span: Span {
+                start: 0,
+                end: 0,
+                line: 0,
+                column: 0,
+            },
+        }
+    }
+}
+
 /// Where a function is evaluated.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Family {
@@ -206,10 +323,11 @@ pub(crate) fn family(function: Function) -> Family {
 /// Evaluates a stage 1c function on its evaluated arguments (see the module docs).
 pub(crate) fn call<En: Env>(
     function: Function,
-    args: Vec<Arg<En::Element>>,
+    args: impl Into<Args<En::Element>>,
     env: &En,
     span: Span,
 ) -> Result<Value<En::Element>, EvalError> {
+    let args = args.into();
     if let Function::Temporal(temporal) = function {
         return temporal::call(temporal, args, env, span);
     }
@@ -371,6 +489,40 @@ mod tests {
     use super::super::parser::{FUNCTIONS, FunctionKind};
     use super::test_env::*;
     use super::*;
+
+    #[test]
+    fn args_hold_three_in_place_and_spill_in_order() {
+        let arg = |i: i64| Arg {
+            value: Value::<El>::integer(i),
+            span: Arg::<El>::unused().span,
+        };
+        for n in 0..7_i64 {
+            let mut args = Args::with_capacity(usize::try_from(n).unwrap_or(0));
+            for i in 0..n {
+                args.push(arg(i));
+            }
+            let expected: Vec<Arg<El>> = (0..n).map(arg).collect();
+            assert_eq!(args.as_slice(), expected.as_slice(), "{n} arguments");
+            assert_eq!(args.spilled.is_empty(), n <= 3, "{n} arguments");
+            assert_eq!(
+                args.into_iter().collect::<Vec<_>>(),
+                expected,
+                "{n} arguments"
+            );
+        }
+        // Built without a capacity, the fourth argument moves the first three over.
+        let mut args = Args::with_capacity(0);
+        for i in 0..5 {
+            args.push(arg(i));
+        }
+        assert_eq!(args.len(), 5);
+        assert_eq!(args.first(), Some(&arg(0)));
+        assert_eq!(args.last(), Some(&arg(4)));
+        // The replace() forms with a limit take four arguments.
+        assert_eq!(value("replace('aXbXc', 'X', '-', 1)"), string("a-bXc"));
+        assert_eq!(value("replace('aXbXc', 'X', '-')"), string("a-b-c"));
+        assert_eq!(value("replace('abc', '', '-', 2)"), string("-a-bc"));
+    }
 
     /// Every GQLSTATUS a function may raise (the family files add no other).
     const KNOWN: &[&str] = &[

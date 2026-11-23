@@ -37,7 +37,7 @@
 use super::super::super::eval::{Env, EvalError, Value, status};
 use super::super::super::lexer::Span;
 use super::super::super::parser::{TemporalFunction, TemporalType};
-use super::super::{Arg, any_null};
+use super::super::{Arg, Args, any_null};
 use super::construct::temporal_error;
 use super::{cypher_name, kind_name};
 use crate::CompactString;
@@ -163,7 +163,7 @@ impl Unit {
 /// `X.truncate(unit, value [, map])` for `X` of type `of`.
 pub(crate) fn truncate<En: Env>(
     of: TemporalType,
-    args: Vec<Arg<En::Element>>,
+    args: Args<En::Element>,
     env: &En,
     span: Span,
 ) -> Result<Value<En::Element>, EvalError> {
