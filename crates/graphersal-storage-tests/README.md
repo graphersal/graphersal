@@ -13,7 +13,7 @@ In the crate that implements `GraphStorage`:
 
 ```toml
 [dev-dependencies]
-graphersal-storage-tests = "=0.7.0"
+graphersal-storage-tests = "=0.7.1"
 ```
 
 ```rust
