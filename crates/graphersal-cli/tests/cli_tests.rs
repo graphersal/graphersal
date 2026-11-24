@@ -935,6 +935,60 @@ fn gql_steps_allocate_per_row_like_their_gremlin_equivalents() {
     }
 }
 
+/// G1 option E ratchet: an aggregation that only counts (`RETURN count(*)`) after any walk, not
+/// only after a node scan or one plain hop, is the lazy `count()` plus its one row, so it
+/// materializes no more than the same query written in Gremlin (it used to build a row per match
+/// in `gql:aggregate`: 33.5 MB against 21.8 MB on the `large` graph for the first pair). The
+/// slack covers the one row (`gql:project`).
+#[test]
+fn gql_count_star_after_a_walk_materializes_like_gremlin_count() {
+    let pairs = [
+        (
+            "MATCH (a)-->(b) WHERE b.id <> \\\"x\\\" RETURN count(*) AS c",
+            "g.v().out().has(\"id\", P.neq(\"x\")).count()",
+        ),
+        (
+            "MATCH (a) OPTIONAL MATCH (a)-->(b) RETURN count(*) AS c",
+            "g.v().optional(__.out()).count()",
+        ),
+    ];
+    let mut args = vec!["--graph".to_string(), "large".to_string()];
+    for (gql, gremlin) in &pairs {
+        args.push("-e".into());
+        args.push(format!("g.gql(\"{gql}\").profile(ProfileType::Memory)"));
+        args.push("-e".into());
+        args.push(format!("{gremlin}.profile(ProfileType::Memory)"));
+    }
+    let args: Vec<&str> = args.iter().map(String::as_str).collect();
+    let res = run(&args, "");
+    assert_eq!(res.code, 0, "stderr: {}", res.stderr);
+    let tables: Vec<&str> = res.stdout.split("Traversal Metrics").skip(1).collect();
+    assert_eq!(tables.len(), 2 * pairs.len(), "stdout: {}", res.stdout);
+    let materialized = |table: &str| {
+        let line = table
+            .lines()
+            .find(|l| l.contains("memory materialized:"))
+            .unwrap_or_else(|| panic!("no materialized total: {table}"));
+        parse_bytes_figure(line.split_whitespace().last().expect("a figure"))
+    };
+    for ((gql, gremlin), measured) in pairs.iter().zip(tables.chunks(2)) {
+        let [gql_table, gremlin_table] = measured else {
+            unreachable!("chunks of two");
+        };
+        assert!(
+            gql_table.lines().any(|l| l.starts_with("count()"))
+                && !gql_table.contains("gql:aggregate"),
+            "{gql}: not a fused count()\n{gql_table}"
+        );
+        let (gql_bytes, gremlin_bytes) = (materialized(gql_table), materialized(gremlin_table));
+        assert!(
+            gql_bytes <= gremlin_bytes + 4096.0,
+            "{gql}: {gql_bytes} bytes materialized, {gremlin}: {gremlin_bytes}\n{}",
+            res.stdout
+        );
+    }
+}
+
 /// Parses a `format_bytes`-style figure (`"208B"`, `"26.00KB"`, `"26.00MB"`, optionally `~`-
 /// prefixed) into a byte count. Panics on anything else, since a test fixture producing a
 /// differently-shaped figure is itself a bug worth surfacing loudly.

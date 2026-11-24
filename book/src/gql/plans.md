@@ -363,12 +363,12 @@ gql:distinct()                                                  1       4       
 
 `count(x)` of a variable that can never be `NULL` (a node or edge of a `MATCH` that is not
 optional, outside a parenthesized path pattern, in a query without writes) counts like
-`count(*)`, so `x` gets no `as()`. A query that only counts a whole pattern is answered like the
-Gremlin counts, from the statistics (or an index): when every `RETURN` column is such a count and
-the pattern is one node with its labels and pushed properties, or one directed edge between two
-nodes without labels or conditions, the aggregation is `count()` followed by the row
-(`gql:project`), and the edge pattern is scanned as `e()`, so `MATCH ()-[r:T]->() RETURN count(r)`
-is `g.e().has_label("T").count()`:
+`count(*)`, so `x` gets no `as()`. An aggregation whose every column is such a count, with no
+grouping key, is the Gremlin `count()` followed by the row (`gql:project`), whatever the walk
+before it: one row per match is never built. A pattern of one node with its labels and pushed
+properties is then answered from the statistics (or an index), like `g.v().has_label(..).count()`,
+and one directed edge between two nodes without labels or conditions is scanned as `e()`, so
+`MATCH ()-[r:T]->() RETURN count(r)` is `g.e().has_label("T").count()`:
 
 ```rhai,graph=modern
 g.gql("MATCH (n:person) RETURN count(n) AS people").profile()
@@ -389,18 +389,22 @@ union(__.out("knows"), __.in_e("knows").gql:not_self_loop().out_v())      1     
   \> in_e("knows")                                                        6       6       2
   \> gql:not_self_loop()                                                  6       2       2
   \> out_v()                                                              6       2       2
-gql:aggregate([], ["count(r)"], ["c"])                                    1       4       1
+count()                                                                   1       4       1
+gql:project("c")                                                          1       1       1
 ```
 
-Either direction stays a walk: it matches every edge twice and a self-loop once, which no
-statistic holds. A longer pattern, a labelled endpoint, a filter over several elements, a body
-of a subquery or `CALL`, and a writing query walk too, through `gql:aggregate`, but without a
-label for the counted variable. `count(DISTINCT x)`, `count(x)` of a variable that may be `NULL`
+Either direction walks the pattern, since it matches every edge twice and a self-loop once, which
+no statistic holds; so do a longer pattern, a labelled endpoint, a filter, `OPTIONAL MATCH`,
+`UNWIND` and `WITH` before the count, all counted lazily by `count()`. A count in the body of a
+subquery or `CALL`, a count beside a grouping key or another aggregate, and a count in a writing
+query (its plan stays as written) go through `gql:aggregate`, without a label for the counted
+variable. `count(DISTINCT x)`, `count(x)` of a variable that may be `NULL`
 (an `OPTIONAL MATCH`, a `WITH` column, a `FOR` item, a `?` singleton) and every other aggregate
 read their argument as written.
 
 The executor runs one step over all its input before the next, so a count that walks still
-holds every row of its pattern at once, just not the counted variable's label: on 1 000 000
+holds every traverser of its pattern at once, just not a row per match nor the counted
+variable's label: on 1 000 000
 edges `MATCH (a)-[r]->(b) WHERE a.id < b.id RETURN count(r)` needs about 92 MiB (the edge level
 and the label of `a`), under a `traversal.max_materialized_bytes` of 100 000 000 bytes.
 

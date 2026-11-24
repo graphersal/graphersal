@@ -443,7 +443,8 @@ lazy_barrier() [path: labels(#1)]
 out_e() [path: labels(#1)]
 where(P.neq("#1"))
 in_v()
-gql:aggregate([], ["count(*)"], ["n"])
+count()
+gql:project("n")
 
 === MATCH (a)-[e]-(b) RETURN a.name, e.weight, b.name
 v() [path: labels(e)]
