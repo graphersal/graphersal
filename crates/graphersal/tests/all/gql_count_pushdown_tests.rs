@@ -285,7 +285,8 @@ fn other_counts_walk_without_labelling_the_counted_variable() {
             vec![
                 "v()",
                 "union(__.out(), __.in_e().gql:not_self_loop().out_v())",
-                "gql:aggregate([], [\"count(r)\"], [\"c\"])",
+                "count()",
+                "gql:project(\"c\")",
             ],
         ),
         // A pushed property filter on the scan counts after it.
@@ -304,7 +305,8 @@ fn other_counts_walk_without_labelling_the_counted_variable() {
             vec![
                 "v(labels: [\"A\"])",
                 "out()",
-                "gql:aggregate([], [\"count(r)\"], [\"c\"])",
+                "count()",
+                "gql:project(\"c\")",
             ],
         ),
     ] {

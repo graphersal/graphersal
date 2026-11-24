@@ -764,8 +764,9 @@ struct Hop<S: GraphStorage> {
 
 /// What a whole-pattern count scans ([`Lowered::whole_count`], issue #20).
 enum CountScan {
-    /// The node scan and its filters as lowered.
-    Nodes,
+    /// The instructions before the aggregation as lowered (a node scan and its filters, hops,
+    /// joins, `OPTIONAL MATCH`, `UNWIND`, `WITH`, ...).
+    Walk,
     /// `e()` with these labels (`None`: any edge) in place of the scan and the hop.
     Edges(Option<Vec<String>>),
 }
@@ -966,7 +967,7 @@ impl<S: GraphStorage> Lowered<S> {
             return self.emit_into(source, instrs);
         };
         // A whole-pattern count (issue #20): `count()` and its row in place of the
-        // aggregation, after the scan and its filters, or after `e()` for one edge.
+        // aggregation, after the walk, or after `e()` for one edge.
         let mut rest = instrs.split_off(at);
         let (columns, returning) = match rest.first_mut() {
             Some(Instr::Aggregate {
@@ -986,28 +987,31 @@ impl<S: GraphStorage> Lowered<S> {
                     None => source,
                 }
             }
-            CountScan::Nodes => self.emit_into(source, instrs),
+            CountScan::Walk => self.emit_into(source, instrs),
         };
         self.emit_into(source, rest)
     }
 
-    /// A whole-pattern count at the top of a read query (issue #20): the position of an
-    /// aggregation that only counts rows ([`Instr::Aggregate`] with `counting`), preceded only
-    /// by
-    /// - a node scan and its filters (`has_label`, pushed `has()`, no label set): `count()`
-    ///   after it is answered from the statistics or an index (`count_pushdown`):
-    ///   [`CountScan::Nodes`];
-    /// - or a scan of an unconstrained node, one directed hop with nothing on the edge and an
+    /// A whole-pattern count at the top of a read query (issue #20): the position of the
+    /// first aggregation of the query when it only counts rows ([`Instr::Aggregate`] with
+    /// `counting`). Every step before it passes one traverser per row (bulk counted), so the
+    /// lazy `count()` gives the aggregation's number without building a row per match:
+    /// - a scan of an unconstrained node, one directed hop with nothing on the edge and an
     ///   unconstrained node reached (`MATCH ()-[r:T]->() RETURN count(r)`): every edge of the
     ///   labels is counted exactly once (a self-loop too), so `e().has_label(T).count()` gives
-    ///   the same number: [`CountScan::Edges`] with the hop's labels.
+    ///   the same number: [`CountScan::Edges`] with the hop's labels;
+    /// - any other walk ([`CountScan::Walk`]): `count()` after it, answered from the
+    ///   statistics or an index after a node scan and its filters (`count_pushdown`), counted
+    ///   lazily after hops (G1 option E).
     ///
-    /// Either direction is not covered (a self-loop counts once, every other edge twice), nor
-    /// a writing query (its plans stay as written, W15).
+    /// Not a writing query (its plans stay as written, W15).
     fn whole_count(&self, instrs: &[Instr<S>]) -> Option<(CountScan, usize)> {
-        if self.writes || !matches!(instrs.first(), Some(Instr::Scan)) {
+        if self.writes {
             return None;
         }
+        let at = instrs
+            .iter()
+            .position(|instr| matches!(instr, Instr::Aggregate { .. }))?;
         let counting = |at: usize| {
             matches!(
                 instrs.get(at),
@@ -1019,32 +1023,27 @@ impl<S: GraphStorage> Lowered<S> {
         };
         let unlabelled =
             |instr: &Instr<S>| matches!(instr, Instr::Label(id) if !self.is_labelled(*id));
-        let filter = |instr: &Instr<S>| {
-            unlabelled(instr) || matches!(instr, Instr::HasLabel(_) | Instr::Has(..))
-        };
-        let mut at = 1;
-        while instrs.get(at).is_some_and(filter) {
-            at += 1;
-        }
-        if counting(at) {
-            return Some((CountScan::Nodes, at));
-        }
-        // The edge form: nothing but unset labels around the hop.
-        if !instrs.get(1..at).is_some_and(|s| s.iter().all(unlabelled)) {
+        if !counting(at) {
             return None;
         }
-        let Some(Instr::Hop(hop)) = instrs.get(at) else {
-            return None;
-        };
-        let plain = hop.quantifier.is_none()
-            && hop.inner.is_none()
-            && matches!(hop.direction, EdgeDirection::Right | EdgeDirection::Left)
-            && hop.steps.iter().all(unlabelled);
-        let mut next = at + 1;
-        while instrs.get(next).is_some_and(unlabelled) {
-            next += 1;
+        // The edge form: a scan, nothing but unset labels around one plain hop.
+        if matches!(instrs.first(), Some(Instr::Scan)) {
+            let mut hop_at = 1;
+            while instrs.get(hop_at).is_some_and(unlabelled) {
+                hop_at += 1;
+            }
+            if let Some(Instr::Hop(hop)) = instrs.get(hop_at) {
+                let plain = hop.quantifier.is_none()
+                    && hop.inner.is_none()
+                    && matches!(hop.direction, EdgeDirection::Right | EdgeDirection::Left)
+                    && hop.steps.iter().all(unlabelled)
+                    && instrs[hop_at + 1..at].iter().all(unlabelled);
+                if plain {
+                    return Some((CountScan::Edges(hop.labels.clone()), at));
+                }
+            }
         }
-        (plain && counting(next)).then(|| (CountScan::Edges(hop.labels.clone()), next))
+        Some((CountScan::Walk, at))
     }
 
     /// Emits `instrs` onto `g` (the source, or the child of an `optional()`).
