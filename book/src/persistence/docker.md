@@ -90,61 +90,68 @@ file system) is served read-only anyway, with a note on stderr saying so.
 
 A knowledge base for AI agents ships best as ONE image: the binary, the Store and the MCP
 configuration baked in, served read-only, so an agent connects with a URL and nothing else.
-`docker/prebuilt/` builds such an image without compiling anything: the binary is a prebuilt
-release binary, downloaded once into a local cache.
+`docker/prebuilt/` builds such an image without compiling anything. Copy the folder into your
+own repository, put your store (and, if the build may not download from GitHub, a release archive
+of the binary) next to it, and run one command. Its `README.md` is the full guide; `build.py`
+needs Python 3.9+ (standard library only) and Docker with buildx or Podman (`--engine`, default:
+Docker if present), on Linux, macOS or Windows.
 
 > **No authentication.** Whoever reaches the port reads the whole knowledge base, through MCP and
 > through the playground, without a token. The server is protected only by being read-only and
 > by the limits of the [read-only serving mode](dev_server.md#read-only-serving-mode). Run it on a
 > private network or behind a [reverse proxy](#behind-a-reverse-proxy).
 
-### 1. Fetch the binary
+### Build
 
-```bash
-bin=$(docker/prebuilt/fetch-binary.sh v0.6.0)        # both architectures; or: ... v0.6.0 arm64
+```text
+docker/prebuilt/
+  build.py  Dockerfile  README.md  .gitignore
+  my-kb.gstore                                  the store (exactly one *.gstore)
+  graphersal-v0.7.1-linux-x86_64.tar.gz         the binary, a release archive (or --version)
+  mcp-config.json                               optional: the MCP configuration
+  instructions.md                               optional: instructions for agents (Markdown)
 ```
 
-`fetch-binary.sh <source> [amd64|arm64 ...]` downloads the static Linux binaries of a GitHub
-Release (`v<version>`: the `graphersal-v<version>-linux-*.tar.gz` assets) and checks them against
-the release's `SHA256SUMS`. `run:<run-id>` takes the artifacts of a run of the "CLI binaries"
-workflow instead (a build of a branch before its release; needs the GitHub CLI `gh`), checked
-against that run's `SHA256SUMS`. The binaries land in
-`${GRAPHERSAL_CACHE:-~/.cache/graphersal}/bin/<v<version>|run-<run-id>>/linux-<amd64|arm64>/graphersal`
-next to `VERSION`, `SOURCE` and `SHA256SUMS`; the script prints that directory and nothing else
-on stdout. A cached binary whose checksum matches is not downloaded again (builds work offline);
-one that does not match is deleted and the script fails (run it again).
-
-### 2. Prepare the knowledge base
-
 ```bash
-docker/prebuilt/prepare-kb.sh my.gstore kb-out --bin "$bin" \
-  --config mcp-config.json --instructions kb-instructions.md
+python docker/prebuilt/build.py -t my-kb:1                                    # this platform, local Docker
+python docker/prebuilt/build.py --version 0.7.1 -t registry.example.com/my-kb:1 --push   # both platforms
+python docker/prebuilt/build.py --store data/kb.gstore --binary tools/graphersal -t my-kb:1
 ```
 
-The image gets a prepared copy of the store, never the live file: `prepare-kb.sh` runs
-`graphersal store fork <store> kb-out/graph.gstore`, which writes the latest state as one
-snapshot (no write-ahead log history, no attic, no marks, no free space, a new store id), with
-the store's [embedding models](store_models.md), closed cleanly; then `store verify` on the copy.
-The source is mounted read-only and may be in use by a running server (the copy is its last
-durable state). A store of 2.2 GiB (1.7 GiB live: 61 WAL segments of history, a 506 MiB model,
-560 MiB free space inside the file) became 565 MiB.
+The binary comes from the repository (release archives `graphersal-v<version>-linux-*.tar.gz`,
+checked against a `SHA256SUMS` beside them, or plain Linux binaries whose architecture is read
+from the file) or from a GitHub Release (`--version 0.7.1` or `latest`, checked against the
+release's `SHA256SUMS` and cached in `${GRAPHERSAL_CACHE:-~/.cache/graphersal}/bin/`, so later
+builds work offline; `--version run:<run-id>` takes the binaries of a run of the "CLI binaries"
+workflow, with the GitHub CLI). Without `--push` the image is built for the Docker engine's
+platform and loaded; with `--push` for every platform with a binary.
 
-The copy is made by **the same binary that goes into the image**, run in a container of the
-image's base (the binary of the Docker host's platform), never by a `graphersal` installed on the
-host: an older binary need not open a store written by a newer one, so the image always opens
-what it carries. The script writes into `kb-out/`:
+`build.py` writes the build context `.context/` (hard links where possible) and runs
+`docker buildx build`, or `podman build --format docker` (the OCI format would drop the health
+check; a pushed multi-platform image is a manifest list pushed to every tag). The Dockerfile then prepares the store with **the image's own binary**:
+an older binary need not open a store written by a newer one, so the image always opens what it
+carries. In a first stage, without network, it runs
+`graphersal store fork`, which writes the latest state as one snapshot (no write-ahead log
+history, no attic, no marks, no free space, a new store id) with the store's
+[embedding models](store_models.md), then `store verify`, then `mcp-cost` with the
+configuration, so a broken store or a typo in a tool or folder name fails the build, not the
+container start. A store of 2.2 GiB (1.7 GiB live: 61 WAL segments of history, a 506 MiB model,
+560 MiB free space inside the file) became 565 MiB. The stage runs on the building engine's
+platform and its result serves every platform of the image. The source store is only read;
+do not build from a store a running server is writing (fork it first).
 
-| File | What |
-|---|---|
-| `graph.gstore` | the prepared store |
-| `mcp-config.json` | `--config` ([MCP configuration](dev_server.md#the-mcp-configuration-file---mcp-config)); without it every reading tool |
-| `kb-instructions.md` | `--instructions`, under its own name (`.md` or `.txt`); the config's `instructions.file` names it |
-| `store-format-version` | the store's format version, for the image label |
-| `mcp-cost.out` | what the MCP prompt costs an agent (`graphersal mcp-cost`); it also proves that the configuration loads against the copy |
+The image is three layers on `gcr.io/distroless/static` (non-root user 65532, everything
+read-only for it): the binary, the configuration, the store. A new version of the knowledge base
+rebuilds and ships only the last layer. The labels `dev.graphersal.binary.version` and
+`dev.graphersal.binary.source` name the binary; tag the image with the version of the knowledge
+base.
 
 A configuration for a knowledge base offers GQL, the schema and the saved queries of one folder
-as tools of their own (the repository's
-`crates/graphersal-cli/examples/mcp-kb-readonly.json`):
+as tools of their own (the repository's `crates/graphersal-cli/examples/mcp-kb-readonly.json`;
+keys: [The MCP configuration file](dev_server.md#the-mcp-configuration-file---mcp-config)).
+Without one the server offers every reading tool. The instructions come from the file the
+configuration names (relative to it), or from `--instructions FILE` (or an `instructions.md`
+next to `build.py`), appended to the built-in text (`--instructions-mode replace`: instead of it).
 
 ```json
 {
@@ -158,31 +165,8 @@ as tools of their own (the repository's
 ```
 
 With 14 saved queries in the folder `kb` this prompt (instructions and tool list) costs an agent
-about 3.3 K tokens, against about 4.6 K for every reading tool without a configuration.
-
-### 3. Build
-
-```bash
-docker buildx build --platform linux/amd64,linux/arm64 \
-  --build-context bin="$bin" --build-context kb=kb-out \
-  --build-arg GRAPHERSAL_VERSION="$(cat "$bin/VERSION")" \
-  --build-arg GRAPHERSAL_SOURCE="$(cat "$bin/SOURCE")" \
-  --build-arg STORE_FORMAT_VERSION="$(cat kb-out/store-format-version)" \
-  --build-arg BUILD_TIME="$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-  -f docker/prebuilt/Dockerfile -t my-kb:2026-11-06 --push docker/prebuilt
-```
-
-`docker/prebuilt/Dockerfile` has no build stage. The binary and the store come in as BuildKit
-named contexts (`bin`, `kb`), so neither is sent as a build context, and three layers are copied
-onto `gcr.io/distroless/static` (non-root user 65532, everything read-only for it): the binary,
-the configuration, the store. A new version of the knowledge base rebuilds and ships only the
-last layer. Building both platforms from a warm cache takes seconds (about 7 s when nothing
-changed, 25 s with a new store layer; the image is about 560 MB compressed per platform). The image's labels name the
-binary (`dev.graphersal.binary.version`, `dev.graphersal.binary.source`) and the store's format
-version (`dev.graphersal.store.format-version`); tag the image with the version of the knowledge
-base. `--push` sends it to your registry; `--load` instead keeps it in the local image store
-(Docker Desktop's containerd store keeps both platforms; with the classic store build one platform
-for `--load`).
+about 3.3 K tokens, against about 4.6 K for every reading tool without a configuration; after a
+local build `build.py` prints this figure.
 
 The command of the image is the read-only serving mode with read-only MCP:
 
@@ -197,10 +181,10 @@ ready in about 4 s on a laptop (also under amd64 emulation on an arm64 Mac; the 
 loaded at its first use), so raise it only for a much larger knowledge base
 (`docker run --health-start-period 5m`, or the probes of your orchestrator).
 
-### 4. Run and connect
+### Run and connect
 
 ```bash
-docker run --rm --read-only -p 127.0.0.1:8080:8080 my-kb:2026-11-06
+docker run --rm --read-only -p 127.0.0.1:8080:8080 my-kb:1
 curl -s http://localhost:8080/readyz          # {"status":"ready"}
 ```
 
@@ -229,18 +213,10 @@ claude mcp add --transport http kb http://localhost:8080/mcp          # Claude C
 
 ### Update the knowledge base
 
-Prepare the new state into a fresh directory and build again with a new tag: the binary and
-configuration layers come from the cache, only the store layer is new.
-
-```bash
-docker/prebuilt/prepare-kb.sh my.gstore kb-out-2 --bin "$bin" --config mcp-config.json \
-  --instructions kb-instructions.md
-docker buildx build ... --build-context kb=kb-out-2 ... -t my-kb:2026-11-13 --push docker/prebuilt
-```
-
-Replace the running container by the new image (`docker stop -t 30` lets running queries finish;
-see [Stopping](#stopping)). A new binary is a new `fetch-binary.sh` source; prepare the store
-again with it, since the copy must be written by the binary that serves it.
+Replace the store and run `build.py` again with a new tag: the binary and configuration layers
+come from the cache, only the store layer is new. Replace the running container by the new image
+(`docker stop -t 30` lets running queries finish; see [Stopping](#stopping)). A new binary is a
+new archive or `--version`; the store is prepared again by it automatically.
 
 ### Behind a reverse proxy
 
