@@ -320,6 +320,12 @@ session: `g`, `_g` and `__`, and, when the engine is built with
 creates itself (`GraphSource::empty()`, ...), so a script cannot escape a preset by starting a
 traversal elsewhere.
 
+With `graph_scope_with_ceilings` / `engine_with_ceilings` (a session's
+`SessionPresets::with_ceilings(true)`) the preset resource ceilings become caps: a query's value
+at or below the preset asks nothing, a larger one (or no limit) is refused with
+`OptionAboveCeiling` whatever the authorizer allows
+([Resource Limits](resource_limits.md#presets-as-ceilings)).
+
 `ExecutionPolicy` is the complementary control on the storage: it fixes the *value* of an option
 (locked keys, defaults) for every entry, Rust included. Both apply; the authorization check runs
 first.

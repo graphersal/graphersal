@@ -730,6 +730,34 @@ pub(crate) fn is_admin_option(key: &str) -> bool {
     ADMIN_OPTION_KEYS.contains(&key)
 }
 
+/// How much the limit option `key` allows with `value`, read by the key's own parser. The
+/// limits are the administrative keys where a larger value allows more (`evaluationTimeout`,
+/// `repeat.max_loops`, `bulk.max_expansion`, `traversal.max_*`): the keys a host's presets can
+/// make CEILINGS of (`graphersal::script::graph_scope_with_ceilings`), which a query may lower
+/// but never raise or remove. The switches (`optimizer.*`, `path.analysis`, `bulk.merge`) are
+/// not limits, `memory.*` is a process setting.
+///
+/// `None` when `key` is not a limit or `value` is malformed (its parse error comes when the
+/// options are parsed); `Some(None)` for no limit at all (`evaluationTimeout` `0`);
+/// `Some(Some(n))` for a limit of `n` (milliseconds, loops, values, traversers, levels or bytes).
+pub(crate) fn limit_amount(key: &str, value: &ElementProperty) -> Option<Option<u64>> {
+    let amount = match key {
+        EVALUATION_TIMEOUT => parse_timeout(value)
+            .ok()?
+            .map(|timeout| u64::try_from(timeout.as_millis()).unwrap_or(u64::MAX)),
+        REPEAT_MAX_LOOPS => Some(u64::from(parse_max_loops(value).ok()?)),
+        BULK_MAX_EXPANSION => Some(parse_max_expansion(value).ok()?),
+        MAX_TRAVERSERS => Some(parse_positive_count(MAX_TRAVERSERS, value, "traversers").ok()?),
+        MAX_VALUE_DEPTH => Some(parse_positive_count(MAX_VALUE_DEPTH, value, "levels").ok()?),
+        MAX_MATERIALIZED_BYTES => {
+            Some(parse_positive_count(MAX_MATERIALIZED_BYTES, value, "bytes").ok()?)
+        }
+        MAX_STRING_BYTES => Some(parse_positive_count(MAX_STRING_BYTES, value, "bytes").ok()?),
+        _ => return None,
+    };
+    Some(amount)
+}
+
 /// The order in which `repeat()` walks its loop.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(crate) enum RepeatOrder {
