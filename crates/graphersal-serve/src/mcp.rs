@@ -57,18 +57,21 @@ mod enabled {
 
     use super::off;
     use crate::api::current_view;
-    use crate::context::{BusyReason, CLIENT, Client, Context, ServeError, as_client};
+    use crate::context::{
+        BusyReason, CLIENT, Client, Context, ServeError, as_client, request_read_only,
+    };
     use crate::http::{HttpError, Request, Response};
     use crate::runs::{RunDetails, RunKind};
 
     /// The endpoint's status with `readOnly` of the context's profile (or of the runtime
-    /// read-only toggle, while it is on).
+    /// read-only toggle, while it is on, or of a request the host marked read-only).
     pub(crate) fn endpoint_status(context: &Context) -> Value {
         let (Some(mcp), Some(profile)) = (context.mcp(), context.mcp_profile()) else {
             return Value::Null;
         };
         let mut status = mcp.status();
-        status["readOnly"] = json!(profile.read_only() || context.runtime_read_only_on());
+        status["readOnly"] =
+            json!(profile.read_only() || context.runtime_read_only_on() || request_read_only());
         // Under a host's URL prefix the endpoint is `<mount>/mcp` (ContextBuilder::mount_path).
         if let Some(mount) = &context.mount_path {
             status["endpoint"] = json!(format!("{mount}/mcp"));
@@ -78,9 +81,13 @@ mod enabled {
 
     /// Whether an agent's writes are refused here: the context's MCP profile is read-only, or
     /// the runtime read-only toggle is on (its commit hook refuses them; the profile and so the
-    /// tool list stay as they are). Asked only of a context with an endpoint.
+    /// tool list stay as they are), or the request this thread answers is marked read-only
+    /// ([`Request::mark_read_only`]: it is served under the profile made read-only). Asked only
+    /// of a context with an endpoint.
     fn profile_read_only(context: &Context) -> bool {
-        context.mcp_profile().is_some_and(|p| p.read_only()) || context.runtime_read_only_on()
+        context.mcp_profile().is_some_and(|p| p.read_only())
+            || context.runtime_read_only_on()
+            || request_read_only()
     }
 
     /// `GET /api/mcp/stats`: the endpoint's usage statistics (memory only, since the start), or
@@ -116,6 +123,7 @@ mod enabled {
         let headers = request.headers().to_vec();
         let method = request.method().as_str().to_string();
         let identity = request.identity().map(str::to_string);
+        let marked_read_only = request.is_read_only();
         let mut mcp_request = McpRequest::new(&method, request.body());
         for (name, value) in &headers {
             mcp_request = mcp_request.header(name, value);
@@ -124,6 +132,14 @@ mod enabled {
             mcp_request = mcp_request.with_identity(identity);
         }
         let profile = context.mcp_profile().unwrap_or_else(|| mcp.profile());
+        // A request the host marked read-only: only reading tools, a writing query refused.
+        let read_only;
+        let profile = if marked_read_only && !profile.read_only() {
+            read_only = profile.clone().with_read_only(true);
+            &read_only
+        } else {
+            profile
+        };
         let (status, headers, body) = mcp
             .handle_with_profile(context, profile, mcp_request)
             .into_parts();

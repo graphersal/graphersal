@@ -26,15 +26,18 @@ use std::sync::mpsc::channel;
 
 use graphersal::{GraphSource, exec::CancelToken};
 use graphersal_session::store::{backup_value, damage_value, found_damage_value};
-use graphersal_session::{RunOptions, authorizer_for, playground_authorizer, views};
+use graphersal_session::{RunOptions, authorizer_for, views};
+
+use access::{RouteAccess, route_access};
 use serde_json::{Value, json};
 
-use crate::context::{CLIENT, Client, Context, position};
+use crate::context::{CLIENT, Client, Context, position, request_read_only};
 use crate::http::{HttpError, Method, Request, Response};
 use crate::runs::RunKind;
 use crate::ui::Ui;
 use crate::{job_workers, mcp, runs};
 
+mod access;
 mod admin;
 mod layout;
 mod store;
@@ -100,7 +103,12 @@ pub fn handle(context: &Arc<Context>, mut request: Request) -> Response {
         })
         .and_then(|()| {
             let identity = request.identity().map(str::to_string);
-            CLIENT.with(|c| c.borrow_mut().identity = identity);
+            let read_only = request.is_read_only();
+            CLIENT.with(|c| {
+                let mut client = c.borrow_mut();
+                client.identity = identity;
+                client.read_only = read_only;
+            });
             route(context, &mut request)
         });
     answer.unwrap_or_else(error_response)
@@ -145,6 +153,12 @@ fn route(context: &Arc<Context>, request: &mut Request) -> Result<Response, Http
         };
     }
     let endpoint = &path[5..];
+    // A request the host marked read-only (`Request::mark_read_only`): every route that writes
+    // is refused here, before anything runs; scripts and saved queries run under the reading
+    // authorizer below.
+    if request.is_read_only() && route_access(&method, endpoint) == Some(RouteAccess::Write) {
+        return Err(Context::request_read_only_refusal());
+    }
     match (&method, endpoint) {
         (Method::Get, "info") => Ok(Response::json(200, &info(context))),
         (Method::Get, "changes") => Ok(Response::json(200, &changes(context))),
@@ -216,9 +230,10 @@ fn route(context: &Arc<Context>, request: &mut Request) -> Result<Response, Http
                 RunKind::Query,
                 Some(&script),
             )?;
-            let answer = context.call(move |s| {
-                s.execute_with_cancel(&script, &options, playground_authorizer(), &cancel)
-            });
+            // A request marked read-only reads only (`Request::mark_read_only`).
+            let authorizer = authorizer_for(request.is_read_only(), None);
+            let answer = context
+                .call(move |s| s.execute_with_cancel(&script, &options, authorizer, &cancel));
             Ok(Response::text(200, answer?))
         }
         (Method::Get, "schema") => value(context.call_fallible(|s| s.graph().schema_view())?),
@@ -756,9 +771,12 @@ fn run_saved_query(context: &Arc<Context>, request: &mut Request) -> Result<Resp
     let script = graphersal_session::queries::query_call_text(&name, &params)
         .map_err(|err| HttpError::bad_request(err.to_string()))?;
     let allow_list = context.allow_list.clone();
+    // A request marked read-only (`Request::mark_read_only`) runs it under the reading
+    // authorizer (with the allow-list policy, that policy without its writes).
+    let read_only = request.is_read_only();
     let authorizer = match &allow_list {
-        Some(allow) => authorizer_for(context.fixed_read_only(), Some(&allow.policy)),
-        None => playground_authorizer(),
+        Some(allow) => authorizer_for(context.fixed_read_only() || read_only, Some(&allow.policy)),
+        None => authorizer_for(read_only, None),
     };
     let cancel = CancelToken::new();
     let _run = context.register_run(
@@ -853,9 +871,10 @@ fn info_fields(context: &Context) -> Value {
         "view": store::current_view(context),
         // The limits every query runs under (from the command line).
         "presets": context.presets,
-        // --read-only (or a Store this process may not write), or the runtime read-only toggle
-        // on (ContextBuilder::runtime_read_only): every write is refused.
-        "readOnly": context.is_read_only(),
+        // --read-only (or a Store this process may not write), the runtime read-only toggle
+        // on (ContextBuilder::runtime_read_only), or a request the host marked read-only
+        // (Request::mark_read_only): every write is refused.
+        "readOnly": context.is_read_only() || request_read_only(),
         // The MCP endpoint (`--mcp`): `{readOnly, endpoint, client}`, or null.
         "mcp": mcp::status(context),
     });
@@ -895,8 +914,9 @@ fn changes(context: &Context) -> Value {
         .unwrap_or_else(|_| json!({}));
     answer["view"] = store::current_view(context);
     answer["mcp"] = mcp::status(context);
-    // Read-only now (it changes at run time: ContextBuilder::runtime_read_only).
-    answer["readOnly"] = json!(context.is_read_only());
+    // Read-only now (it changes at run time: ContextBuilder::runtime_read_only), or for this
+    // request (Request::mark_read_only).
+    answer["readOnly"] = json!(context.is_read_only() || request_read_only());
     // Damage found while the store is open: the banner appears without a reload.
     answer["damageFound"] = match context.store.as_ref() {
         None => Value::Null,

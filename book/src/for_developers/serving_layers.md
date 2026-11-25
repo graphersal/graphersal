@@ -52,6 +52,7 @@ excerpts on this page come from it.
 | `ContextBuilder::mcp_session_route(Some(..))` | `graphersal-serve`, feature `mcp` | Sets the route tag of the sessions this context starts. |
 | `ContextBuilder::shared_mcp` / `mcp_profile` | `graphersal-serve`, feature `mcp` | One MCP endpoint for every context, with a profile per context. |
 | `GraphResolver`, `Server::ready_with` | `graphersal-serve` | The extension point that picks the context of each request. |
+| `Request::mark_read_only` | `graphersal-serve` | Serves one request read-only: the host's router or `RequestFilter` marks it, for a caller with read access only (see "Read-only requests" below). EXPERIMENTAL. |
 | `GraphDirectory`, `Mcp::handle_directory` | `graphersal-mcp` | One MCP endpoint over all graphs: the agent lists them, selects one per session and may switch (see below). EXPERIMENTAL. |
 
 ### Base identity
@@ -136,6 +137,34 @@ routes (`/mcp` and per-graph paths) accepts a session id on each of them, for it
 only. A resolver that checks a routed id for a caller uses
 `mcp.verified_session_route_for(id, identity)`; `verified_session_route(id)` checks it as
 anonymous.
+
+### Read-only requests
+
+A host that gives some callers read access only marks their requests:
+`request.mark_read_only()`, in its router or its `RequestFilter`, after it decided who sent the
+request. The mark holds for that one request, and nothing clears it. `graphersal-serve` then
+serves the request like this (the context itself stays writable for every other request):
+
+- `POST /api/execute` and `POST /api/query` run under the reading authorizer. A script or saved
+  query that would write fails with a permission error and changes nothing.
+- Every other route that writes answers `409` with `the graph is served read-only: writes are
+  refused. This request has read access only: ask for write access to change the data.`
+  (`READ_ONLY_HEADLINE`, `READ_ONLY_REQUEST_HELP`). That covers the schema, element, catalog,
+  compression, index and saved-query writes, the scheduled jobs, the advisor's apply, dismiss
+  and restore, `POST /api/save`, and every Store operation that writes: checkpoint, mark,
+  rollback, the attic, compaction, and also fork, backup and view, which write directories or
+  switch the view every client of the context sees.
+- Reads stay open, downloads included: exports in every format, the `.gsnap` download, Store
+  snapshots, statistics, the journal, the layout.
+- `/mcp` serves the request under the context's MCP profile made read-only
+  (`Profile::with_read_only(true)` in `graphersal-mcp`): only reading tools, and a writing query
+  is refused. The same MCP session may write again on a request that is not marked.
+- `GET /api/info` and `GET /api/changes` answer `readOnly: true` for the request, and so does
+  their `mcp` status.
+
+The host's own extra routes (`Hooks::route`) see the mark with `request.is_read_only()` and
+decide for themselves. A host that serves MCP in directory mode (`handle_directory`) answers a
+reader's profile from its `GraphDirectory::host` instead.
 
 ## What a host builds
 
@@ -353,4 +382,6 @@ apply. Saved queries are not tools of their own here: the agent runs them with
 - **Profiles are per context.** The read-only flag and the access policy of each customer are
   in that customer's contexts (`mcp_profile`). One shared endpoint does not mean one shared
   policy.
-- Authentication stays the host's job, in a `RequestFilter` that knows the path's name.
+- Authentication stays the host's job, in a `RequestFilter` that knows the path's name. The
+  filter attaches the caller's identity and, for a caller with read access only, marks the
+  request read-only (see "Read-only requests" above).
