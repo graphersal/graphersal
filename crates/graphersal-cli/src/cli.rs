@@ -2999,6 +2999,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "dev-server")]
     fn mcp_config_is_read_and_checked_while_parsing() {
         let examples = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("examples");
         // Both examples parse; the knowledge-graph one on a read-only server.
