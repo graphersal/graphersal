@@ -12,7 +12,7 @@ use crate::error::{TraverserError, TraverserResult};
 use crate::graph::{
     AccessRequest, AccessRequestBuf, Action, AllowAll, Authorizer, GraphStorage, Resource,
 };
-use crate::traversal::context::is_admin_option;
+use crate::traversal::context::{is_admin_option, limit_amount};
 use crate::traversal::step::{AccessFlow, GraphStep};
 use crate::value::ElementProperty;
 
@@ -29,6 +29,10 @@ pub(crate) struct Restrictions {
     /// Options present when the restriction was attached (the host's presets): an
     /// administrative key holding exactly this value is not the query's own setting.
     pub(crate) preset_options: Arc<HashMap<CompactString, ElementProperty>>,
+    /// Whether the preset limit options ([`limit_amount`]) are ceilings: the query may lower
+    /// one without asking the authorizer, and raising or removing one fails with
+    /// [`TraverserError::OptionAboveCeiling`] whatever the authorizer allows.
+    pub(crate) preset_ceilings: bool,
     /// Requests the plan makes besides its steps, with the operation that makes them (the
     /// script DSL adds `("with_side_effect", Create Data)` for a `subgraph()` into a host
     /// graph).
@@ -44,6 +48,7 @@ impl Default for Restrictions {
             authorizer: Arc::new(AllowAll),
             private_graph: false,
             preset_options: Arc::default(),
+            preset_ceilings: false,
             required: Vec::new(),
             journal: None,
         }
@@ -55,6 +60,7 @@ impl std::fmt::Debug for Restrictions {
         f.debug_struct("Restrictions")
             .field("private_graph", &self.private_graph)
             .field("preset_options", &self.preset_options)
+            .field("preset_ceilings", &self.preset_ceilings)
             .field("required", &self.required)
             .finish_non_exhaustive()
     }
@@ -169,6 +175,9 @@ impl Restrictions {
             .collect();
         set_by_query.sort();
         for key in set_by_query {
+            if self.within_ceiling(key, options)? {
+                continue;
+            }
             self.authorize_once(
                 &mut seen,
                 &format!("with(\"{key}\")"),
@@ -187,6 +196,46 @@ impl Restrictions {
                     std::ptr::eq(step, denied)
                 })
             })
+    }
+
+    /// With [`Self::preset_ceilings`]: whether the query's own value of the preset limit `key`
+    /// is at or below the preset (a lowering, allowed without asking the authorizer); a value
+    /// above it, or no limit at all, fails with [`TraverserError::OptionAboveCeiling`].
+    /// `false` (ask the authorizer as usual) without ceilings, for a key without a preset, for
+    /// a key that is not a limit and for a malformed value (whose parse error comes later).
+    fn within_ceiling(
+        &self,
+        key: &str,
+        options: &HashMap<CompactString, ElementProperty>,
+    ) -> TraverserResult<bool> {
+        if !self.preset_ceilings {
+            return Ok(false);
+        }
+        let (Some(preset), Some(value)) = (self.preset_options.get(key), options.get(key)) else {
+            return Ok(false);
+        };
+        let (Some(ceiling), Some(requested)) =
+            (limit_amount(key, preset), limit_amount(key, value))
+        else {
+            return Ok(false);
+        };
+        let within = match (ceiling, requested) {
+            (None, _) => true,
+            (Some(_), None) => false,
+            (Some(ceiling), Some(requested)) => requested <= ceiling,
+        };
+        if within {
+            return Ok(true);
+        }
+        let describe = |amount: Option<u64>, value: &ElementProperty| match amount {
+            Some(_) => crate::value::literal::rhai_literal(value),
+            None => format!("{} (no limit)", crate::value::literal::rhai_literal(value)),
+        };
+        Err(Box::new(TraverserError::OptionAboveCeiling {
+            key: key.to_string(),
+            ceiling: describe(ceiling, preset),
+            requested: describe(requested, value),
+        }))
     }
 
     /// Checks `steps` (one level, children depth first), each step with the

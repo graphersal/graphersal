@@ -148,7 +148,60 @@ pub fn graph_scope_with_options<'a>(
     options: &[(&str, ElementProperty)],
     authorizer: Arc<dyn crate::graph::Authorizer>,
 ) -> Scope<'a> {
-    let access = Arc::new(access::ScriptAccess::new(authorizer, options));
+    scope_with_presets(g, options, authorizer, false)
+}
+
+/// [`graph_scope_with_options`] with the preset resource limits as CEILINGS: a query may lower
+/// one with `g.with(key, smaller)` (allowed without asking the authorizer), but raising one, or
+/// removing it (`evaluationTimeout` `0`), fails with
+/// [`TraverserError::OptionAboveCeiling`](crate::error::TraverserError::OptionAboveCeiling)
+/// before anything runs, whatever the authorizer allows. The limits are `evaluationTimeout`,
+/// `repeat.max_loops`, `bulk.max_expansion` and the `traversal.max_*` keys; the other preset
+/// options behave as in [`graph_scope_with_options`]. A limit the host does not preset is no
+/// ceiling (the engine default is not one): preset every limit the query must not raise. Pair
+/// it with [`engine_with_ceilings`] (same authorizer and options), so the sources a script
+/// creates itself (`GraphSource::empty()`, ...) and the saved queries it calls are capped too.
+///
+/// ```rust
+/// # use std::sync::Arc;
+/// # use graphersal::prelude::*;
+/// # use graphersal::auth::{AllowAll, Authorizer};
+/// let authorizer: Arc<dyn Authorizer> = Arc::new(AllowAll);
+/// let options = [("evaluationTimeout", ElementProperty::from(30_000))];
+/// let engine =
+///     graphersal::script::engine_with_ceilings(&Default::default(), authorizer.clone(), &options);
+/// let mut scope = graphersal::script::graph_scope_with_ceilings(
+///     Arc::new(GraphSource::tinkerpop_modern()),
+///     &options,
+///     authorizer,
+/// );
+/// let mut run = |script: &str| {
+///     engine.eval_with_scope::<graphersal::script::rhai::Dynamic>(&mut scope, script)
+/// };
+/// // Lowering is allowed.
+/// let count = run(r#"g.with("evaluationTimeout", 5_000).v().count().next()"#).unwrap();
+/// assert_eq!(count.as_int().unwrap(), 6);
+/// // Raising or removing the timeout is refused.
+/// let raised = run(r#"g.with("evaluationTimeout", 60_000).v().count().next()"#).unwrap_err();
+/// assert!(raised.to_string().contains("capped at 30000"), "{raised}");
+/// assert!(run(r#"g.with("evaluationTimeout", 0).v().count().next()"#).is_err());
+/// ```
+pub fn graph_scope_with_ceilings<'a>(
+    g: impl IntoAnyGraph,
+    options: &[(&str, ElementProperty)],
+    authorizer: Arc<dyn crate::graph::Authorizer>,
+) -> Scope<'a> {
+    scope_with_presets(g, options, authorizer, true)
+}
+
+/// The scope of [`graph_scope_with_options`] (`ceilings`: [`graph_scope_with_ceilings`]).
+fn scope_with_presets<'a>(
+    g: impl IntoAnyGraph,
+    options: &[(&str, ElementProperty)],
+    authorizer: Arc<dyn crate::graph::Authorizer>,
+    ceilings: bool,
+) -> Scope<'a> {
+    let access = Arc::new(access::ScriptAccess::new(authorizer, options, ceilings));
     let mut source = ScriptGraphSource::graph(g).with_access(access.clone(), false);
     for (key, value) in options {
         source

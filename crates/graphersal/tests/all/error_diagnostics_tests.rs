@@ -1105,6 +1105,45 @@ fn locked_option_help_explains_the_host_policy_not_a_bad_value() {
     assert!(help.contains("ExecutionPolicy::with_locked"), "{help}");
 }
 
+/// A raise of a host ceiling (`graph_scope_with_ceilings`): the message names the ceiling and
+/// the value asked for, the help says a lower value works, with an example.
+#[cfg(feature = "script")]
+#[test]
+fn option_above_ceiling_help_names_the_ceiling_and_a_lower_value() {
+    let authorizer: std::sync::Arc<dyn Authorizer> =
+        std::sync::Arc::new(graphersal::auth::AllowAll);
+    let options = [("evaluationTimeout", ElementProperty::from(2000))];
+    let engine =
+        graphersal::script::engine_with_ceilings(&Default::default(), authorizer.clone(), &options);
+    let mut scope = graphersal::script::graph_scope_with_ceilings(
+        std::sync::Arc::new(GraphSource::tinkerpop_modern()),
+        &options,
+        authorizer,
+    );
+    let err = engine
+        .eval_with_scope::<graphersal::script::rhai::Dynamic>(
+            &mut scope,
+            r#"g.with("evaluationTimeout", 0).v().count().next()"#,
+        )
+        .unwrap_err()
+        .to_string();
+    assert!(
+        err.contains(
+            "Option 'evaluationTimeout' is capped at 2000 by the host; the query asked for 0 (no \
+             limit), and a query may only lower this limit"
+        ),
+        "{err}"
+    );
+    assert!(
+        err.contains(
+            "The host running this query caps 'evaluationTimeout' at 2000: a query may lower it, \
+             for example g.with(\"evaluationTimeout\", 2000) or any smaller value, but never raise \
+             it. A value of 0 would remove the timeout, so it is refused too."
+        ),
+        "{err}"
+    );
+}
+
 #[test]
 fn timeout_help_names_loop_bounds_for_a_repeat() {
     let graph = GraphSource::large_110k();

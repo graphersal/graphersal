@@ -75,11 +75,34 @@ pub fn engine_with_options(
     authorizer: Arc<dyn crate::graph::Authorizer>,
     options: &[(&str, ElementProperty)],
 ) -> Engine {
+    engine_with_presets(limits, authorizer, options, false)
+}
+
+/// [`engine_with_options`] with the preset resource limits as CEILINGS a query may lower but
+/// never raise or remove, for the sources the engine provides and the saved queries a script
+/// calls; pair it with [`graph_scope_with_ceilings`](super::graph_scope_with_ceilings), which
+/// documents the rule and has the example.
+pub fn engine_with_ceilings(
+    limits: &ScriptLimits,
+    authorizer: Arc<dyn crate::graph::Authorizer>,
+    options: &[(&str, ElementProperty)],
+) -> Engine {
+    engine_with_presets(limits, authorizer, options, true)
+}
+
+/// The engine of [`engine_with_options`] (`ceilings`: [`engine_with_ceilings`]).
+fn engine_with_presets(
+    limits: &ScriptLimits,
+    authorizer: Arc<dyn crate::graph::Authorizer>,
+    options: &[(&str, ElementProperty)],
+    ceilings: bool,
+) -> Engine {
     let mut engine = register::new_engine();
     access::install(
         &mut engine,
         authorizer,
         options,
+        ceilings,
         limits.effective_max_value_depth(),
     );
     limits.apply(&mut engine);

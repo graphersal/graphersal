@@ -22,6 +22,10 @@ use std::collections::HashMap;
 pub(crate) struct ScriptAccess {
     pub(crate) authorizer: Arc<dyn Authorizer>,
     pub(crate) presets: Arc<HashMap<CompactString, ElementProperty>>,
+    /// Whether the preset limits are ceilings a query may lower but never raise
+    /// ([`super::graph_scope_with_ceilings`]); `false`: a query's own `g.with(..)` replaces a
+    /// preset when the authorizer allows `Update` on the option.
+    pub(crate) ceilings: bool,
     /// The engine's [`ScriptLimits::max_value_depth`] (only on the engine tag, [`install`]);
     /// `0` reads as the default ([`value_depth_of`]).
     pub(crate) max_value_depth: usize,
@@ -44,6 +48,7 @@ impl Default for ScriptAccess {
         Self {
             authorizer: Arc::new(AllowAll),
             presets: Arc::default(),
+            ceilings: false,
             max_value_depth: 0,
             read_only: false,
             query_depth: 0,
@@ -53,13 +58,16 @@ impl Default for ScriptAccess {
 }
 
 impl ScriptAccess {
-    /// The access of a session with `authorizer` and preset `options`.
+    /// The access of a session with `authorizer` and preset `options` (`ceilings`: the preset
+    /// limits may only be lowered).
     pub(crate) fn new(
         authorizer: Arc<dyn Authorizer>,
         options: &[(&str, ElementProperty)],
+        ceilings: bool,
     ) -> Self {
         Self {
             authorizer,
+            ceilings,
             max_value_depth: 0,
             read_only: false,
             query_depth: 0,
@@ -104,6 +112,7 @@ impl ScriptAccess {
             authorizer: self.authorizer.clone(),
             private_graph,
             preset_options: self.presets.clone(),
+            preset_ceilings: self.ceilings,
             required: Vec::new(),
             journal: None,
         }
@@ -267,16 +276,18 @@ pub fn set_engine_graph(engine: &mut Engine, graph: impl crate::graph::IntoAnyGr
 }
 
 /// Installs `authorizer` on `engine`: the tag for the source constructors (also carrying the
-/// host's preset `options` for the sources they create and the value-depth limit
+/// host's preset `options` for the sources they create (`ceilings`: as limits a query may only
+/// lower) and the value-depth limit
 /// `max_value_depth` for the value conversions, [`value_depth_of`]) and the module resolver of
 /// `import` ([`FileImports`]: `Execute` on the module's `File`, resolved by the authorizer).
 pub(crate) fn install(
     engine: &mut Engine,
     authorizer: Arc<dyn Authorizer>,
     options: &[(&str, ElementProperty)],
+    ceilings: bool,
     max_value_depth: usize,
 ) {
-    let mut access = ScriptAccess::new(authorizer.clone(), options);
+    let mut access = ScriptAccess::new(authorizer.clone(), options, ceilings);
     access.max_value_depth = max_value_depth;
     engine.set_default_tag(Dynamic::from(EngineAccess(
         Arc::new(access),
