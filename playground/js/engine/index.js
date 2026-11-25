@@ -6,7 +6,8 @@
 // the protocol (`protocol: 'graphersal/1'`, js/engine/http-engine.js `isEngineInfo`) and the
 // HTTP engine is used (no WebAssembly download, no graph choice). Otherwise (GitHub Pages,
 // `python3 -m http.server`, an older host without `protocol`) it is the WebAssembly playground
-// as always.
+// as always. A host that requires a login (its `/api/info` answers 401 naming a `login` path)
+// sends the page to its login page instead (js/engine/http-engine.js `loginRedirect`).
 
 import { WasmEngine } from './wasm-engine.js';
 import { HttpEngine } from './http-engine.js';
@@ -20,7 +21,11 @@ let instance = null;
  */
 export async function getEngine() {
   if (instance) return instance;
-  const http = await HttpEngine.detect();
+  const probe = await HttpEngine.probe();
+  // A host that requires a login answered 401 naming its login page: the page is on its way
+  // there (`loginRedirect`), so neither engine starts; the answer never comes.
+  if (probe && probe.redirect) return new Promise(() => {});
+  const http = HttpEngine.fromProbe(probe);
   if (http) {
     instance = { engine: http, missing: false };
     return instance;

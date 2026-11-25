@@ -31,6 +31,11 @@
 //   engine's own headers win on a clash). The values are never logged nor put into a URL; with
 //   host headers `snapshotUrl` answers null (a plain link cannot carry a header, so the Store
 //   menu hides those download links). Unused, nothing changes.
+// - a host that requires a login (EXPERIMENTAL): an API answer `401` whose JSON body names a
+//   same-origin login path (`{"error": "...", "login": "/"}`) sends the page there with a
+//   return path (`?next=<pathname+search>`, `loginRedirect`), from `probe` (instead of falling
+//   back to the WebAssembly playground) and from every request; a 401 without `login` (a host's
+//   own token filter) is an error as before.
 
 import { Engine } from './engine.js';
 import { newClientId } from '../change-feed.js';
@@ -55,6 +60,68 @@ export const PROTOCOLS = Object.freeze(['graphersal/1']);
 export function isEngineInfo(info) {
   if (!info || typeof info !== 'object' || Array.isArray(info)) return false;
   return typeof info.protocol === 'string' && PROTOCOLS.includes(info.protocol);
+}
+
+/**
+ * The login target of a host's answer, or null: `response` a 401 whose JSON `body` has `login`,
+ * a path of the page's own origin (starts with `/`, not `//`, no backslash, control character
+ * or space; resolved against `location` it keeps its origin) that is not the page's own path
+ * (no loop). The target is `login` plus `next=<pathname+search>` of `location` (`?next=`, or
+ * `&next=` when `login` has a query already). Pure: `loginRedirect` navigates.
+ * @param {{status: number}|null} response
+ * @param {*} body  The parsed JSON body (null when it was none).
+ * @param {{href: string, origin?: string, pathname: string, search: string}|null} location
+ * @returns {string|null}
+ */
+export function loginTarget(response, body, location) {
+  if (!response || response.status !== 401) return null;
+  if (!location || typeof location.href !== 'string') return null;
+  if (!body || typeof body !== 'object' || Array.isArray(body)) return null;
+  const login = body.login;
+  if (typeof login !== 'string' || !login.startsWith('/') || login.startsWith('//')) return null;
+  if (/[\\\s\u0000-\u001f\u007f]/.test(login)) return null;
+  let url;
+  try {
+    url = new URL(login, location.href);
+  } catch (err) {
+    return null;
+  }
+  const origin = typeof location.origin === 'string' ? location.origin : new URL(location.href).origin;
+  if (url.origin !== origin) return null;
+  if (url.pathname === location.pathname) return null;
+  const here = `${location.pathname || '/'}${location.search || ''}`;
+  const hash = login.indexOf('#');
+  const path = hash < 0 ? login : login.slice(0, hash);
+  const fragment = hash < 0 ? undefined : login.slice(hash + 1);
+  const joiner = path.includes('?') ? '&' : '?';
+  const target = `${path}${path.endsWith('?') || path.endsWith('&') ? '' : joiner}next=${encodeURIComponent(here)}`;
+  return fragment === undefined ? target : `${target}#${fragment}`;
+}
+
+/**
+ * Sends the page to the host's login page when `response` is a 401 naming one (`loginTarget`):
+ * `location.assign(target)`; answers the target, or null when nothing happened (the caller then
+ * reports the error as before). `location` defaults to the page's (`globalThis.location`; none
+ * in Node, so nothing happens there unless a test passes one).
+ * @param {{status: number}|null} response
+ * @param {*} body
+ * @param {{href: string, pathname: string, search: string, assign: Function}} [location]
+ * @returns {string|null}
+ */
+export function loginRedirect(response, body, location = globalThis.location) {
+  const target = loginTarget(response, body, location);
+  if (target === null || typeof location.assign !== 'function') return null;
+  location.assign(target);
+  return target;
+}
+
+/** A body text as JSON, or null when it is none. */
+function jsonOrNull(text) {
+  try {
+    return text ? JSON.parse(text) : null;
+  } catch (err) {
+    return null;
+  }
 }
 
 /** The playground root (the directory of index.html): the dev server serves it at `/`. */
@@ -154,14 +221,24 @@ export class HttpEngine extends Engine {
     this.stopRequested = false;
     /** This page's id in the server's change feed. */
     this.clientId = options.clientId || newClientId();
+    /** The page's location for `loginRedirect` (tests pass a fake; default the page's). */
+    this.location = options.location || globalThis.location;
+  }
+
+  /** On a 401 naming a login page: goes there (`loginRedirect`); the target or null. */
+  loginRedirect(response, body) {
+    return loginRedirect(response, body, this.location);
   }
 
   /**
    * Fetches `GET api/info` of the serving origin once: `{info, fetch, headers}` (`info` the
    * parsed JSON object, whatever server sent it), or null when there is no JSON answer (a static
-   * file server answers 404 or HTML). `fromProbe` builds the engine from it.
-   * @param {{base?: URL|string, fetch?: Function, headers?: Object<string,string>}} [options]
-   * @returns {Promise<{info: Object, fetch: Function, headers: Object<string,string>}|null>}
+   * file server answers 404 or HTML). `fromProbe` builds the engine from it. A 401 naming a
+   * login page (`loginRedirect`) sends the page there and answers `{redirect: target}` (no
+   * engine, and no WebAssembly fallback either: the page is leaving); a 401 without one answers
+   * null as before.
+   * @param {{base?: URL|string, fetch?: Function, headers?: Object<string,string>, location?: Object}} [options]
+   * @returns {Promise<{info: Object, fetch: Function, headers: Object<string,string>}|{redirect: string}|null>}
    */
   static async probe(options = {}) {
     const fetchImpl = options.fetch || (typeof fetch === 'function' ? fetch.bind(globalThis) : null);
@@ -172,6 +249,10 @@ export class HttpEngine extends Engine {
     try {
       const url = new URL('api/info', options.base || DEFAULT_BASE);
       const r = await fetchImpl(url, { cache: 'no-store', headers: { ...headers, Accept: 'application/json' } });
+      if (r.status === 401) {
+        const target = loginRedirect(r, jsonOrNull(await r.text()), options.location || globalThis.location);
+        return target === null ? null : { redirect: target };
+      }
       if (!r.ok) return null;
       const info = JSON.parse(await r.text());
       if (!info || typeof info !== 'object') return null;
@@ -186,7 +267,7 @@ export class HttpEngine extends Engine {
    * null.
    */
   static fromProbe(probe, options = {}) {
-    if (!probe || !isEngineInfo(probe.info)) return null;
+    if (!probe || probe.redirect || !isEngineInfo(probe.info)) return null;
     return new HttpEngine(probe.info, { ...options, fetch: probe.fetch, headers: probe.headers });
   }
 
@@ -233,6 +314,8 @@ export class HttpEngine extends Engine {
     if (!r.ok) {
       const err = new Error((data && data.error) || `HTTP ${r.status}`);
       err.status = r.status;
+      // A host's login page: the page goes there; the call still rejects.
+      this.loginRedirect(r, data);
       throw err;
     }
     return data;
@@ -352,11 +435,11 @@ export class HttpEngine extends Engine {
       throw new Error(`The dev server is not reachable (${err && err.message ? err.message : err}); is graphersal --server still running?`);
     }
     if (!r.ok) {
-      let message = `HTTP ${r.status}`;
-      try {
-        message = JSON.parse(await r.text()).error || message;
-      } catch (err) { /* not JSON */ }
-      throw new Error(message);
+      const body = jsonOrNull(await r.text().catch(() => ''));
+      this.loginRedirect(r, body);
+      const err = new Error((body && body.error) || `HTTP ${r.status}`);
+      err.status = r.status;
+      throw err;
     }
     return new Uint8Array(await r.arrayBuffer());
   }
@@ -559,7 +642,12 @@ export class HttpEngine extends Engine {
     } catch (err) {
       throw new Error(`The dev server is not reachable (${err && err.message ? err.message : err}); is graphersal --server still running?`);
     }
-    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    if (!r.ok) {
+      if (r.status === 401) this.loginRedirect(r, jsonOrNull(await r.text().catch(() => '')));
+      const err = new Error(`HTTP ${r.status}`);
+      err.status = r.status;
+      throw err;
+    }
     return r.text();
   }
 
