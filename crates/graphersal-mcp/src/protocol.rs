@@ -140,14 +140,30 @@ impl Mcp {
         self.sessions.is_signed()
     }
 
-    /// The route tag of the MCP session id `session_id` ([`crate::session_route`]), only when
-    /// this endpoint knows the id (signed by its key, or in its table): a forged or altered
-    /// route answers `None`. For a host whose graph resolver holds the endpoint (one shared
-    /// endpoint for its graphs); a resolver without it uses [`crate::session_route`], and the
-    /// endpoint refuses a forged id when it serves the request.
+    /// The route tag of the anonymous MCP session id `session_id` ([`crate::session_route`]),
+    /// only when this endpoint knows the id (signed by its key, or in its table) as a session
+    /// of an anonymous `initialize`: a forged or altered route, or a session of an identity,
+    /// answers `None`. For a host whose graph resolver holds the endpoint (one shared endpoint
+    /// for its graphs) and attaches no identity; a host that does calls
+    /// [`Mcp::verified_session_route_for`] with the request's identity. A resolver without the
+    /// endpoint uses [`crate::session_route`], and the endpoint refuses a forged id when it
+    /// serves the request.
     pub fn verified_session_route<'a>(&self, session_id: &'a str) -> Option<&'a str> {
+        self.verified_session_route_for(session_id, None)
+    }
+
+    /// [`Mcp::verified_session_route`] for a request of `identity` (the one the host attaches
+    /// with [`McpRequest::with_identity`]; `None` = anonymous): `None` unless the session
+    /// belongs to that identity, the same answer as for a forged id.
+    pub fn verified_session_route_for<'a>(
+        &self,
+        session_id: &'a str,
+        identity: Option<&str>,
+    ) -> Option<&'a str> {
         let route = session_route(session_id)?;
-        self.sessions.knows(session_id).then_some(route)
+        self.sessions
+            .knows_as(session_id, identity)
+            .then_some(route)
     }
 
     /// Serves the operator's configuration (`--mcp-config`, with the shorthand flags folded in
@@ -325,7 +341,8 @@ impl Mcp {
         Some(answer.with_header("WWW-Authenticate", "Bearer"))
     }
 
-    /// `DELETE /mcp`: ends the MCP session the request names.
+    /// `DELETE /mcp`: ends the MCP session the request names, when it belongs to the
+    /// request's identity (else `404`, as for an unknown session).
     pub(crate) fn delete(&self, request: &McpRequest<'_>) -> McpResponse {
         let Some(id) = request.header_value("Mcp-Session-Id") else {
             return rpc_error(
@@ -335,7 +352,7 @@ impl Mcp {
                 "DELETE /mcp needs the Mcp-Session-Id header",
             );
         };
-        let removed = self.sessions.forget(id);
+        let removed = self.sessions.forget_as(id, request.identity());
         empty(if removed { 200 } else { 404 })
     }
 
@@ -408,8 +425,10 @@ impl Mcp {
             ));
         }
         let session_id = request.header_value("Mcp-Session-Id").map(str::to_string);
+        // A session of another identity (anonymous included) is answered like an unknown one,
+        // so a session id cannot be borrowed and the answer does not tell that it exists.
         if let Some(id) = &session_id
-            && !self.sessions.knows(id)
+            && !self.sessions.knows_as(id, request.identity())
         {
             return Err(rpc_error(
                 404,
@@ -637,7 +656,9 @@ impl Mcp {
                         ),
                     ));
                 }
-                let session = self.sessions.create_routed(&client, route.as_deref());
+                let session = self
+                    .sessions
+                    .create_routed(&client, route.as_deref(), peer.identity);
                 self.stats.record_initialize(&session);
                 Some(session)
             }

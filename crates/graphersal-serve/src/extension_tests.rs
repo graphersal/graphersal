@@ -845,6 +845,82 @@ fn the_identity_of_the_request_filter_reaches_the_mcp_runs() {
     assert_eq!(started[0].0.identity(), Some("alice"));
 }
 
+/// A filter that attaches the identity named by `X-User` (none without the header: anonymous).
+#[cfg(feature = "mcp")]
+struct UserHeaderFilter;
+
+#[cfg(feature = "mcp")]
+impl RequestFilter for UserHeaderFilter {
+    fn filter(&self, request: &mut Request<'_>) -> Result<(), HttpError> {
+        if let Some(user) = request.header("X-User").map(str::to_string) {
+            request.set_identity(&user);
+        }
+        Ok(())
+    }
+}
+
+#[cfg(feature = "mcp")]
+#[test]
+fn an_mcp_session_of_the_context_cannot_be_borrowed_by_another_identity() {
+    let key = graphersal_mcp::SessionKey::new(&[5u8; 32]).expect("a key");
+    for (mode, mcp) in [
+        ("table", graphersal_mcp::Mcp::new(false, None, false)),
+        (
+            "signed",
+            graphersal_mcp::Mcp::new(false, None, false).with_session_key(key),
+        ),
+    ] {
+        let context = Context::builder(session_on("modern"), check())
+            .filter(Arc::new(UserHeaderFilter))
+            .mcp(Some(mcp))
+            .build();
+        let server = Server::new();
+        server.ready(context).expect("ready once");
+        let send = |method: Method, body: &Value, session: Option<&str>, user: Option<&str>| {
+            let text = body.to_string().into_bytes();
+            let length = text.len();
+            let mut request = Request::new(method, "/mcp", Cursor::new(text))
+                .with_header("Host", HOST)
+                .with_header("Content-Type", "application/json")
+                .with_header("Accept", "application/json")
+                .with_body_length(Some(length));
+            if let Some(session) = session {
+                request = request.with_header("Mcp-Session-Id", session);
+            }
+            if let Some(user) = user {
+                request = request.with_header("X-User", user);
+            }
+            server.handle(request)
+        };
+        let initialize = json!({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {
+            "protocolVersion": "2025-06-18", "capabilities": {},
+            "clientInfo": {"name": "tester", "version": "1"}}});
+        let ping = json!({"jsonrpc": "2.0", "id": 2, "method": "ping"});
+        let users = [None, Some("alice"), Some("bob")];
+        for owner in users {
+            let answer = send(Method::Post, &initialize, None, owner);
+            assert_eq!(answer.status(), 200, "{mode}");
+            let session = answer
+                .headers()
+                .iter()
+                .find(|(name, _)| name.eq_ignore_ascii_case("mcp-session-id"))
+                .map(|(_, value)| value.clone())
+                .expect("a session id");
+            let unknown = send(Method::Post, &ping, Some("0123abcd"), owner);
+            assert_eq!(unknown.status(), 404, "{mode}");
+            for other in users.into_iter().filter(|other| *other != owner) {
+                let borrowed = send(Method::Post, &ping, Some(&session), other);
+                assert_eq!(borrowed.status(), 404, "{mode}: {owner:?} by {other:?}");
+                assert_eq!(borrowed.body(), unknown.body(), "{mode}");
+                let deleted = send(Method::Delete, &json!({}), Some(&session), other);
+                assert_eq!(deleted.status(), 404, "{mode}: {owner:?} by {other:?}");
+            }
+            let own = send(Method::Post, &ping, Some(&session), owner);
+            assert_eq!(own.status(), 200, "{mode}: {owner:?}");
+        }
+    }
+}
+
 #[test]
 fn a_time_zone_the_session_refuses_is_an_error_of_the_job_ticker() {
     let context = Context::builder(session_on("empty"), check()).build();
