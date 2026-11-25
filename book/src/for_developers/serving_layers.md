@@ -47,11 +47,14 @@ excerpts on this page come from it.
 | `Host::serves_layer` | `graphersal-mcp` | Makes the `initialize` instructions name `layer()`, `has_layer()` and `g.layer_diff()`. |
 | Route tag | `graphersal-mcp` | `Host::session_route` puts the version into the session id: `<route>~<id>`. |
 | `graphersal_mcp::session_route(id)` | `graphersal-mcp` | Reads the route out of an id, without checking the id. |
-| `Mcp::verified_session_route(id)` | `graphersal-mcp` | Returns the route only when the endpoint knows the id. |
+| `Mcp::verified_session_route(id)` | `graphersal-mcp` | Returns the route only when the endpoint knows the id as an anonymous session; `verified_session_route_for(id, identity)` for a request with an identity. |
 | `ContextBuilder::layered(true)` | `graphersal-serve` | Tells the context's `Host` that it serves a layer from the first `initialize` on. |
 | `ContextBuilder::mcp_session_route(Some(..))` | `graphersal-serve`, feature `mcp` | Sets the route tag of the sessions this context starts. |
 | `ContextBuilder::shared_mcp` / `mcp_profile` | `graphersal-serve`, feature `mcp` | One MCP endpoint for every context, with a profile per context. |
 | `GraphResolver`, `Server::ready_with` | `graphersal-serve` | The extension point that picks the context of each request. |
+| `Request::mark_read_only` | `graphersal-serve` | Serves one request read-only: the host's router or `RequestFilter` marks it, for a caller with read access only (see "Read-only requests" below). EXPERIMENTAL. |
+| `ContextBuilder::file_root`, `jobs_outside_file_root` | `graphersal-serve` | Confines every file path a client names (backup jobs, catalog loads, fork and backup directories) to one directory (see "File root" below). EXPERIMENTAL. |
+| `SessionStore`, `Mcp::with_session_store`, `Mcp::forget_sessions_of` | `graphersal-mcp` | Keeps the MCP session table across restarts, and ends the sessions of a revoked identity (see "Sessions survive a restart" below). EXPERIMENTAL. |
 | `GraphDirectory`, `Mcp::handle_directory` | `graphersal-mcp` | One MCP endpoint over all graphs: the agent lists them, selects one per session and may switch (see below). EXPERIMENTAL. |
 
 ### Base identity
@@ -122,6 +125,103 @@ the session id becomes `<route>~<id>`, for example `acme@2026.3~9f2c…`:
 
 A stream connection (`Context::mcp_connection`) is its own session and has no route: the host
 picks the context when it opens the stream.
+
+### Sessions belong to their identity
+
+Every HTTP MCP session belongs to the identity of the request that sent its `initialize` (what
+the host's request filter attached, `McpRequest::with_identity`; none means anonymous). A
+request that names the session id with another identity gets the same `404` as an unknown
+session, and a `DELETE` from it ends nothing. Anonymous counts as an identity of its own: an
+anonymous session cannot be used by a signed-in caller, and the other way round. In table mode
+the table stores the identity with the session; with signed ids the identity is part of the
+signed data (an anonymous id signs exactly what it signed before). One `Mcp` shared by several
+routes (`/mcp` and per-graph paths) accepts a session id on each of them, for its identity
+only. A resolver that checks a routed id for a caller uses
+`mcp.verified_session_route_for(id, identity)`; `verified_session_route(id)` checks it as
+anonymous.
+
+### Sessions survive a restart
+
+By default the session table lives in memory: a restarted host forgets every MCP session, and
+each client gets `404`, initializes again and, in directory mode, selects its graph again. A
+host that wants the sessions back after a restart gives the endpoint a store:
+
+```rust,ignore
+let mcp = Mcp::new(false, None, false)
+    .with_max_sessions(1024)                     // first: the load keeps the newest 1024
+    .with_session_store(Arc::new(MyFileStore::new(dir)))?;
+```
+
+`SessionStore` has two methods: `load` answers the stored sessions once, and `save` gets the
+whole table after every change (a session created, a graph selected, a selection renamed or its
+note told, a session ended or evicted). A save runs outside the table lock, one at a time, and
+never writes an older table after a newer one. A failed save is a `tracing` warning; the
+request goes on and the next change saves again. So write atomically (a temporary file, then a
+rename).
+
+Each row is a `StoredSession`: the SHA-256 of the id (64 hex digits; the table never holds the
+plain id, so the store holds nothing a client could present), the identity, the selected name,
+the old name of a pending rename note, the negotiated protocol revision, the client's
+`{name, version}` and the creation time in Unix seconds. The host serialises it in any format
+(strings, a number and a JSON value) and rebuilds it with `StoredSession::new`. A restored
+session answers its old id for the same identity only, with its selection and its pending note.
+The expiry rule is unchanged: at most `with_max_sessions`, the oldest dropped first.
+
+When the host revokes a user's token or removes the user, `mcp.forget_sessions_of(Some(id))`
+ends that identity's sessions at once (and saves the table); it answers how many it ended.
+Signed ids (`Mcp::with_session_key`) keep no table: `with_session_store` refuses them with an
+error, and `forget_sessions_of` ends nothing there.
+
+### Read-only requests
+
+A host that gives some callers read access only marks their requests:
+`request.mark_read_only()`, in its router or its `RequestFilter`, after it decided who sent the
+request. The mark holds for that one request, and nothing clears it. `graphersal-serve` then
+serves the request like this (the context itself stays writable for every other request):
+
+- `POST /api/execute` and `POST /api/query` run under the reading authorizer. A script or saved
+  query that would write fails with a permission error and changes nothing.
+- Every other route that writes answers `409` with `the graph is served read-only: writes are
+  refused. This request has read access only: ask for write access to change the data.`
+  (`READ_ONLY_HEADLINE`, `READ_ONLY_REQUEST_HELP`). That covers the schema, element, catalog,
+  compression, index and saved-query writes, the scheduled jobs, the advisor's apply, dismiss
+  and restore, `POST /api/save`, and every Store operation that writes: checkpoint, mark,
+  rollback, the attic, compaction, and also fork, backup and view, which write directories or
+  switch the view every client of the context sees.
+- Reads stay open, downloads included: exports in every format, the `.gsnap` download, Store
+  snapshots, statistics, the journal, the layout.
+- `/mcp` serves the request under the context's MCP profile made read-only
+  (`Profile::with_read_only(true)` in `graphersal-mcp`): only reading tools, and a writing query
+  is refused. The same MCP session may write again on a request that is not marked.
+- `GET /api/info` and `GET /api/changes` answer `readOnly: true` for the request, and so does
+  their `mcp` status.
+
+The host's own extra routes (`Hooks::route`) see the mark with `request.is_read_only()` and
+decide for themselves. A host that serves MCP in directory mode (`handle_directory`) answers a
+reader's profile from its `GraphDirectory::host` instead.
+
+### File root
+
+Without further settings a client with write access may name any path the server process can
+write: a backup job's directory, the directory of a Store fork or backup. A host that serves
+callers it does not trust with the machine's files sets a file root on each context:
+`ContextBuilder::file_root(Some(root))`. The default, `None`, keeps the old behaviour (the CLI
+dev server never sets one). With a root:
+
+- `POST /api/jobs/define` resolves a backup job's path under the root: a relative path is
+  relative to the root, and a path that leaves it (an absolute path elsewhere, `..`, a symbolic
+  link pointing out) is refused in the answer. The job stores the resolved path.
+- `POST /api/catalog/load` refuses with `403` a catalog with a job that writes outside the
+  root, and loads nothing. A stored job path must be absolute and inside the root.
+- The `dir` of `POST /api/store/fork`, `/api/store/attic/fork` and `/api/store/backup` is
+  resolved the same way: a relative `dir` is relative to the root (not to the store's
+  directory), and one outside it answers `403` with `paths must lie inside the server's file
+  root`. Without a `dir` the default directory next to the store is used, as before.
+
+The root must exist; a requested `dir` under a missing root answers `500`. Jobs already stored
+in a store the host loads (an imported, restored or cloned store) are not checked by the
+context: the host passes the store's definitions to `graphersal_serve::jobs_outside_file_root`
+and disables or refuses the jobs it returns.
 
 ## What a host builds
 
@@ -273,10 +373,19 @@ catalog:
 - `list()`: the graphs and aliases an agent may name, each a `GraphEntry` with its kind
   (plain, layer, base), state (unloaded, loading, loaded, needs-model, failed with a reason),
   read-only flag and description.
-- `resolve(name)`: the route of a name, an alias resolved now (`acme` -> `acme@2026.3`).
+- `resolve(name)`: the route of a name, an alias resolved now (`acme` -> `acme@2026.3`). The
+  endpoint calls it on every call of a session, so keep it cheap.
 - `host(route)`: the context serving that route (a `graphersal-serve` `Context` is a
   `graphersal_mcp::Host`) and its MCP profile, or an error whose text the agent reads, such as
   `database 'acme@2026.3' is not loaded; ask an operator to load it`.
+
+The methods take no caller. A host whose graphs differ per caller builds the directory for each
+request from the identity it attaches to that request, and passes that directory to
+`handle_directory`. It lists only what the caller may see, answers a hidden graph with exactly
+the error of an unknown name (from `resolve`, `use_graph` and the `graph` argument alike), and
+answers the caller's profile from `host` (read-only for a reader). The session's selected name
+is resolved through the directory of each request, and a session cannot be used by another
+identity (see "Sessions belong to their identity" above).
 
 The host's listener passes every request to its endpoint path to
 `mcp.handle_directory(&catalog, request)`. Inside an MCP session the agent calls
@@ -286,8 +395,25 @@ that graph's context under that context's profile, so its read-only flag and acc
 apply. Saved queries are not tools of their own here: the agent runs them with
 `run_saved_query` (and `graph`).
 
-- **The selection is pinned.** `use_graph` stores the resolved route in the MCP session, so an
-  alias flip does not move an open session: the same rule as the route tag above.
+- **The selection is a name.** `use_graph` stores the name the agent asked for (a graph or an
+  alias, spelled as `list()` spells it when one entry matches ignoring ASCII case) and the
+  endpoint resolves it again on every call, as an HTTP path `/db/<name>/` is. This is not the
+  route tag above: a route tag pins a session to one version, a directory selection follows
+  its name.
+  - **Re-pointed alias:** the session follows it silently. Errors of the new target (not
+    loaded, read-only) are ordinary tool errors.
+  - **Removed alias:** a call fails with "pick another graph: list_graphs, then use_graph" only
+    while no graph or alias of that name exists. The selection stays, so an alias created
+    again under that name simply works on.
+  - **Renamed alias:** the host renames it in its catalog, then calls
+    `mcp.rename_selection(old, new)` (it answers the number of sessions moved). Each moved
+    session's next `tools/call` answer starts with one line, `note: alias "<first old>" was
+    renamed to "<current>"`; several renames before that call give one note from the first
+    name to the current one.
+  - **A real graph name** stays on that graph whatever the aliases do.
+- `list_graphs` answers `selected` (the session's name, or `null`) and `selectedGraph` (the
+  graph that name resolves to now, or `null`); `use_graph` answers `selected` (the name) and
+  `graph` (its graph now).
 - **A new session starts empty.** After a reconnect, or when the endpoint forgot the session
   (the table keeps `MAX_SESSIONS`, 64, unless `Mcp::with_max_sessions` says otherwise; the
   client then gets `404` and initializes again), calls that name no graph fail with a message
@@ -313,4 +439,6 @@ apply. Saved queries are not tools of their own here: the agent runs them with
 - **Profiles are per context.** The read-only flag and the access policy of each customer are
   in that customer's contexts (`mcp_profile`). One shared endpoint does not mean one shared
   policy.
-- Authentication stays the host's job, in a `RequestFilter` that knows the path's name.
+- Authentication stays the host's job, in a `RequestFilter` that knows the path's name. The
+  filter attaches the caller's identity and, for a caller with read access only, marks the
+  request read-only (see "Read-only requests" above).

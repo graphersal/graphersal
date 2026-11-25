@@ -17,7 +17,8 @@ use crate::host::{ClientRef, Ctx, Host, McpError, clear_busy, take_busy};
 use crate::profile::Profile;
 use crate::resources::{RESOURCES, read_resource};
 use crate::sessions::{
-    MAX_SESSION_ROUTE_BYTES, SessionKey, Sessions, is_valid_session_route, session_route,
+    MAX_SESSION_ROUTE_BYTES, SessionKey, SessionStore, Sessions, is_valid_session_route,
+    session_route,
 };
 use crate::stats::{McpStats, Refusal};
 use crate::tools::{CallRefused, ToolCaller, call_tool, tool_listings, tool_result};
@@ -122,10 +123,40 @@ impl Mcp {
     /// replicas behind a load balancer) accepts the ids of the others. `DELETE` of a valid id
     /// answers `200` and the id stays valid (nothing is stored to forget). The client names
     /// are kept for the statistics, at most [`crate::MAX_CLIENT_NAMES`].
+    ///
+    /// It replaces the session table, and with it a store set by [`Mcp::with_session_store`].
     pub fn with_session_key(mut self, key: SessionKey) -> Self {
         self.sessions = Sessions::signed(&key);
         self.stats = Arc::new(McpStats::new(self.sessions.clients()));
         self
+    }
+
+    /// Keeps the MCP session table in the host's `store`, so the sessions survive a restart:
+    /// the stored sessions are loaded now (replacing the table; the newest
+    /// [`Mcp::with_max_sessions`] by creation time, so set the size first) and the whole table
+    /// is saved after every change ([`SessionStore`]). A restored session keeps its identity,
+    /// its selected graph, a pending rename note and its negotiated protocol revision; its
+    /// client goes on with the id it had.
+    ///
+    /// The table holds only the SHA-256 of each id, so a store never sees a usable id. A save
+    /// that fails is a `tracing` warning and the request goes on with the table in memory.
+    /// Without a store (the default) the table lives in memory only, as before.
+    ///
+    /// `Err` when the store cannot load, or when the ids are signed ([`Mcp::with_session_key`]:
+    /// they keep no table to store).
+    pub fn with_session_store(mut self, store: Arc<dyn SessionStore>) -> Result<Self, McpError> {
+        let sessions = std::mem::replace(&mut self.sessions, Sessions::table());
+        self.sessions = sessions.with_store(store)?;
+        Ok(self)
+    }
+
+    /// Ends every MCP session of `identity` (exact; `None` = the anonymous sessions), for a
+    /// host that revoked a user's token or removed the user: their clients get `404` and must
+    /// initialize again (and are then refused if the host refuses the identity). Saves the
+    /// table when a store is set ([`Mcp::with_session_store`]). The number of sessions ended;
+    /// always `0` with signed ids ([`Mcp::with_session_key`]), which keep nothing to end.
+    pub fn forget_sessions_of(&self, identity: Option<&str>) -> usize {
+        self.sessions.forget_identity(identity)
     }
 
     /// The usage statistics of the endpoint since it was built: in process memory only, never
@@ -140,14 +171,30 @@ impl Mcp {
         self.sessions.is_signed()
     }
 
-    /// The route tag of the MCP session id `session_id` ([`crate::session_route`]), only when
-    /// this endpoint knows the id (signed by its key, or in its table): a forged or altered
-    /// route answers `None`. For a host whose graph resolver holds the endpoint (one shared
-    /// endpoint for its graphs); a resolver without it uses [`crate::session_route`], and the
-    /// endpoint refuses a forged id when it serves the request.
+    /// The route tag of the anonymous MCP session id `session_id` ([`crate::session_route`]),
+    /// only when this endpoint knows the id (signed by its key, or in its table) as a session
+    /// of an anonymous `initialize`: a forged or altered route, or a session of an identity,
+    /// answers `None`. For a host whose graph resolver holds the endpoint (one shared endpoint
+    /// for its graphs) and attaches no identity; a host that does calls
+    /// [`Mcp::verified_session_route_for`] with the request's identity. A resolver without the
+    /// endpoint uses [`crate::session_route`], and the endpoint refuses a forged id when it
+    /// serves the request.
     pub fn verified_session_route<'a>(&self, session_id: &'a str) -> Option<&'a str> {
+        self.verified_session_route_for(session_id, None)
+    }
+
+    /// [`Mcp::verified_session_route`] for a request of `identity` (the one the host attaches
+    /// with [`McpRequest::with_identity`]; `None` = anonymous): `None` unless the session
+    /// belongs to that identity, the same answer as for a forged id.
+    pub fn verified_session_route_for<'a>(
+        &self,
+        session_id: &'a str,
+        identity: Option<&str>,
+    ) -> Option<&'a str> {
         let route = session_route(session_id)?;
-        self.sessions.knows(session_id).then_some(route)
+        self.sessions
+            .knows_as(session_id, identity)
+            .then_some(route)
     }
 
     /// Serves the operator's configuration (`--mcp-config`, with the shorthand flags folded in
@@ -325,7 +372,8 @@ impl Mcp {
         Some(answer.with_header("WWW-Authenticate", "Bearer"))
     }
 
-    /// `DELETE /mcp`: ends the MCP session the request names.
+    /// `DELETE /mcp`: ends the MCP session the request names, when it belongs to the
+    /// request's identity (else `404`, as for an unknown session).
     pub(crate) fn delete(&self, request: &McpRequest<'_>) -> McpResponse {
         let Some(id) = request.header_value("Mcp-Session-Id") else {
             return rpc_error(
@@ -335,7 +383,7 @@ impl Mcp {
                 "DELETE /mcp needs the Mcp-Session-Id header",
             );
         };
-        let removed = self.sessions.forget(id);
+        let removed = self.sessions.forget_as(id, request.identity());
         empty(if removed { 200 } else { 404 })
     }
 
@@ -408,8 +456,10 @@ impl Mcp {
             ));
         }
         let session_id = request.header_value("Mcp-Session-Id").map(str::to_string);
+        // A session of another identity (anonymous included) is answered like an unknown one,
+        // so a session id cannot be borrowed and the answer does not tell that it exists.
         if let Some(id) = &session_id
-            && !self.sessions.knows(id)
+            && !self.sessions.knows_as(id, request.identity())
         {
             return Err(rpc_error(
                 404,
@@ -637,7 +687,12 @@ impl Mcp {
                         ),
                     ));
                 }
-                let session = self.sessions.create_routed(&client, route.as_deref());
+                let session = self.sessions.create_versioned(
+                    &client,
+                    route.as_deref(),
+                    peer.identity,
+                    version,
+                );
                 self.stats.record_initialize(&session);
                 Some(session)
             }

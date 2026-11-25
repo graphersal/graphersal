@@ -1652,6 +1652,7 @@ impl ScriptGraphTraversalSource {
                 })
             },
             presets: self.access.presets.clone(),
+            ceilings: self.access.ceilings,
             max_value_depth: self.access.max_value_depth,
             read_only: true,
             query_depth: self.access.query_depth + 1,
@@ -1699,6 +1700,7 @@ impl ScriptGraphTraversalSource {
                 effects,
             }),
             presets: self.access.presets.clone(),
+            ceilings: self.access.ceilings,
             max_value_depth: self.access.max_value_depth,
             read_only: false,
             query_depth: self.access.query_depth + 1,

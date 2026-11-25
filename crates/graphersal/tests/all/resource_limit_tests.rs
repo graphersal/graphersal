@@ -768,3 +768,220 @@ fn host_presets_reach_every_source_of_the_session() {
         .unwrap();
     assert_eq!(ok.into_string().unwrap(), "abcd");
 }
+
+// ---------------------------------------------------------------------------------------------
+// Host presets as ceilings (`graph_scope_with_ceilings` / `engine_with_ceilings`)
+// ---------------------------------------------------------------------------------------------
+
+mod ceilings {
+    use super::*;
+    use graphersal::auth::{AccessPolicy, AllowAll, Authorizer};
+
+    /// An engine and a scope over the modern graph whose presets `options` are ceilings
+    /// (`ceilings: false`: the plain presets of `graph_scope_with_options`).
+    fn session(
+        options: &[(&str, ElementProperty)],
+        authorizer: Arc<dyn Authorizer>,
+        ceilings: bool,
+    ) -> (rhai::Engine, rhai::Scope<'static>) {
+        let limits = ScriptLimits::default();
+        if ceilings {
+            (
+                graphersal::script::engine_with_ceilings(&limits, authorizer.clone(), options),
+                graphersal::script::graph_scope_with_ceilings(modern(), options, authorizer),
+            )
+        } else {
+            (
+                graphersal::script::engine_with_options(&limits, authorizer.clone(), options),
+                graphersal::script::graph_scope_with_options(modern(), options, authorizer),
+            )
+        }
+    }
+
+    fn run(
+        (engine, scope): &mut (rhai::Engine, rhai::Scope<'static>),
+        script: &str,
+    ) -> Result<Dynamic, String> {
+        engine
+            .eval_with_scope::<Dynamic>(scope, script)
+            .map_err(|err| err.to_string())
+    }
+
+    fn allow_all() -> Arc<dyn Authorizer> {
+        Arc::new(AllowAll)
+    }
+
+    const LIMITS: &[(&str, i64)] = &[
+        ("evaluationTimeout", 30_000),
+        ("repeat.max_loops", 50),
+        ("bulk.max_expansion", 1_000),
+        ("traversal.max_traversers", 1_000),
+        ("traversal.max_value_depth", 64),
+        ("traversal.max_materialized_bytes", 10_000_000),
+        ("traversal.max_string_bytes", 10_000),
+    ];
+
+    fn presets() -> Vec<(&'static str, ElementProperty)> {
+        LIMITS
+            .iter()
+            .map(|(key, value)| (*key, ElementProperty::from(*value)))
+            .collect()
+    }
+
+    /// Every preset limit may be lowered (and set to its own value), on every source a script
+    /// can reach; raising it is refused with `OptionAboveCeiling`, even though the authorizer
+    /// allows everything.
+    #[test]
+    fn a_query_may_lower_a_ceiling_but_never_raise_it() {
+        let mut s = session(&presets(), allow_all(), true);
+        for source in [
+            "g",
+            "_g",
+            "__",
+            "GraphSource::empty()",
+            "GraphSource::tinkerpop_modern()",
+        ] {
+            for (key, ceiling) in LIMITS {
+                for lower in [*ceiling, ceiling / 2] {
+                    let script = format!(r#"{source}.with("{key}", {lower}).inject(1).next()"#);
+                    assert_eq!(
+                        run(&mut s, &script).unwrap().as_int().unwrap(),
+                        1,
+                        "{script}"
+                    );
+                }
+                let script = format!(
+                    r#"{source}.with("{key}", {}).inject(1).next()"#,
+                    ceiling + 1
+                );
+                let err = run(&mut s, &script).unwrap_err();
+                assert!(
+                    err.contains(&format!(
+                        "Option '{key}' is capped at {ceiling} by the host"
+                    )),
+                    "{script}: {err}"
+                );
+                assert!(err.contains("may only lower"), "{script}: {err}");
+            }
+        }
+        // A lowered limit is the one in force.
+        let err = run(
+            &mut s,
+            r#"g.with("traversal.max_traversers", 3).v().to_list()"#,
+        )
+        .unwrap_err();
+        assert!(err.contains("traversal.max_traversers"), "{err}");
+        assert!(err.contains("limit 3"), "{err}");
+    }
+
+    /// `evaluationTimeout` `0` is no timeout at all: removing a ceiling is a raise.
+    #[test]
+    fn removing_a_ceiling_is_refused() {
+        let mut s = session(&presets(), allow_all(), true);
+        let err = run(
+            &mut s,
+            r#"g.with("evaluationTimeout", 0).v().count().next()"#,
+        )
+        .unwrap_err();
+        assert!(err.contains("capped at 30000"), "{err}");
+        assert!(err.contains("0 (no limit)"), "{err}");
+        // An integral float is read like the integer, so it is no way around either.
+        let err = run(
+            &mut s,
+            r#"g.with("evaluationTimeout", 60000.0).v().count().next()"#,
+        )
+        .unwrap_err();
+        assert!(err.contains("capped at 30000"), "{err}");
+    }
+
+    /// The ceiling check comes before the authorizer: a host that denies `Update` on every
+    /// option still lets a query lower a ceiling, and a raise is `OptionAboveCeiling`, not a
+    /// permission denial. A limit without a preset still asks the authorizer.
+    #[test]
+    fn lowering_needs_no_permission_and_a_raise_is_no_permission_question() {
+        let read_only: Arc<dyn Authorizer> = Arc::new(AccessPolicy::read_only());
+        let mut s = session(&presets(), read_only.clone(), true);
+        let count = run(
+            &mut s,
+            r#"g.with("evaluationTimeout", 1000).v().count().next()"#,
+        )
+        .unwrap();
+        assert_eq!(count.as_int().unwrap(), 6);
+        let err = run(
+            &mut s,
+            r#"g.with("evaluationTimeout", 31000).v().count().next()"#,
+        )
+        .unwrap_err();
+        assert!(err.contains("capped at 30000"), "{err}");
+        // `path.analysis` is a switch, not a limit: still an `Update` on the option.
+        let err = run(
+            &mut s,
+            r#"g.with("path.analysis", false).v().count().next()"#,
+        )
+        .unwrap_err();
+        assert!(err.contains("Permission denied"), "{err}");
+        // Without ceilings the same lowering asks the authorizer, as before.
+        let mut plain = session(&presets(), read_only, false);
+        let err = run(
+            &mut plain,
+            r#"g.with("evaluationTimeout", 1000).v().count().next()"#,
+        )
+        .unwrap_err();
+        assert!(err.contains("Permission denied"), "{err}");
+    }
+
+    /// Only a preset limit is a ceiling: a limit the host does not preset is the query's to set
+    /// (with permission), the engine default is no ceiling.
+    #[test]
+    fn a_limit_without_a_preset_is_no_ceiling() {
+        let options = [("evaluationTimeout", ElementProperty::from(30_000))];
+        let mut s = session(&options, allow_all(), true);
+        let count = run(
+            &mut s,
+            r#"g.with("traversal.max_traversers", 100000000).v().count().next()"#,
+        )
+        .unwrap();
+        assert_eq!(count.as_int().unwrap(), 6);
+    }
+
+    /// A saved query's body runs under the caller's access: it cannot raise a ceiling either.
+    #[test]
+    fn a_saved_query_cannot_raise_a_ceiling() {
+        let mut s = session(&presets(), allow_all(), true);
+        let _defined = run(
+            &mut s,
+            r#"g.define_query(#{name: "lifted", body: "fn lifted() { g.with(\"evaluationTimeout\", 0).v().count() }"});
+               g.define_query(#{name: "lowered", body: "fn lowered() { g.with(\"evaluationTimeout\", 10).v().count() }"});"#,
+        )
+        .unwrap();
+        let err = run(&mut s, r#"g.query("lifted").next()"#).unwrap_err();
+        assert!(err.contains("capped at 30000"), "{err}");
+        assert_eq!(
+            run(&mut s, r#"g.query("lowered").next()"#)
+                .unwrap()
+                .as_int()
+                .unwrap(),
+            6
+        );
+    }
+
+    /// Without ceilings (the default) a query replaces a preset, raise included.
+    #[test]
+    fn plain_presets_stay_replaceable() {
+        let mut s = session(&presets(), allow_all(), false);
+        for (key, ceiling) in LIMITS {
+            let script = format!(r#"g.with("{key}", {}).inject(1).next()"#, ceiling * 2);
+            assert_eq!(
+                run(&mut s, &script).unwrap().as_int().unwrap(),
+                1,
+                "{script}"
+            );
+        }
+        let count = run(
+            &mut s,
+            r#"g.with("evaluationTimeout", 0).v().count().next()"#,
+        )
+        .unwrap();
+        assert_eq!(count.as_int().unwrap(), 6);
+    }
+}

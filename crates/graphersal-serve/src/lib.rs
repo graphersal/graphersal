@@ -43,6 +43,18 @@
 //! [`Context::set_read_only`], [`Context::is_read_only`]; every modifying request (HTTP API, MCP
 //! tools, scheduled jobs) is then refused with one message ([`READ_ONLY_HEADLINE`]).
 //!
+//! A host may also mark ONE request read-only (EXPERIMENTAL; [`Request::mark_read_only`], from
+//! its router or its [`RequestFilter`], e.g. for a user with read access only): that request
+//! runs its queries under the reading authorizer, every route that writes answers `409`
+//! ([`READ_ONLY_HEADLINE`], [`READ_ONLY_REQUEST_HELP`]), `/mcp` serves it under the context's
+//! MCP profile made read-only, and `GET /api/info` answers `readOnly: true` for it. Who may do
+//! what stays the host's decision: the core never authenticates anyone.
+//!
+//! A host may confine every file path a client names (backup jobs, catalog loads, the
+//! directories of Store forks and backups) to one directory (EXPERIMENTAL;
+//! [`ContextBuilder::file_root`]); the jobs of a store it loads it checks with
+//! [`jobs_outside_file_root`]. Without a root a client may name any path the process can write.
+//!
 //! # Extension points
 //!
 //! What a host adds goes through these points; each has the core default a host gets without
@@ -54,7 +66,7 @@
 //! |---|---|---|
 //! | Graph resolver: which hosted graph serves a request / an MCP connection | one graph | [`GraphResolver`], [`Server::ready_with`] ([`OneGraph`], [`Server::ready`]) |
 //! | Run observer + cancel handle: every run's start and end, with a handle that cancels it | none | [`RunObserver`], [`Runs::with_observer`] |
-//! | Request filter: sees each request before routing, refuses it or attaches an identity | none beyond the loopback/`Host`/`Origin` checks, which always run first | [`RequestFilter`], [`ContextBuilder::filter`] ([`HostCheck`]) |
+//! | Request filter: sees each request before routing, refuses it, attaches an identity or marks it read-only ([`Request::mark_read_only`]) | none beyond the loopback/`Host`/`Origin` checks, which always run first | [`RequestFilter`], [`ContextBuilder::filter`] ([`HostCheck`]) |
 //! | Extra routes: the `/api/` endpoints the core does not know | `404` | [`Hooks::route`], [`ContextBuilder::hooks`] |
 //! | Activity / lifecycle hooks: ready, stopping, last activity, background work | none | [`LifecycleHooks`], [`Server::with_hooks`], [`Server::idle_for`] (requests), [`Context::background_runs`] (scheduled-job runs on the job workers) |
 //! | Executor policy: how jobs reach the session | one session thread, unbounded queue | [`Runner`], [`JobQueue`] |
@@ -86,6 +98,7 @@
 
 mod api;
 mod context;
+mod file_root;
 mod host_check;
 mod http;
 mod job_workers;
@@ -102,9 +115,13 @@ mod directory_tests;
 #[cfg(test)]
 mod extension_tests;
 #[cfg(test)]
+mod file_root_tests;
+#[cfg(test)]
 mod launch_tests;
 #[cfg(test)]
 mod mount_tests;
+#[cfg(test)]
+mod read_mark_tests;
 #[cfg(test)]
 mod read_only_tests;
 
@@ -114,6 +131,7 @@ pub use context::{
     Runner, SCHEDULED_JOBS_REFUSAL, SESSION_STACK_BYTES, ServeError, spawn_session,
     start_job_ticker,
 };
+pub use file_root::{JobOutsideFileRoot, jobs_outside_file_root};
 pub use host_check::{Exposure, HostCheck, HostRules};
 pub use http::{HttpError, MAX_BODY_BYTES, Method, Request, Response};
 pub use launch::{Launched, ServedSource, launch};
@@ -123,7 +141,7 @@ pub use open::{
     NoteLevel, OpenError, OpenErrorKind, OpenNote, OpenStore, OpenedBase, OpenedLayerStore,
     OpenedStore, layer_base_of_store, open_layer_store, open_store,
 };
-pub use read_only::{READ_ONLY_HEADLINE, READ_ONLY_HELP};
+pub use read_only::{READ_ONLY_HEADLINE, READ_ONLY_HELP, READ_ONLY_REQUEST_HELP};
 pub use runs::{
     RUN_TEXT_HEAD_CHARS, Registered, RunEntry, RunHandle, RunInfo, RunKind, RunObserver, RunState,
     Runs,

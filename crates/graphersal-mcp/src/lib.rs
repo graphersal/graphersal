@@ -67,6 +67,15 @@
 //! statistics, MCP sessions, token, stream registry and tool catalog code shared by the
 //! process. An identity the host established ([`Connection::with_identity`],
 //! [`McpRequest::with_identity`]) travels with the session jobs ([`ClientRef::identity`]).
+//! An HTTP MCP session belongs to the identity of its `initialize` request (none = anonymous):
+//! a request naming the session id with another identity, anonymous included, gets the `404`
+//! of an unknown session, in table and signed mode. The sessions are the endpoint's, shared by
+//! [`Mcp::handle`], [`Mcp::handle_with_profile`] and [`Mcp::handle_directory`], so one id works
+//! on every route the host sends to the same [`Mcp`], for that identity only. The session table
+//! holds only the SHA-256 of each id; a host keeps it across restarts with
+//! [`Mcp::with_session_store`] (a [`SessionStore`] of [`StoredSession`]s, saved whole after
+//! every change; default: memory only) and ends the sessions of a revoked identity with
+//! [`Mcp::forget_sessions_of`].
 //!
 //! # Directory mode: one endpoint over many graphs
 //!
@@ -74,13 +83,16 @@
 //! [`Mcp::handle_directory`] with the host's [`GraphDirectory`] (its registry: the graphs and
 //! aliases with their [`GraphState`], the route an alias resolves to now, the [`Host`] and
 //! [`Profile`] of a graph). The agent calls `list_graphs`, selects a graph with `use_graph`
-//! (stored in the MCP session's table entry; an alias that moves later does not move the
-//! session; a new session starts without a selection) and may switch; every data tool takes an
+//! (its NAME is stored in the MCP session's table entry and resolved on every call, so an alias
+//! re-pointed later moves the session along; [`Mcp::rename_selection`] follows an alias
+//! rename; a new session starts without a selection) and may switch; every data tool takes an
 //! optional `graph` argument for one call. Each call runs on that graph's host under its
 //! profile, so per-graph read-only flags and policies apply. Saved queries are reached through
 //! `run_saved_query`, never as tools of their own. Directory mode needs the session table
 //! (not [`Mcp::with_session_key`]); [`Mcp::with_max_sessions`] sizes it. The single-graph
-//! [`Mcp::handle`] is unchanged.
+//! [`Mcp::handle`] is unchanged. The directory carries no caller: a host with per-caller
+//! access builds the [`GraphDirectory`] for each request from the request's identity (see the
+//! trait), so `list_graphs`, the graphs a caller can reach and their profiles follow the caller.
 //!
 //! # Protocol
 //!
@@ -221,8 +233,8 @@ pub use protocol::{
 };
 pub use resources::gql_reference_text;
 pub use sessions::{
-    MAX_CLIENT_NAMES, MAX_SESSION_ROUTE_BYTES, MAX_SESSIONS, SessionKey, is_valid_session_route,
-    session_route,
+    MAX_CLIENT_NAMES, MAX_SESSION_ROUTE_BYTES, MAX_SESSIONS, SessionKey, SessionStore,
+    StoredSession, is_valid_session_route, session_route,
 };
 pub use stats::{LATENCY_BUCKETS_MS, MAX_COUNTED_NAMES, McpStats, Refusal};
 pub use stream::serve_lines;

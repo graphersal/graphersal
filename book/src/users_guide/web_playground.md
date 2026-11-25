@@ -491,6 +491,28 @@ links of stored snapshots (*Download current state* still works). Without the se
 sends exactly what it always sent. Requests a profile's modules send themselves, to endpoints of
 the host's own, add the header themselves.
 
+### Login of a host
+
+> **EXPERIMENTAL**, like UI profiles.
+
+A host that requires a login (for example a multi-database server serving the playground under
+`/db/<name>/`) answers an API request of a visitor who is not logged in with `401` and names its
+login page in the JSON body:
+
+```json
+{ "error": "log in to open this database", "login": "/" }
+```
+
+The page then goes to that login page with the way back: `login` plus `?next=` and the page's
+path and query (`/?next=%2Fdb%2Facme%2F`; `&next=` when `login` has a query of its own), so the
+login page can return there afterwards. This happens when the page starts (instead of falling back
+to the WebAssembly playground) and on every later request. Only a path of the page's own origin
+counts: it starts with `/` but not `//` and has no backslash, space or control character; any
+other `login` (another site, a relative path) is ignored and the error shows as usual. The page
+never redirects to the page it is on (no loop). A `401` without `login` (for example a host's own token
+check) is an error as before, and the dev server and the
+WebAssembly playground never send one.
+
 ## The graph drawing
 
 ### What the panel shows

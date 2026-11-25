@@ -100,9 +100,17 @@ pub struct SessionPresets {
     pub limits: ScriptLimits,
     /// Traversal options preset on every traversal source of a run (`g`, `_g`, `__` and the
     /// sources a script creates): `evaluationTimeout`, `traversal.max_traversers`,
-    /// ... A query overrides one with `g.with(..)` unless the host locks it. `memory.limit` and
-    /// `memory.headroom` are refused here (they are the process memory ceiling).
+    /// ... A query overrides one with `g.with(..)` unless the host locks it or makes the
+    /// presets [`ceilings`](Self::ceilings). `memory.limit` and `memory.headroom` are refused
+    /// here (they are the process memory ceiling).
     pub options: Vec<(String, ElementProperty)>,
+    /// Whether the preset resource limits among [`Self::options`] (`evaluationTimeout`,
+    /// `repeat.max_loops`, `bulk.max_expansion`, `traversal.max_*`) are CEILINGS: a query may
+    /// lower one with `g.with(key, smaller)`, but raising or removing one fails before
+    /// anything runs (`TraverserError::OptionAboveCeiling`), also in the sources a script
+    /// creates and in the saved queries it calls. `false` (the default): a query's own
+    /// `g.with(..)` replaces a preset.
+    pub ceilings: bool,
     /// Budget of a whole run in milliseconds: the Rhai code between the traversals (a `loop
     /// {}`) is stopped once the run is older than this. `None`: no budget.
     pub script_timeout_ms: Option<u64>,
@@ -113,6 +121,7 @@ impl Default for SessionPresets {
         Self {
             limits: ScriptLimits::unlimited(),
             options: Vec::new(),
+            ceilings: false,
             script_timeout_ms: None,
         }
     }
@@ -136,6 +145,13 @@ impl SessionPresets {
         self
     }
 
+    /// Makes the preset resource limits ceilings a query may lower but never raise or remove
+    /// ([`Self::ceilings`]); `false` (the default) lets a query replace them.
+    pub fn with_ceilings(mut self, ceilings: bool) -> Self {
+        self.ceilings = ceilings;
+        self
+    }
+
     /// Sets the budget of a whole run in milliseconds (`None` or `0`: no budget).
     pub fn with_script_timeout_ms(mut self, ms: Option<u64>) -> Self {
         self.script_timeout_ms = ms.filter(|ms| *ms > 0);
@@ -143,7 +159,8 @@ impl SessionPresets {
     }
 
     /// The presets as data, as `GET /api/info` and the statistics panel show them:
-    /// `{options: {key: value}, scriptLimits: {max_operations, ...}, scriptTimeoutMs}`. Only the
+    /// `{options: {key: value}, scriptLimits: {max_operations, ...}, scriptTimeoutMs}`, plus
+    /// `ceilings: true` when [`Self::ceilings`] is set. Only the
     /// Rhai limits that bound anything are listed (`0` is unlimited and left out); values go
     /// through the physical codec (serde), never `Debug`.
     pub fn to_value(&self) -> Value {
@@ -166,11 +183,16 @@ impl SessionPresets {
                 script.insert(key.to_string(), json!(value));
             }
         }
-        json!({
+        let mut value = json!({
             "options": options,
             "scriptLimits": script,
             "scriptTimeoutMs": self.script_timeout_ms,
-        })
+        });
+        // Only when set, so a host without ceilings answers as before.
+        if self.ceilings {
+            value["ceilings"] = json!(true);
+        }
+        value
     }
 
     fn option_slice(&self) -> Vec<(&str, ElementProperty)> {
@@ -416,11 +438,19 @@ impl Session {
             read_only_runs,
         } = parts;
         let cancel = CancelToken::new();
-        let mut engine = graphersal::script::engine_with_options(
-            &presets.limits,
-            playground_authorizer(),
-            &presets.option_slice(),
-        );
+        let mut engine = if presets.ceilings {
+            graphersal::script::engine_with_ceilings(
+                &presets.limits,
+                playground_authorizer(),
+                &presets.option_slice(),
+            )
+        } else {
+            graphersal::script::engine_with_options(
+                &presets.limits,
+                playground_authorizer(),
+                &presets.option_slice(),
+            )
+        };
         // A script loop that runs no traversal is stopped here, on Stop or past the script
         // budget; traversals check the token and their own evaluationTimeout themselves.
         let run_cancel = Arc::new(Mutex::new(cancel.clone()));
@@ -1321,7 +1351,11 @@ impl Session {
         // The served graph's embedding models are those of `embed(text)` too (the graph
         // changes with loads, store opens and views: set on every run).
         graphersal::script::set_engine_graph(&mut self.engine, any.clone());
-        let mut scope = graph_scope_with_options(any, &scope_options, authorizer);
+        let mut scope = if self.presets.ceilings {
+            graphersal::script::graph_scope_with_ceilings(any, &scope_options, authorizer)
+        } else {
+            graph_scope_with_options(any, &scope_options, authorizer)
+        };
         let hint = trailing_terminal(script);
         // Read before the run: a graph that cannot be read runs nothing.
         let before = self
@@ -3764,6 +3798,52 @@ mod tests {
         let mut free = modern();
         assert_eq!(run(&mut free, "g.v().to_list()")["ok"], true);
         assert!(free.presets().options.is_empty());
+    }
+
+    /// Presets as ceilings (`SessionPresets::with_ceilings`): a query may lower a preset limit
+    /// but not raise or remove it; `/api/info`'s presets say so. Without them (the default) the
+    /// same raise runs and the presets carry no `ceilings` key.
+    #[test]
+    fn presets_as_ceilings_may_be_lowered_but_not_raised() {
+        let presets = SessionPresets::new()
+            .with_option("traversal.max_traversers", ElementProperty::from(100_i64))
+            .with_option("evaluationTimeout", ElementProperty::from(30_000_i64));
+        let mut capped = Session::with_presets(presets.clone().with_ceilings(true));
+        capped.load_sample("modern").unwrap();
+        assert_eq!(capped.presets().to_value()["ceilings"], true);
+        for raise in [
+            r#"g.with("traversal.max_traversers", 1000).v().to_list()"#,
+            r#"g.with("evaluationTimeout", 0).v().to_list()"#,
+            r#"GraphSource::tinkerpop_modern().with("evaluationTimeout", 60000).v().to_list()"#,
+        ] {
+            let out = run(&mut capped, raise);
+            assert_eq!(out["ok"], false, "{raise}: {out}");
+            let message = out["execution"]["error"]["diagnostic"].as_str().unwrap();
+            assert!(message.contains("capped at"), "{raise}: {message}");
+        }
+        let lowered = run(
+            &mut capped,
+            r#"g.with("traversal.max_traversers", 3).v().to_list()"#,
+        );
+        assert_eq!(lowered["ok"], false, "{lowered}");
+        let message = lowered["execution"]["error"]["diagnostic"]
+            .as_str()
+            .unwrap();
+        assert!(message.contains("limit 3"), "{message}");
+        let within = run(
+            &mut capped,
+            r#"g.with("evaluationTimeout", 5000).v().count().next()"#,
+        );
+        assert_eq!(within["ok"], true, "{within}");
+
+        let mut plain = Session::with_presets(presets);
+        plain.load_sample("modern").unwrap();
+        assert!(plain.presets().to_value().get("ceilings").is_none());
+        let raised = run(
+            &mut plain,
+            r#"g.with("traversal.max_traversers", 1000).with("evaluationTimeout", 0).v().to_list()"#,
+        );
+        assert_eq!(raised["ok"], true, "{raised}");
     }
 
     /// The process memory block lists the loaded models of the active store and nothing else;

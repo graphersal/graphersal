@@ -24,3 +24,6 @@ rand = { workspace = true }
 # HMAC-SHA256 of the stateless MCP session ids (`sessions.rs`; already in the tree through the
 # CLI's `ureq`/rustls and its model download check).
 ring = { workspace = true }
+# The warning of a failed MCP session store save (`sessions.rs`; library code logs through
+# `tracing`, root rule 9; already in the tree through graphersal).
+tracing = { workspace = true }

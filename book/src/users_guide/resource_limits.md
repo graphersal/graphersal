@@ -97,6 +97,33 @@ session: `g`, `_g` and `__` (also a traversal *started* from `__`, such as
 (`GraphSource::empty()`, `GraphSource::tinkerpop_modern()`, `schema.to_graph()`, ...) get them
 too; otherwise a script could escape a preset `evaluationTimeout` by building its own source.
 
+### Presets as ceilings
+
+A preset of `graph_scope_with_options` is a default: the query's own `g.with(..)` replaces it
+(if the authorizer allows `Update` on the option), raising it as well as lowering it. Denying
+that `Update` keeps the preset, but then a query cannot tighten it either. A host that wants
+its limits to be **ceilings** builds the scope with `graph_scope_with_ceilings` and the engine
+with `engine_with_ceilings` (same arguments; a `graphersal-session` host sets
+`SessionPresets::with_ceilings(true)`). Then, for every preset limit (`evaluationTimeout`,
+`repeat.max_loops`, `bulk.max_expansion`, `traversal.max_traversers`,
+`traversal.max_value_depth`, `traversal.max_materialized_bytes`, `traversal.max_string_bytes`):
+
+- a value at or below the preset runs, without asking the authorizer (tightening a limit is not
+  an administrative change);
+- a larger value, or no limit at all (`evaluationTimeout` `0`), fails before anything runs with
+  `OptionAboveCeiling` ("Option 'evaluationTimeout' is capped at 30000 by the host; the query
+  asked for 0 (no limit), and a query may only lower this limit"), whatever the authorizer
+  allows. A raise is refused, never clamped, so a query never runs under a limit other than the
+  one it asked for without being told.
+
+The rule covers every source the script reaches (`g`, `_g`, `__`, the sources it creates) and
+the bodies of the saved queries it calls. A limit the host does not preset is no ceiling (the
+engine default is not one): preset every limit a query must not raise. The other preset
+options (`optimizer.*`, `path.analysis`, `bulk.merge`, display options) behave as without
+ceilings. An `ExecutionPolicy` lock still refuses every value, lower ones included. The Rhai
+limits (`ScriptLimits`) and a session's script budget (`script_timeout_ms`) belong to the
+engine, so no query can change them in either mode. The CLI dev server does not use ceilings.
+
 A `gql()` query is bounded by the same options. An unbounded quantified edge (`-[:knows]->{1,}`,
 `*`, `+`, Cypher `[*]`) or quantified path pattern (`((x)-[:knows]->(y)-[:created]->(z))+`) has
 no limit of its own: trail matching ends it on a finite graph, and `repeat.max_loops` (counting

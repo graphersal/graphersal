@@ -4538,6 +4538,27 @@ pub enum TraverserError {
         key: String,
     },
 
+    /// A query's own `g.with(key, ..)` tried to raise, or remove, a resource limit the host
+    /// preset as a CEILING (`graphersal::script::graph_scope_with_ceilings`, the session's
+    /// `SessionPresets::with_ceilings`): such a limit may only be lowered. Refused whatever the
+    /// host's authorizer allows for `Update` on the option.
+    ///
+    /// Raised when the traversal is executed, before anything runs, same timing as
+    /// [`Self::PermissionDenied`].
+    #[error(
+        "Option '{key}' is capped at {ceiling} by the host; the query asked for {requested}, \
+         and a query may only lower this limit"
+    )]
+    #[non_exhaustive]
+    OptionAboveCeiling {
+        /// The option key, such as `evaluationTimeout`.
+        key: String,
+        /// The host's preset value, as a literal.
+        ceiling: String,
+        /// The value the query asked for, as a literal (`0 (no limit)` for a removal).
+        requested: String,
+    },
+
     /// The host's [`Authorizer`](crate::graph::Authorizer) denied a request
     /// ([`AccessRequest`](crate::graph::AccessRequest): an action on a resource). Raised once
     /// per execution, before anything runs, for the first request of the plan (in plan order,
@@ -5442,6 +5463,9 @@ impl TraverserError {
             TraverserError::Embed(err) => Some(err.help()),
             TraverserError::InvalidOption { key, .. } => Some(invalid_option_help(key)),
             TraverserError::LockedOption { key } => Some(locked_option_help(key)),
+            TraverserError::OptionAboveCeiling { key, ceiling, .. } => {
+                Some(option_above_ceiling_help(key, ceiling))
+            }
             TraverserError::PermissionDenied { reason, .. }
                 if reason.starts_with(SAVED_QUERY_READ_ONLY) =>
             {
@@ -6997,6 +7021,21 @@ fn locked_option_help(key: &str) -> String {
          g.with(\"{key}\", ..) call in the query has no effect either way, since the policy's own \
          default (or, absent one, the engine's default) applies regardless of what the query \
          asks for."
+    )
+}
+
+/// Advice for a [`TraverserError::OptionAboveCeiling`]: the limit may be lowered, not raised.
+fn option_above_ceiling_help(key: &str, ceiling: &str) -> String {
+    let unlimited = if key == "evaluationTimeout" {
+        " A value of 0 would remove the timeout, so it is refused too."
+    } else {
+        ""
+    };
+    format!(
+        "The host running this query caps '{key}' at {ceiling}: a query may lower it, for \
+         example g.with(\"{key}\", {ceiling}) or any smaller value, but never raise it.{unlimited} \
+         Remove the g.with(\"{key}\", ..) call to run under the host's limit, make the query \
+         do less work (filter earlier, limit(n)), or ask the host operator for a higher limit."
     )
 }
 

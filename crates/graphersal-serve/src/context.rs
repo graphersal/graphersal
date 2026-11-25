@@ -13,8 +13,8 @@
 //!   [`JobQueue`] (bounded queue, per-client fairness, 503 when busy, its first worker takes
 //!   over the session thread: [`spawn_session`]'s `takeover`);
 //! - **request filter** ([`RequestFilter`]; default: none beyond the context's [`HostCheck`],
-//!   which always runs first): sees each request the checks accepted before routing, refuses it
-//!   or attaches an identity;
+//!   which always runs first): sees each request the checks accepted before routing, refuses it,
+//!   attaches an identity or marks it read-only ([`Request::mark_read_only`]);
 //! - **extra routes** ([`Hooks::route`]; default: `404 unknown endpoint`): the `/api/`
 //!   endpoints the core does not know (the CLI's AI Chat), plus the host's fields of
 //!   `GET /api/info` and the statistics ([`Hooks`]);
@@ -34,7 +34,7 @@ use std::cell::RefCell;
 use std::collections::VecDeque;
 use std::fmt;
 use std::panic::AssertUnwindSafe;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::sync::{Arc, Mutex};
@@ -280,8 +280,10 @@ impl Hooks for NoHooks {}
 /// **Extension point "request filter"**: sees each request of the API before routing (after
 /// the lifecycle answers of [`crate::Server`]: probes, loading, stopping), refuses it or
 /// attaches an identity ([`Request::set_identity`]; the extra routes read it from the request,
-/// a [`crate::RunObserver`] from [`crate::RunInfo::identity`]). Default: none, only the
-/// context's [`HostCheck`] (the loopback/`Host`/`Origin` checks).
+/// a [`crate::RunObserver`] from [`crate::RunInfo::identity`]), or marks it read-only
+/// ([`Request::mark_read_only`]: the per-request access level; what a marked request may do is
+/// the core's, who gets the mark is the host's). Default: none, only the context's
+/// [`HostCheck`] (the loopback/`Host`/`Origin` checks).
 ///
 /// The checks ALWAYS run first and a filter cannot replace or skip them (user decision
 /// 2026-11-09): it only sees the requests they accepted. A host that relays requests from
@@ -323,6 +325,9 @@ pub(crate) struct Client {
     key: Option<String>,
     /// The identity the request filter attached to the request ([`Request::identity`]).
     pub(crate) identity: Option<String>,
+    /// The request is marked read-only ([`Request::mark_read_only`]); reset with every request
+    /// like the identity.
+    pub(crate) read_only: bool,
 }
 
 impl Client {
@@ -333,6 +338,7 @@ impl Client {
             detail: detail.map(str::to_string),
             key: None,
             identity: None,
+            read_only: false,
         }
     }
 
@@ -392,6 +398,12 @@ thread_local! {
     /// the `X-Graphersal-Client` id of a browser tab, `mcp`, or empty; `ai` (with the
     /// conversation id as detail) on an AI Chat turn's thread.
     pub(crate) static CLIENT: RefCell<Client> = RefCell::new(Client::default());
+}
+
+/// Whether the request this thread answers is marked read-only ([`Request::mark_read_only`]);
+/// `false` on a thread that answers no request (a stream connection, the session thread).
+pub(crate) fn request_read_only() -> bool {
+    CLIENT.with(|c| c.borrow().read_only)
 }
 
 /// Runs `run` with `client` as this thread's client (restored afterwards).
@@ -583,6 +595,8 @@ pub struct Context {
     pub(crate) allow_list: Option<Arc<AllowList>>,
     /// The run administration ([`ContextBuilder::admin_runs`]); `None`: off.
     pub(crate) admin_runs: Option<AdminRuns>,
+    /// The file root ([`ContextBuilder::file_root`]); `None`: any path the process can write.
+    pub(crate) file_root: Option<PathBuf>,
 }
 
 /// The run administration of a context ([`ContextBuilder::admin_runs`]): its token, if any.
@@ -646,6 +660,7 @@ pub struct ContextBuilder {
     mount_path: Option<String>,
     allow_list: Option<AllowList>,
     admin_runs: Option<AdminRuns>,
+    file_root: Option<PathBuf>,
 }
 
 impl ContextBuilder {
@@ -905,6 +920,30 @@ impl ContextBuilder {
         self
     }
 
+    /// The **file root**: the directory every file path a client of this context names must
+    /// lie in, so a client with write access cannot write files anywhere the process can.
+    /// `None` (the default, the CLI dev server): any path, as before. With a root:
+    ///
+    /// - `POST /api/jobs/define` runs under `AccessPolicy::allow_all().with_file_root(root)`
+    ///   (`graphersal::auth`): a backup job's relative path is resolved under the root, a path
+    ///   leaving it (absolute elsewhere, `..`, a symbolic link pointing out) is refused in the
+    ///   answer's field errors, and the job stores the resolved path;
+    /// - `POST /api/catalog/load` refuses (`403`, nothing loaded) a catalog with a job that
+    ///   writes outside the root, by [`crate::jobs_outside_file_root`];
+    /// - the body's `dir` of `POST /api/store/fork`, `store/attic/fork` and `store/backup` is
+    ///   resolved under the root the same way (a relative `dir` is relative to the root, not to
+    ///   the store's parent); outside it the answer is `403` "paths must lie inside the server's
+    ///   file root". Without a `dir` the default directory next to the store is kept, wherever
+    ///   the store lies.
+    ///
+    /// The root must exist when a path is checked (else `500` for a `dir`, a refusal for a
+    /// job). Jobs already stored in a store the host loads are not checked here: the host
+    /// checks them with [`crate::jobs_outside_file_root`].
+    pub fn file_root(mut self, root: Option<PathBuf>) -> Self {
+        self.file_root = root;
+        self
+    }
+
     /// The context.
     pub fn build(self) -> Arc<Context> {
         let read_only = Arc::new(AtomicBool::new(self.read_only));
@@ -946,6 +985,7 @@ impl ContextBuilder {
             hooks: self.hooks.unwrap_or_else(|| Arc::new(NoHooks)),
             allow_list: self.allow_list.map(Arc::new),
             admin_runs: self.admin_runs,
+            file_root: self.file_root,
         })
     }
 }
@@ -982,7 +1022,13 @@ impl Context {
             mount_path: None,
             allow_list: None,
             admin_runs: None,
+            file_root: None,
         }
+    }
+
+    /// The file root ([`ContextBuilder::file_root`]), or `None`: any path.
+    pub fn file_root(&self) -> Option<&Path> {
+        self.file_root.as_deref()
     }
 
     /// Whether the run administration is on ([`ContextBuilder::admin_runs`]).
@@ -1042,6 +1088,19 @@ impl Context {
             return Err(self.read_only_refusal());
         }
         Ok(())
+    }
+
+    /// The `409` of a write on a request the host marked read-only
+    /// ([`Request::mark_read_only`]).
+    pub(crate) fn request_read_only_refusal() -> HttpError {
+        HttpError(
+            409,
+            format!(
+                "{}. {}",
+                crate::read_only::READ_ONLY_HEADLINE,
+                crate::read_only::READ_ONLY_REQUEST_HELP
+            ),
+        )
     }
 
     /// The `409` of the runtime read-only toggle: its headline and help text.
