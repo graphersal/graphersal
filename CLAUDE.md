@@ -49,6 +49,7 @@ Nested files under `crates/graphersal/src/` are kept out of the published crate 
 - `persist`: the native lossless binary format, journal, recovery and the Store (`lz4_flex`, `crc32c`); `persist-zstd` adds zstd chunks, `persist-zip` ZIP backups. All build for wasm32 (`src/persist/CLAUDE.md`).
 - `alloc-tracking`: exact per-step memory figures for `.profile_with(ProfileType::Memory)` via `alloc_tracking::TrackingAllocator`, which the *binary* installs as its `#[global_allocator]`. Off for `graphersal` itself, but `graphersal-cli`, `graphersal-wasm` (wasm32 only) and `py-graphersal` build with it ON and install it: a small constant per-allocation cost (thread-local counters plus one relaxed global atomic, `alloc_tracking::global_live_bytes`, which the memory budget reads). Without it the `Mem` column is `MemorySource::Estimated`. A bare `.profile()` never collects memory data.
 - `model2vec`: the engine can load the Model2Vec embedding models kept in the database (a Store, a `.gsnap`); no public item; native only, never for wasm32 (`src/value/CLAUDE.md`). Without it a store keeps and copies its models but cannot run them.
+- `model-download`: the Hugging Face download of Model2Vec models into a models directory (`persist::ModelCache::download`, `ModelDownload`; what `graphersal embed-model download` runs, for any host). Implies `persist` and `model2vec`; adds `ureq` (rustls) and `ring`; native only, never for wasm32 (`src/persist/CLAUDE.md`).
 - `gql`: the ISO GQL read query language (hand-written parser, lowered into the ordinary pipeline), no dependencies, independent of `script`, builds for wasm32 (`src/gql/CLAUDE.md`).
 
 The acceptance feature set is `script,io,display,serde,persist,gql` (the surface snapshot is taken with it; without `persist` the snapshot functions are filtered out of the comparison).
@@ -110,7 +111,7 @@ PYO3_PYTHON=$PWD/bindings/py-graphersal/.venv/bin/python cargo test -p py-graphe
 
 Feature hygiene check. Run it after touching `cfg(feature)` code or dependencies:
 ```bash
-for f in "--no-default-features" "--features script" "--features display" "--features serde" "--features io" "--features persist" "--features persist-zstd" "--features persist-zip" "--features gql" "--all-features" "--no-default-features --features script,serde,display"; do
+for f in "--no-default-features" "--features script" "--features display" "--features serde" "--features io" "--features persist" "--features persist-zstd" "--features persist-zip" "--features gql" "--features model-download" "--all-features" "--no-default-features --features script,serde,display"; do
   cargo check --package graphersal $f || break; done
 ```
 

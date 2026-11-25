@@ -169,6 +169,7 @@ mod meta_schema_tests;
 mod model2vec_tests;
 mod model_copy_tests;
 mod model_definition_tests;
+mod model_download_tests;
 mod model_fixture;
 mod model_open_tests;
 mod model_size_tests;

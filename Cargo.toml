@@ -137,10 +137,10 @@ ruzstd = { version = "0.9.1", default-features = false, features = ["std"] }
 # native only): static token embeddings + mean pooling from a local model directory
 # (`config.json`, `tokenizer.json`, `model.safetensors`). `model2vec-rs` (MIT) is the reference
 # implementation of the format by its authors; without default features it has no
-# `hf-hub`/`ureq` 2 and never touches the network (the CLI's `embed-model download` fetches the
-# files). `tokenizers` (Apache-2.0) is the Hugging Face tokenizer `model2vec-rs` builds on; it
-# needs one regex backend: `fancy-regex` is pure Rust (the default `onig` and `esaxx_fast` build
-# C/C++ code). `safetensors` (Apache-2.0, already a dependency of `model2vec-rs`) reads the
+# `hf-hub`/`ureq` 2 and never touches the network (`graphersal`'s feature `model-download`
+# fetches the files). `tokenizers` (Apache-2.0) is the Hugging Face tokenizer `model2vec-rs`
+# builds on; it needs one regex backend: `fancy-regex` is pure Rust (the default `onig` and
+# `esaxx_fast` build C/C++ code). `safetensors` (Apache-2.0, already a dependency of `model2vec-rs`) reads the
 # shape of the embedding matrix at load, so a vocabulary id that is out of range is refused there
 # and no lookup can go out of bounds later.
 model2vec-rs = { version = "0.3.0", default-features = false }
@@ -161,8 +161,9 @@ tiny_http = "0.12"
 # The AI Chat of the dev server (`graphersal --server --ai FILE`, CLI feature `ai`): the LLM provider
 # calls over HTTPS. Synchronous (no async runtime: the dev server is synchronous, the Rust LLM
 # SDKs need tokio), pure Rust with rustls (ring) and the webpki root certificates, no system TLS.
+# Also the HTTPS client of the Hugging Face model download (`graphersal` feature `model-download`).
 ureq = { version = "3.4", default-features = false, features = ["rustls"] }
-# SHA-256 of the files `graphersal embed-model download` fetches (CLI feature `model2vec`), checked
+# SHA-256 of the files the model download fetches (`graphersal` feature `model-download`), checked
 # against the hash Hugging Face states for an LFS file while the body streams to disk. Already in
 # the tree as the crypto provider of rustls (through `ureq`), the same version: no new crate.
 ring = "0.17"

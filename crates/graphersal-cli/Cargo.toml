@@ -57,9 +57,9 @@ dev-server = ["dep:tiny_http", "dep:graphersal-mcp", "dep:graphersal-serve"]
 ai = ["dev-server", "dep:ureq", "dep:lz4_flex", "dep:rand"]
 # Real embedding models: the engine runs the Model2Vec models a database keeps (graphersal's
 # `model2vec` feature, pure Rust), and `graphersal embed-model download <repo>` fetches one
-# from Hugging Face over HTTPS (`ureq`, SHA-256 checked with `ring`, the manifest
-# written with `serde_json`; all three already in the tree).
-model2vec = ["graphersal/model2vec", "dep:ureq", "dep:ring"]
+# from Hugging Face over HTTPS (graphersal's `model-download` feature: `ureq`, the hashes
+# checked with `ring`).
+model2vec = ["graphersal/model2vec", "graphersal/model-download"]
 
 [dependencies]
 graphersal = { workspace = true, features = ["io", "script", "gql", "display", "serde", "persist", "persist-zip", "alloc-tracking"] }
@@ -83,9 +83,11 @@ serde_json = { workspace = true }
 rand = { workspace = true, optional = true }
 ureq = { workspace = true, optional = true }
 lz4_flex = { workspace = true, optional = true }
-ring = { workspace = true, optional = true }
 
 [dev-dependencies]
 # Parses `--format json` output and the dev server's answers in the CLI contract tests; already
 # a workspace dependency.
 serde_json = { workspace = true }
+# The hashes the mock Hugging Face endpoint of the `embed_models` tests states (already in the
+# tree through graphersal's `model-download`).
+ring = { workspace = true }

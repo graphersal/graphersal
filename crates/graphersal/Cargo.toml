@@ -50,6 +50,8 @@ divan = { workspace = true }
 # The Store tests hold the BACKUP pin as another process would.
 [target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
 fd-lock = { workspace = true }
+# The hashes the fake Hugging Face endpoint of `model_download_tests` states.
+ring = { workspace = true }
 
 [[bench]]
 name = "graph"
@@ -71,6 +73,12 @@ fd-lock = { workspace = true, optional = true }
 model2vec-rs = { workspace = true, optional = true }
 tokenizers = { workspace = true, optional = true }
 safetensors = { workspace = true, optional = true }
+# The Hugging Face model download (feature `model-download`, native only): HTTPS through `ureq`
+# (rustls on `ring`, no system TLS), the stated SHA-256 / git blob SHA-1 checked with `ring`
+# (already the crypto provider of rustls: no extra crate). Both were dependencies of
+# `graphersal-cli` before the download moved here.
+ureq = { workspace = true, optional = true }
+ring = { workspace = true, optional = true }
 
 # The free space of a single-file store's file system (`statvfs`; `persist`, Unix only).
 [target.'cfg(unix)'.dependencies]
@@ -114,6 +122,11 @@ alloc-tracking = []
 # `hash-ngram/1`).
 # `serde` (already in the tree through `tokenizers`) deserializes the compact Unigram model.
 model2vec = ["dep:model2vec-rs", "dep:tokenizers", "dep:safetensors", "dep:serde", "dep:serde_json"]
+# The Hugging Face download of Model2Vec models into the download cache
+# (`persist::ModelCache::download`, `persist::ModelDownload`; book "Embedding Models in a
+# Store"): what `graphersal embed-model download` runs, for any host. Native only (`ureq`,
+# `ring`, `std::fs`); never enabled for wasm32.
+model-download = ["persist", "model2vec", "dep:ureq", "dep:ring"]
 # The ISO GQL read query language (`src/gql/`): a hand-written lexer and parser whose queries are
 # lowered into the ordinary traversal pipeline. No dependencies, independent of `script`, builds
 # for wasm32.
