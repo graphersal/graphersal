@@ -74,8 +74,9 @@
 //! [`Mcp::handle_directory`] with the host's [`GraphDirectory`] (its registry: the graphs and
 //! aliases with their [`GraphState`], the route an alias resolves to now, the [`Host`] and
 //! [`Profile`] of a graph). The agent calls `list_graphs`, selects a graph with `use_graph`
-//! (stored in the MCP session's table entry; an alias that moves later does not move the
-//! session; a new session starts without a selection) and may switch; every data tool takes an
+//! (its NAME is stored in the MCP session's table entry and resolved on every call, so an alias
+//! re-pointed later moves the session along; [`Mcp::rename_selection`] follows an alias
+//! rename; a new session starts without a selection) and may switch; every data tool takes an
 //! optional `graph` argument for one call. Each call runs on that graph's host under its
 //! profile, so per-graph read-only flags and policies apply. Saved queries are reached through
 //! `run_saved_query`, never as tools of their own. Directory mode needs the session table

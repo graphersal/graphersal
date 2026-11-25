@@ -113,6 +113,17 @@ impl Registry {
         registry
     }
 
+    fn remove_alias(&self, alias: &str) {
+        self.aliases.lock().unwrap().remove(alias);
+    }
+
+    /// Renames an alias the way a host does: the registry, then the endpoint's selections.
+    fn rename_alias(&self, mcp: &Mcp, old: &str, new: &str) -> usize {
+        let target = self.aliases.lock().unwrap().remove(old).unwrap();
+        self.set_alias(new, &target);
+        mcp.rename_selection(old, new)
+    }
+
     fn set_alias(&self, alias: &str, target: &str) {
         self.aliases
             .lock()
@@ -345,7 +356,10 @@ fn select_write_switch_and_override_per_call() {
     assert_eq!(persons(&mcp, &registry, &session, Some("a")), 5);
     assert_eq!(persons(&mcp, &registry, &session, None), 4);
     let (text, _) = call(&mcp, &registry, &session, "list_graphs", json!({}));
-    assert!(text.ends_with("\"selected\":\"b\"}"), "{text}");
+    assert!(
+        text.ends_with("\"selected\":\"b\",\"selectedGraph\":\"b\"}"),
+        "{text}"
+    );
     // A `graph` that names nothing, or is no string.
     let (text, is_error) = call(
         &mcp,
@@ -464,27 +478,39 @@ fn without_a_selection_the_error_names_list_graphs_and_use_graph() {
 }
 
 #[test]
-fn an_alias_flip_keeps_an_open_session_on_its_graph() {
+fn an_alias_flip_moves_an_open_session_with_its_name() {
     let registry = Registry::standard();
     let mcp = Mcp::new(false, None, false);
     let (old, _) = initialize(&mcp, &registry);
     let (text, is_error) = call(&mcp, &registry, &old, "use_graph", json!({"name": "prod"}));
     assert!(!is_error, "{text}");
     let selected: Value = serde_json::from_str(&text).unwrap();
-    assert_eq!(selected["selected"], "a");
-    assert_eq!(selected["requested"], "prod");
+    assert_eq!(selected["selected"], "prod");
+    assert_eq!(selected["graph"], "a");
     let (text, is_error) = insert_person(&mcp, &registry, &old);
     assert!(!is_error, "{text}");
 
-    // The operator moves `prod` to b.
+    // The operator moves `prod` to b: the open session follows it, without a note.
     registry.set_alias("prod", "b");
-    assert_eq!(persons(&mcp, &registry, &old, None), 5);
-    // A new session selecting `prod` gets b; `graph: "prod"` per call resolves now too.
+    let (text, is_error) = call(&mcp, &registry, &old, "graph_info", json!({}));
+    assert!(!is_error && !text.starts_with("note:"), "{text}");
+    assert_eq!(persons(&mcp, &registry, &old, None), 4);
+    let (text, _) = call(&mcp, &registry, &old, "list_graphs", json!({}));
+    assert!(
+        text.ends_with("\"selected\":\"prod\",\"selectedGraph\":\"b\"}"),
+        "{text}"
+    );
+    // A new session selecting `prod` gets b too; `graph` reaches a for one call.
     let (new, _) = initialize(&mcp, &registry);
     let (text, _) = call(&mcp, &registry, &new, "use_graph", json!({"name": "prod"}));
-    assert!(text.contains("\"selected\":\"b\""), "{text}");
+    assert!(
+        text.contains("\"selected\":\"prod\",\"graph\":\"b\""),
+        "{text}"
+    );
     assert_eq!(persons(&mcp, &registry, &new, None), 4);
-    assert_eq!(persons(&mcp, &registry, &old, Some("prod")), 4);
+    assert_eq!(persons(&mcp, &registry, &old, Some("a")), 5);
+    // Back to a: followed again.
+    registry.set_alias("prod", "a");
     assert_eq!(persons(&mcp, &registry, &old, None), 5);
 }
 
@@ -501,7 +527,10 @@ fn an_unloaded_graph_is_refused_and_the_selection_stays() {
         "database 'c' is not loaded; ask an operator to load it"
     );
     let (text, _) = call(&mcp, &registry, &session, "list_graphs", json!({}));
-    assert!(text.ends_with("\"selected\":\"b\"}"), "{text}");
+    assert!(
+        text.ends_with("\"selected\":\"b\",\"selectedGraph\":\"b\"}"),
+        "{text}"
+    );
     // Per call too.
     let (text, is_error) = call(
         &mcp,
@@ -607,4 +636,163 @@ fn a_forgotten_session_is_404_and_starts_again_without_a_selection() {
     let (session, _) = initialize(&mcp, &registry);
     let delete = McpRequest::new("DELETE", &b""[..]).header("Mcp-Session-Id", &session);
     assert_eq!(mcp.handle_directory(&registry, delete).status(), 200);
+}
+
+#[test]
+fn a_removed_alias_fails_only_while_its_name_is_unknown() {
+    let registry = Registry::standard();
+    let mcp = Mcp::new(false, None, false);
+    let (session, _) = initialize(&mcp, &registry);
+    call(
+        &mcp,
+        &registry,
+        &session,
+        "use_graph",
+        json!({"name": "prod"}),
+    );
+    registry.remove_alias("prod");
+    let (text, is_error) = call(&mcp, &registry, &session, "graph_info", json!({}));
+    assert!(is_error, "{text}");
+    assert!(
+        text.contains("pick another graph: list_graphs, then use_graph")
+            && text.contains("\"prod\""),
+        "{text}"
+    );
+    // The selection stays: list_graphs shows the name without a graph.
+    let (text, _) = call(&mcp, &registry, &session, "list_graphs", json!({}));
+    assert!(
+        text.ends_with("\"selected\":\"prod\",\"selectedGraph\":null}"),
+        "{text}"
+    );
+    // Another call names its graph and works; the selection is still the missing name.
+    assert_eq!(persons(&mcp, &registry, &session, Some("b")), 4);
+    let (text, is_error) = call(&mcp, &registry, &session, "statistics", json!({}));
+    assert!(is_error && text.contains("pick another graph"), "{text}");
+    // The alias is created again (on another graph): the session works on, no tombstone.
+    registry.set_alias("prod", "b");
+    let (text, is_error) = insert_person(&mcp, &registry, &session);
+    assert!(!is_error && !text.starts_with("note:"), "{text}");
+    assert_eq!(persons(&mcp, &registry, &session, Some("b")), 5);
+    assert_eq!(persons(&mcp, &registry, &session, Some("a")), 4);
+    // A resource follows the same rule.
+    registry.remove_alias("prod");
+    let answer = json_of(&mcp.handle_directory(
+        &registry,
+        request(
+            &json!({"jsonrpc": "2.0", "id": 3, "method": "resources/read",
+                "params": {"uri": "graphersal://schema"}}),
+            Some(&session),
+        ),
+    ));
+    assert!(
+        answer["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("pick another graph"),
+        "{answer}"
+    );
+}
+
+#[test]
+fn a_renamed_alias_moves_the_sessions_with_one_note() {
+    let registry = Registry::standard();
+    let mcp = Mcp::new(false, None, false);
+    let (session, _) = initialize(&mcp, &registry);
+    let (on_a, _) = initialize(&mcp, &registry);
+    // The name is spelled as the directory lists it.
+    let (text, is_error) = call(
+        &mcp,
+        &registry,
+        &session,
+        "use_graph",
+        json!({"name": "PROD"}),
+    );
+    assert!(!is_error, "{text}");
+    assert!(
+        text.starts_with("{\"selected\":\"prod\",\"graph\":\"a\""),
+        "{text}"
+    );
+    call(&mcp, &registry, &on_a, "use_graph", json!({"name": "a"}));
+
+    // One rename: the next answer carries the note once.
+    assert_eq!(registry.rename_alias(&mcp, "prod", "live"), 1);
+    let (text, is_error) = call(&mcp, &registry, &session, "graph_info", json!({}));
+    assert!(!is_error, "{text}");
+    assert!(
+        text.starts_with("note: alias \"prod\" was renamed to \"live\"\n"),
+        "{text}"
+    );
+    let (text, _) = call(&mcp, &registry, &session, "graph_info", json!({}));
+    assert!(!text.contains("renamed"), "{text}");
+    let (text, _) = call(&mcp, &registry, &session, "list_graphs", json!({}));
+    assert!(
+        text.ends_with("\"selected\":\"live\",\"selectedGraph\":\"a\"}"),
+        "{text}"
+    );
+
+    // Two renames before the next call: one note, first name -> current name.
+    assert_eq!(registry.rename_alias(&mcp, "live", "main"), 1);
+    assert_eq!(registry.rename_alias(&mcp, "main", "stable"), 1);
+    let (text, is_error) = insert_person(&mcp, &registry, &session);
+    assert!(!is_error, "{text}");
+    let notes = text.matches("note: alias").count();
+    assert_eq!(notes, 1, "{text}");
+    assert!(
+        text.starts_with("note: alias \"live\" was renamed to \"stable\"\n"),
+        "{text}"
+    );
+    assert_eq!(persons(&mcp, &registry, &session, None), 5);
+    // The note rides on an error answer too.
+    assert_eq!(registry.rename_alias(&mcp, "stable", "prod"), 1);
+    let (text, is_error) = call(
+        &mcp,
+        &registry,
+        &session,
+        "statistics",
+        json!({"graph": "nope"}),
+    );
+    assert!(is_error, "{text}");
+    assert!(
+        text.starts_with("note: alias \"stable\" was renamed to \"prod\"\n"),
+        "{text}"
+    );
+    // The session selecting the real name was not moved and gets no note.
+    let (text, _) = call(&mcp, &registry, &on_a, "graph_info", json!({}));
+    assert!(!text.contains("renamed"), "{text}");
+    assert_eq!(persons(&mcp, &registry, &on_a, None), 5);
+}
+
+#[test]
+fn a_selection_by_a_real_name_stays_on_that_graph() {
+    let registry = Registry::standard();
+    let mcp = Mcp::new(false, None, false);
+    let (session, _) = initialize(&mcp, &registry);
+    let (text, _) = call(&mcp, &registry, &session, "use_graph", json!({"name": "A"}));
+    assert!(
+        text.starts_with("{\"selected\":\"a\",\"graph\":\"a\""),
+        "{text}"
+    );
+    // Aliases move, are renamed, removed, or one takes the name of another graph: a stays.
+    registry.set_alias("prod", "b");
+    assert_eq!(registry.rename_alias(&mcp, "prod", "live"), 0);
+    registry.remove_alias("live");
+    assert_eq!(persons(&mcp, &registry, &session, None), 4);
+    let (text, _) = insert_person(&mcp, &registry, &session);
+    assert!(!text.starts_with("note:"), "{text}");
+    assert_eq!(persons(&mcp, &registry, &session, None), 5);
+    assert_eq!(persons(&mcp, &registry, &session, Some("b")), 4);
+    let (text, _) = call(&mcp, &registry, &session, "list_graphs", json!({}));
+    assert!(
+        text.ends_with("\"selected\":\"a\",\"selectedGraph\":\"a\"}"),
+        "{text}"
+    );
+    // A name the directory does not list is kept as given (and must resolve).
+    let (text, is_error) = call(
+        &mcp,
+        &registry,
+        &session,
+        "use_graph",
+        json!({"name": "zz"}),
+    );
+    assert!(is_error && text.contains("no database 'zz'"), "{text}");
 }
