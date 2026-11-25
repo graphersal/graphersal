@@ -36,6 +36,26 @@ const GRAPH_ARG: &str = "graph";
 /// them cheap (no session job). A refusal is an [`McpError`] whose message the agent reads as
 /// the tool error, so it says what to do (`database 'x' is not loaded; ask an operator to load
 /// it`).
+///
+/// # Per caller
+///
+/// The methods take no caller: a host whose graphs differ per caller builds the directory for
+/// EACH request, for the identity it attaches to that request
+/// ([`McpRequest::with_identity`](crate::McpRequest::with_identity)), and passes it to
+/// [`Mcp::handle_directory`]. That directory then
+///
+/// - lists only the graphs (and aliases) that caller may see ([`GraphDirectory::list`]);
+/// - answers a graph hidden from the caller exactly like an unknown name
+///   ([`GraphDirectory::resolve`] / [`GraphDirectory::host`] give the same error text), so
+///   neither `list_graphs`, `use_graph` nor a `graph` argument tells that it exists;
+/// - answers the caller's profile for each graph ([`GraphDirectory::host`]: read-only for a
+///   reader, the access policy of that caller).
+///
+/// The MCP session stays the caller's: it belongs to the identity of its `initialize`, and a
+/// request with another identity (anonymous included) gets `404` like an unknown session, so
+/// a session's selection is never used under another caller's directory. Its selected NAME is
+/// resolved through the directory of each request, so a graph the caller lost access to fails
+/// the call like a removed one.
 pub trait GraphDirectory: Send + Sync {
     /// The graphs (and aliases) an agent may name, with their states (`list_graphs`).
     fn list(&self) -> Result<Vec<GraphEntry>, McpError>;
@@ -273,7 +293,7 @@ type Target = (String, Arc<dyn Host>, Profile);
 impl Mcp {
     /// Answers one HTTP request to a DIRECTORY endpoint: one endpoint over the graphs of
     /// `directory` (the host's registry). Like [`Mcp::handle`] (token, `POST`/`DELETE`/`405`,
-    /// the header checks, `404` for an unknown session), but:
+    /// the header checks, `404` for an unknown session or one of another identity), but:
     ///
     /// - `initialize`, `tools/list` and `resources/list` are the directory's, under the
     ///   endpoint's default profile ([`Mcp::with_profile`]): the tools are `list_graphs`,
@@ -295,6 +315,9 @@ impl Mcp {
     ///   created again under it works on. [`Mcp::rename_selection`] moves selections to a new
     ///   name. A new session (a reconnect, or one the table forgot:
     ///   [`Mcp::with_max_sessions`]) starts without a selection.
+    ///
+    /// `directory` carries no caller: a host whose graphs differ per caller builds it for this
+    /// request's identity ([`GraphDirectory`], "Per caller").
     ///
     /// Directory mode needs the session table: an endpoint with signed session ids
     /// ([`Mcp::with_session_key`]) answers every request `500` with a JSON-RPC error saying
@@ -404,7 +427,7 @@ impl Mcp {
         match method {
             "initialize" => {
                 let (version, info) = negotiate(params);
-                let id = self.sessions.create_routed(&info, None);
+                let id = self.sessions.create_routed(&info, None, client.identity());
                 self.stats.record_initialize(&id);
                 self.remember_last_client(info);
                 let result = initialize_result(

@@ -9,6 +9,13 @@
 //! HMAC of a signed id (and part of the remembered id in table mode), so a changed route is an
 //! unknown session. An id without a route is byte-identical to one minted before routes
 //! existed. [`session_route`] reads the route back from a request's `Mcp-Session-Id`.
+//!
+//! Every session belongs to the identity of its `initialize` request
+//! ([`crate::McpRequest::with_identity`]; none = anonymous): a request naming the session with
+//! another identity (anonymous included, both ways) is an unknown session (`404`), the same
+//! answer as a forged or expired id. The table remembers the identity with the session; a
+//! signed id covers it with its HMAC (an anonymous id signs exactly what it signed before
+//! identities were bound).
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -132,6 +139,17 @@ pub(crate) struct TableEntry {
     /// The name the selection had before the renames ([`Sessions::rename`]) the session has
     /// not been told about yet: the first old name of the pending note.
     renamed_from: Option<String>,
+    /// The identity of the `initialize` request that created the session (none = anonymous);
+    /// a request with another identity does not find the session.
+    identity: Option<String>,
+}
+
+impl TableEntry {
+    /// Whether this entry is the session `id` of the identity `identity` (strict equality:
+    /// anonymous only matches anonymous).
+    fn is(&self, id: &str, identity: Option<&str>) -> bool {
+        self.id == id && self.identity.as_deref() == identity
+    }
 }
 
 /// The MCP sessions of an endpoint.
@@ -280,16 +298,22 @@ impl Sessions {
         matches!(self, Self::Signed { .. })
     }
 
-    /// A new session id for the client `client` (`{name, version}`), without a route.
+    /// A new anonymous session id for the client `client` (`{name, version}`), without a route.
     #[cfg(test)]
     pub(crate) fn create(&self, client: &Value) -> String {
-        self.create_routed(client, None)
+        self.create_routed(client, None, None)
     }
 
     /// A new session id for the client `client` (`{name, version}`), pinned to `route` when
     /// the host gave one (`<route>~<id>`; the caller checked it with
-    /// [`is_valid_session_route`]).
-    pub(crate) fn create_routed(&self, client: &Value, route: Option<&str>) -> String {
+    /// [`is_valid_session_route`]), bound to `identity` (the `initialize` request's; none =
+    /// anonymous).
+    pub(crate) fn create_routed(
+        &self,
+        client: &Value,
+        route: Option<&str>,
+        identity: Option<&str>,
+    ) -> String {
         let prefix = route.map_or(String::new(), |route| format!("{route}{ROUTE_SEPARATOR}"));
         match self {
             Self::Table { ids, clients, max } => {
@@ -304,6 +328,7 @@ impl Sessions {
                         client: client.clone(),
                         selected: None,
                         renamed_from: None,
+                        identity: identity.map(str::to_string),
                     });
                 }
                 if let Ok(mut clients) = clients.write() {
@@ -319,7 +344,7 @@ impl Sessions {
                 let mut id = Vec::with_capacity(ID_BYTES);
                 id.extend((0..NONCE_BYTES).map(|_| rand::random::<u8>()));
                 id.extend_from_slice(&digest.to_be_bytes());
-                let tag = sign(key, &id, route.unwrap_or_default());
+                let tag = sign(key, &id, route.unwrap_or_default(), identity);
                 id.extend_from_slice(&tag.as_ref()[..TAG_BYTES]);
                 format!("{prefix}{}", hex(&id))
             }
@@ -336,26 +361,41 @@ impl Sessions {
         digest
     }
 
-    /// Whether `id` names a session of this endpoint (in the table, or signed by its key).
+    /// Whether `id` names an anonymous session of this endpoint ([`Sessions::knows_as`]).
+    #[cfg(test)]
     pub(crate) fn knows(&self, id: &str) -> bool {
+        self.knows_as(id, None)
+    }
+
+    /// Whether `id` names a session of this endpoint (in the table, or signed by its key) that
+    /// belongs to `identity` (strict: anonymous only matches anonymous). A session of another
+    /// identity is answered exactly like an unknown id.
+    pub(crate) fn knows_as(&self, id: &str, identity: Option<&str>) -> bool {
         match self {
             Self::Table { ids, .. } => ids
                 .lock()
-                .is_ok_and(|sessions| sessions.iter().any(|entry| entry.id == id)),
-            Self::Signed { key, .. } => verify(key, id),
+                .is_ok_and(|sessions| sessions.iter().any(|entry| entry.is(id, identity))),
+            Self::Signed { key, .. } => verify(key, id, identity),
         }
     }
 
-    /// Ends the session `id` (`DELETE /mcp`): whether it was known. A signed id stays valid
-    /// (nothing is kept to forget); the client does not use it again.
+    /// Ends the anonymous session `id` ([`Sessions::forget_as`]).
+    #[cfg(test)]
     pub(crate) fn forget(&self, id: &str) -> bool {
+        self.forget_as(id, None)
+    }
+
+    /// Ends the session `id` of `identity` (`DELETE /mcp`): whether it was known (a session
+    /// of another identity is not, and stays). A signed id stays valid (nothing is kept to
+    /// forget); the client does not use it again.
+    pub(crate) fn forget_as(&self, id: &str, identity: Option<&str>) -> bool {
         match self {
             Self::Table { ids, .. } => ids.lock().is_ok_and(|mut sessions| {
                 let before = sessions.len();
-                sessions.retain(|entry| entry.id != id);
+                sessions.retain(|entry| !entry.is(id, identity));
                 sessions.len() < before
             }),
-            Self::Signed { key, .. } => verify(key, id),
+            Self::Signed { key, .. } => verify(key, id, identity),
         }
     }
 
@@ -375,7 +415,8 @@ impl Sessions {
                             + entry.id.capacity()
                             + entry.client.to_string().len()
                             + entry.selected.as_ref().map_or(0, String::capacity)
-                            + entry.renamed_from.as_ref().map_or(0, String::capacity))
+                            + entry.renamed_from.as_ref().map_or(0, String::capacity)
+                            + entry.identity.as_ref().map_or(0, String::capacity))
                             as u64
                     })
                     .sum();
@@ -499,20 +540,28 @@ fn client_digest(client: &Value) -> u64 {
     u64::from_be_bytes(first)
 }
 
-/// The HMAC-SHA256 of [`DOMAIN`], `data` (the nonce and the client digest, fixed length) and
-/// the session's `route` (empty without one, so an id without a route signs exactly what it
-/// signed before routes existed) under `key`.
-fn sign(key: &hmac::Key, data: &[u8], route: &str) -> hmac::Tag {
+/// The HMAC-SHA256 of [`DOMAIN`], `data` (the nonce and the client digest, fixed length), the
+/// session's `route` (empty without one, so an id without a route signs exactly what it
+/// signed before routes existed) and its `identity` under `key`. An identity is appended as a
+/// zero byte (never part of a route), its length (8 bytes, big-endian) and its bytes, so no
+/// route/identity pair signs what another pair signs; an anonymous session appends nothing
+/// (byte-identical to the ids minted before identities were bound).
+fn sign(key: &hmac::Key, data: &[u8], route: &str, identity: Option<&str>) -> hmac::Tag {
     let mut context = hmac::Context::with_key(key);
     context.update(DOMAIN);
     context.update(data);
     context.update(route.as_bytes());
+    if let Some(identity) = identity {
+        context.update(&[0]);
+        context.update(&(identity.len() as u64).to_be_bytes());
+        context.update(identity.as_bytes());
+    }
     context.sign()
 }
 
-/// Whether `id` is a session id signed with `key` (compared without stopping at the first
-/// difference).
-fn verify(key: &hmac::Key, id: &str) -> bool {
+/// Whether `id` is a session id signed with `key` for `identity` (compared without stopping
+/// at the first difference).
+fn verify(key: &hmac::Key, id: &str, identity: Option<&str>) -> bool {
     let (route, id) = split_route(id);
     let Some(bytes) = unhex(id) else {
         return false;
@@ -521,7 +570,7 @@ fn verify(key: &hmac::Key, id: &str) -> bool {
         return false;
     }
     let (signed, tag) = bytes.split_at(NONCE_BYTES + CLIENT_BYTES);
-    let expected = sign(key, signed, route.unwrap_or_default());
+    let expected = sign(key, signed, route.unwrap_or_default(), identity);
     expected.as_ref()[..TAG_BYTES]
         .iter()
         .zip(tag)
@@ -652,5 +701,37 @@ mod tests {
         assert_eq!(sessions.rename("nothing", "z"), 0);
         let signed = Sessions::signed(&SessionKey::random());
         assert_eq!(signed.rename("prod", "live"), 0);
+    }
+    #[test]
+    fn a_session_belongs_to_the_identity_of_its_initialize() {
+        let client = json!({"name": "a", "version": "1"});
+        let key = SessionKey::new(&[9u8; 32]).unwrap();
+        for sessions in [Sessions::table(), Sessions::signed(&key)] {
+            let anonymous = sessions.create_routed(&client, None, None);
+            let alice = sessions.create_routed(&client, Some("g@1"), Some("alice"));
+            assert!(sessions.knows_as(&anonymous, None));
+            assert!(!sessions.knows_as(&anonymous, Some("alice")));
+            assert!(!sessions.knows_as(&anonymous, Some("")));
+            assert!(sessions.knows_as(&alice, Some("alice")));
+            assert!(!sessions.knows_as(&alice, None));
+            assert!(!sessions.knows_as(&alice, Some("Alice")));
+            assert!(!sessions.forget_as(&alice, Some("bob")));
+            assert!(sessions.knows_as(&alice, Some("alice")));
+        }
+        // A signed id cannot move bytes between its route and its identity.
+        let signed = Sessions::signed(&key);
+        let id = signed.create_routed(&client, Some("ab"), None);
+        let moved = id.replacen("ab~", "a~", 1);
+        assert!(signed.knows_as(&id, None));
+        assert!(!signed.knows_as(&moved, Some("b")));
+        // An anonymous signed id is the one minted before identities were bound.
+        let plain = signed.create(&client);
+        let (_, raw) = split_route(&plain);
+        let bytes = unhex(raw).unwrap();
+        let (data, tag) = bytes.split_at(NONCE_BYTES + CLIENT_BYTES);
+        let mut context = hmac::Context::with_key(&hmac::Key::new(hmac::HMAC_SHA256, &[9u8; 32]));
+        context.update(DOMAIN);
+        context.update(data);
+        assert_eq!(&context.sign().as_ref()[..TAG_BYTES], tag);
     }
 }

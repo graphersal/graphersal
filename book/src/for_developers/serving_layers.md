@@ -47,7 +47,7 @@ excerpts on this page come from it.
 | `Host::serves_layer` | `graphersal-mcp` | Makes the `initialize` instructions name `layer()`, `has_layer()` and `g.layer_diff()`. |
 | Route tag | `graphersal-mcp` | `Host::session_route` puts the version into the session id: `<route>~<id>`. |
 | `graphersal_mcp::session_route(id)` | `graphersal-mcp` | Reads the route out of an id, without checking the id. |
-| `Mcp::verified_session_route(id)` | `graphersal-mcp` | Returns the route only when the endpoint knows the id. |
+| `Mcp::verified_session_route(id)` | `graphersal-mcp` | Returns the route only when the endpoint knows the id as an anonymous session; `verified_session_route_for(id, identity)` for a request with an identity. |
 | `ContextBuilder::layered(true)` | `graphersal-serve` | Tells the context's `Host` that it serves a layer from the first `initialize` on. |
 | `ContextBuilder::mcp_session_route(Some(..))` | `graphersal-serve`, feature `mcp` | Sets the route tag of the sessions this context starts. |
 | `ContextBuilder::shared_mcp` / `mcp_profile` | `graphersal-serve`, feature `mcp` | One MCP endpoint for every context, with a profile per context. |
@@ -122,6 +122,20 @@ the session id becomes `<route>~<id>`, for example `acme@2026.3~9f2c…`:
 
 A stream connection (`Context::mcp_connection`) is its own session and has no route: the host
 picks the context when it opens the stream.
+
+### Sessions belong to their identity
+
+Every HTTP MCP session belongs to the identity of the request that sent its `initialize` (what
+the host's request filter attached, `McpRequest::with_identity`; none means anonymous). A
+request that names the session id with another identity gets the same `404` as an unknown
+session, and a `DELETE` from it ends nothing. Anonymous counts as an identity of its own: an
+anonymous session cannot be used by a signed-in caller, and the other way round. In table mode
+the table stores the identity with the session; with signed ids the identity is part of the
+signed data (an anonymous id signs exactly what it signed before). One `Mcp` shared by several
+routes (`/mcp` and per-graph paths) accepts a session id on each of them, for its identity
+only. A resolver that checks a routed id for a caller uses
+`mcp.verified_session_route_for(id, identity)`; `verified_session_route(id)` checks it as
+anonymous.
 
 ## What a host builds
 
@@ -278,6 +292,14 @@ catalog:
 - `host(route)`: the context serving that route (a `graphersal-serve` `Context` is a
   `graphersal_mcp::Host`) and its MCP profile, or an error whose text the agent reads, such as
   `database 'acme@2026.3' is not loaded; ask an operator to load it`.
+
+The methods take no caller. A host whose graphs differ per caller builds the directory for each
+request from the identity it attaches to that request, and passes that directory to
+`handle_directory`. It lists only what the caller may see, answers a hidden graph with exactly
+the error of an unknown name (from `resolve`, `use_graph` and the `graph` argument alike), and
+answers the caller's profile from `host` (read-only for a reader). The session's selected name
+is resolved through the directory of each request, and a session cannot be used by another
+identity (see "Sessions belong to their identity" above).
 
 The host's listener passes every request to its endpoint path to
 `mcp.handle_directory(&catalog, request)`. Inside an MCP session the agent calls
