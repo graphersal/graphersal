@@ -54,6 +54,7 @@ excerpts on this page come from it.
 | `GraphResolver`, `Server::ready_with` | `graphersal-serve` | The extension point that picks the context of each request. |
 | `Request::mark_read_only` | `graphersal-serve` | Serves one request read-only: the host's router or `RequestFilter` marks it, for a caller with read access only (see "Read-only requests" below). EXPERIMENTAL. |
 | `ContextBuilder::file_root`, `jobs_outside_file_root` | `graphersal-serve` | Confines every file path a client names (backup jobs, catalog loads, fork and backup directories) to one directory (see "File root" below). EXPERIMENTAL. |
+| `SessionStore`, `Mcp::with_session_store`, `Mcp::forget_sessions_of` | `graphersal-mcp` | Keeps the MCP session table across restarts, and ends the sessions of a revoked identity (see "Sessions survive a restart" below). EXPERIMENTAL. |
 | `GraphDirectory`, `Mcp::handle_directory` | `graphersal-mcp` | One MCP endpoint over all graphs: the agent lists them, selects one per session and may switch (see below). EXPERIMENTAL. |
 
 ### Base identity
@@ -138,6 +139,38 @@ routes (`/mcp` and per-graph paths) accepts a session id on each of them, for it
 only. A resolver that checks a routed id for a caller uses
 `mcp.verified_session_route_for(id, identity)`; `verified_session_route(id)` checks it as
 anonymous.
+
+### Sessions survive a restart
+
+By default the session table lives in memory: a restarted host forgets every MCP session, and
+each client gets `404`, initializes again and, in directory mode, selects its graph again. A
+host that wants the sessions back after a restart gives the endpoint a store:
+
+```rust,ignore
+let mcp = Mcp::new(false, None, false)
+    .with_max_sessions(1024)                     // first: the load keeps the newest 1024
+    .with_session_store(Arc::new(MyFileStore::new(dir)))?;
+```
+
+`SessionStore` has two methods: `load` answers the stored sessions once, and `save` gets the
+whole table after every change (a session created, a graph selected, a selection renamed or its
+note told, a session ended or evicted). A save runs outside the table lock, one at a time, and
+never writes an older table after a newer one. A failed save is a `tracing` warning; the
+request goes on and the next change saves again. So write atomically (a temporary file, then a
+rename).
+
+Each row is a `StoredSession`: the SHA-256 of the id (64 hex digits; the table never holds the
+plain id, so the store holds nothing a client could present), the identity, the selected name,
+the old name of a pending rename note, the negotiated protocol revision, the client's
+`{name, version}` and the creation time in Unix seconds. The host serialises it in any format
+(strings, a number and a JSON value) and rebuilds it with `StoredSession::new`. A restored
+session answers its old id for the same identity only, with its selection and its pending note.
+The expiry rule is unchanged: at most `with_max_sessions`, the oldest dropped first.
+
+When the host revokes a user's token or removes the user, `mcp.forget_sessions_of(Some(id))`
+ends that identity's sessions at once (and saves the table); it answers how many it ended.
+Signed ids (`Mcp::with_session_key`) keep no table: `with_session_store` refuses them with an
+error, and `forget_sessions_of` ends nothing there.
 
 ### Read-only requests
 

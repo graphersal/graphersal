@@ -427,7 +427,9 @@ impl Mcp {
         match method {
             "initialize" => {
                 let (version, info) = negotiate(params);
-                let id = self.sessions.create_routed(&info, None, client.identity());
+                let id = self
+                    .sessions
+                    .create_versioned(&info, None, client.identity(), version);
                 self.stats.record_initialize(&id);
                 self.remember_last_client(info);
                 let result = initialize_result(
