@@ -170,7 +170,10 @@ fn one_endpoint_serves_two_contexts() {
         "use_graph",
         json!({"name": "prod"}),
     );
-    assert!(!is_error && text.contains("\"selected\":\"a\""), "{text}");
+    assert!(
+        !is_error && text.contains("\"selected\":\"prod\",\"graph\":\"a\""),
+        "{text}"
+    );
     let (text, is_error) = tool(
         &mcp,
         &registry,
@@ -182,12 +185,18 @@ fn one_endpoint_serves_two_contexts() {
     assert_eq!(persons(&mcp, &registry, &session, None), "5");
     assert_eq!(persons(&mcp, &registry, &session, Some("b")), "4");
 
-    // Alias flip: the open session stays on a.
+    // Alias flip: the open session keeps the name and follows it to b, then back to a.
     registry
         .aliases
         .lock()
         .unwrap()
         .insert("prod".into(), "b".into());
+    assert_eq!(persons(&mcp, &registry, &session, None), "4");
+    registry
+        .aliases
+        .lock()
+        .unwrap()
+        .insert("prod".into(), "a".into());
     assert_eq!(persons(&mcp, &registry, &session, None), "5");
 
     // The runtime read-only toggle of a refuses the write; b takes it.

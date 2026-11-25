@@ -273,7 +273,8 @@ catalog:
 - `list()`: the graphs and aliases an agent may name, each a `GraphEntry` with its kind
   (plain, layer, base), state (unloaded, loading, loaded, needs-model, failed with a reason),
   read-only flag and description.
-- `resolve(name)`: the route of a name, an alias resolved now (`acme` -> `acme@2026.3`).
+- `resolve(name)`: the route of a name, an alias resolved now (`acme` -> `acme@2026.3`). The
+  endpoint calls it on every call of a session, so keep it cheap.
 - `host(route)`: the context serving that route (a `graphersal-serve` `Context` is a
   `graphersal_mcp::Host`) and its MCP profile, or an error whose text the agent reads, such as
   `database 'acme@2026.3' is not loaded; ask an operator to load it`.
@@ -286,8 +287,25 @@ that graph's context under that context's profile, so its read-only flag and acc
 apply. Saved queries are not tools of their own here: the agent runs them with
 `run_saved_query` (and `graph`).
 
-- **The selection is pinned.** `use_graph` stores the resolved route in the MCP session, so an
-  alias flip does not move an open session: the same rule as the route tag above.
+- **The selection is a name.** `use_graph` stores the name the agent asked for (a graph or an
+  alias, spelled as `list()` spells it when one entry matches ignoring ASCII case) and the
+  endpoint resolves it again on every call, as an HTTP path `/db/<name>/` is. This is not the
+  route tag above: a route tag pins a session to one version, a directory selection follows
+  its name.
+  - **Re-pointed alias:** the session follows it silently. Errors of the new target (not
+    loaded, read-only) are ordinary tool errors.
+  - **Removed alias:** a call fails with "pick another graph: list_graphs, then use_graph" only
+    while no graph or alias of that name exists. The selection stays, so an alias created
+    again under that name simply works on.
+  - **Renamed alias:** the host renames it in its catalog, then calls
+    `mcp.rename_selection(old, new)` (it answers the number of sessions moved). Each moved
+    session's next `tools/call` answer starts with one line, `note: alias "<first old>" was
+    renamed to "<current>"`; several renames before that call give one note from the first
+    name to the current one.
+  - **A real graph name** stays on that graph whatever the aliases do.
+- `list_graphs` answers `selected` (the session's name, or `null`) and `selectedGraph` (the
+  graph that name resolves to now, or `null`); `use_graph` answers `selected` (the name) and
+  `graph` (its graph now).
 - **A new session starts empty.** After a reconnect, or when the endpoint forgot the session
   (the table keeps `MAX_SESSIONS`, 64, unless `Mcp::with_max_sessions` says otherwise; the
   client then gets `404` and initializes again), calls that name no graph fail with a message

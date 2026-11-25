@@ -1,8 +1,9 @@
 //! Directory mode: ONE endpoint over many graphs ([`GraphDirectory`], [`Mcp::handle_directory`]).
 //! The host lists its graphs, resolves a name (an alias now) to the route of one and answers the
 //! [`Host`] and [`Profile`] of a route; inside an MCP session the agent lists the graphs
-//! (`list_graphs`), selects one (`use_graph`, kept in the session's table entry) and may switch,
-//! or names another graph for one call (the `graph` argument of every data tool).
+//! (`list_graphs`), selects one (`use_graph`: the NAME is kept in the session's table entry and
+//! resolved on every call, so a re-pointed alias moves the session along) and may switch, or
+//! names another graph for one call (the `graph` argument of every data tool).
 
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
@@ -40,8 +41,10 @@ pub trait GraphDirectory: Send + Sync {
     fn list(&self) -> Result<Vec<GraphEntry>, McpError>;
 
     /// The route of the graph `name` names (a graph or an alias): the real graph's name,
-    /// resolved NOW. The endpoint stores this route as the session's selection (`use_graph`),
-    /// so an alias that moves later does not move an open session. `Err` for an unknown name.
+    /// resolved NOW. The endpoint calls it on EVERY call: a session keeps the name it selected
+    /// (`use_graph`), so an alias re-pointed later moves an open session along, and a name
+    /// that is gone (`Err`) fails the session's calls only until a graph or alias of that name
+    /// exists again. `Err` for an unknown name.
     fn resolve(&self, name: &str) -> Result<String, McpError>;
 
     /// The host serving the graph of `route` (a route [`GraphDirectory::resolve`] answered)
@@ -282,11 +285,16 @@ impl Mcp {
     ///   the session selected with `use_graph`, else they fail naming `list_graphs` and
     ///   `use_graph`. They run on the host and under the profile
     ///   [`GraphDirectory::host`] answers for that graph (its read-only flag and policy).
-    /// - `use_graph {name}` resolves `name` now ([`GraphDirectory::resolve`]) and stores the
-    ///   route in the session's table entry, only when [`GraphDirectory::host`] accepts it (a
-    ///   graph that is not loaded is refused with the host's text, the selection unchanged).
-    ///   An alias that moves later does not move the session. A new session (a reconnect, or
-    ///   one the table forgot: [`Mcp::with_max_sessions`]) starts without a selection.
+    /// - `use_graph {name}` stores the NAME in the session's table entry (spelled as
+    ///   [`GraphDirectory::list`] spells it when one entry matches ignoring ASCII case, else as
+    ///   given), only when it resolves ([`GraphDirectory::resolve`]) and
+    ///   [`GraphDirectory::host`] accepts the route (a graph that is not loaded is refused
+    ///   with the host's text, the selection unchanged). The name is resolved again on every
+    ///   call: an alias re-pointed later moves the session along silently; a name that no
+    ///   longer resolves fails the call ("pick another graph") but stays selected, so an alias
+    ///   created again under it works on. [`Mcp::rename_selection`] moves selections to a new
+    ///   name. A new session (a reconnect, or one the table forgot:
+    ///   [`Mcp::with_max_sessions`]) starts without a selection.
     ///
     /// Directory mode needs the session table: an endpoint with signed session ids
     /// ([`Mcp::with_session_key`]) answers every request `500` with a JSON-RPC error saying
@@ -444,6 +452,23 @@ impl Mcp {
         }
     }
 
+    /// Moves every MCP session that selected `old` (a graph or alias name, ASCII case ignored)
+    /// to `new`, for a host that renamed an alias: the number of sessions moved. Each moved
+    /// session's next `tools/call` answer starts with ONE note line, `note: alias "<first old
+    /// name>" was renamed to "<current name>"` (several renames before that call: the first old
+    /// name and the current one; none when they lead back to the first name). A session that
+    /// calls `use_graph` first drops the note. Signed session ids keep no selection: `0`.
+    ///
+    /// ```
+    /// use graphersal_mcp::Mcp;
+    ///
+    /// let mcp = Mcp::new(false, None, false);
+    /// assert_eq!(mcp.rename_selection("prod", "live"), 0);
+    /// ```
+    pub fn rename_selection(&self, old: &str, new: &str) -> usize {
+        self.sessions.rename(old, new)
+    }
+
     /// `tools/call` on a directory endpoint.
     fn directory_call(
         &self,
@@ -517,14 +542,26 @@ impl Mcp {
         // A call may have changed the saved queries a stream client of that graph listed.
         let _ = self.check_tools_changed();
         match called {
-            Ok(outcome) => Ok((tool_result(outcome.text, outcome.is_error), None)),
+            Ok(outcome) => {
+                let note = session.and_then(|id| self.sessions.take_rename_note(id));
+                let text = match note {
+                    Some((first, current)) => format!(
+                        "note: alias {} was renamed to {}\n{}",
+                        json!(first),
+                        json!(current),
+                        outcome.text
+                    ),
+                    None => outcome.text,
+                };
+                Ok((tool_result(text, outcome.is_error), None))
+            }
             Err(CallRefused::Internal(message)) => Err((INTERNAL_ERROR, message)),
             Err(CallRefused::Params(message)) => Err((INVALID_PARAMS, message)),
         }
     }
 
-    /// The graph of a call: the one `graph` names (resolved now), else the session's
-    /// selection; `Err` is the agent's error text.
+    /// The graph of a call: the one `graph` names, else the name the session selected, both
+    /// resolved now; `Err` is the agent's error text.
     fn target(
         &self,
         directory: &dyn GraphDirectory,
@@ -535,9 +572,18 @@ impl Mcp {
             Some(Value::String(name)) if !name.trim().is_empty() => directory
                 .resolve(name.trim())
                 .map_err(|err| format!("{err} (list_graphs lists the graphs)"))?,
-            None | Some(Value::Null) => session
-                .and_then(|id| self.sessions.selected(id))
-                .ok_or_else(|| NO_SELECTION.to_string())?,
+            None | Some(Value::Null) => {
+                let name = session
+                    .and_then(|id| self.sessions.selected(id))
+                    .ok_or_else(|| NO_SELECTION.to_string())?;
+                directory.resolve(&name).map_err(|err| {
+                    format!(
+                        "{err} (this MCP session selected {}, which names no graph now): pick \
+                         another graph: list_graphs, then use_graph",
+                        json!(name)
+                    )
+                })?
+            }
             Some(_) => {
                 return Err(format!(
                     "argument \"{GRAPH_ARG}\" must be the name of a graph (list_graphs lists them)"
@@ -548,7 +594,8 @@ impl Mcp {
         Ok((route, host, profile))
     }
 
-    /// `list_graphs`: the directory's entries and the session's selection.
+    /// `list_graphs`: the directory's entries, the name the session selected and the graph it
+    /// resolves to now (`null` when it names none).
     fn list_graphs(
         &self,
         directory: &dyn GraphDirectory,
@@ -557,15 +604,19 @@ impl Mcp {
         let entries = directory.list().map_err(|err| err.to_string())?;
         let graphs: Vec<String> = entries.iter().map(GraphEntry::to_text).collect();
         let selected = session.and_then(|id| self.sessions.selected(id));
+        let target = selected
+            .as_deref()
+            .and_then(|name| directory.resolve(name).ok());
         Ok(format!(
-            "{{\"graphs\":[{}],\"selected\":{}}}",
+            "{{\"graphs\":[{}],\"selected\":{},\"selectedGraph\":{}}}",
             graphs.join(","),
-            json!(selected)
+            json!(selected),
+            json!(target)
         ))
     }
 
-    /// `use_graph {name}`: resolves the name now and stores the route as the session's
-    /// selection when the directory serves it.
+    /// `use_graph {name}`: stores the name (spelled as the directory lists it) as the
+    /// session's selection when it resolves and the directory serves its route.
     fn use_graph(
         &self,
         directory: &dyn GraphDirectory,
@@ -590,36 +641,36 @@ impl Mcp {
                     .into(),
             );
         };
+        let entries = directory.list().ok().unwrap_or_default();
+        let name = entries
+            .iter()
+            .find(|entry| entry.name.eq_ignore_ascii_case(name))
+            .map_or(name, |entry| entry.name.as_str());
         let route = directory
             .resolve(name)
             .map_err(|err| format!("{err} (list_graphs lists the graphs)"))?;
         let (_, profile) = directory.host(&route).map_err(|err| err.to_string())?;
-        if !self.sessions.select(session, &route) {
+        if !self.sessions.select(session, name) {
             return Err(
                 "this MCP session is no longer known (the server forgot it): \
                         initialize again, then call use_graph"
                     .into(),
             );
         }
-        let entry = directory
-            .list()
-            .ok()
-            .and_then(|entries| entries.into_iter().find(|entry| entry.name == route));
-        let mut pairs = vec![("selected", json!(route))];
-        if name != route {
-            pairs.push(("requested", json!(name)));
-        }
-        if let Some(entry) = &entry {
+        let entry = entries.iter().find(|entry| entry.name == route);
+        let mut pairs = vec![("selected", json!(name)), ("graph", json!(route))];
+        if let Some(entry) = entry {
             pairs.push(("kind", json!(entry.kind.as_str())));
             pairs.push(("state", json!(entry.state.as_str())));
         }
-        let read_only = profile.read_only || entry.as_ref().is_some_and(|e| e.read_only);
+        let read_only = profile.read_only || entry.is_some_and(|e| e.read_only);
         pairs.push(("readOnly", json!(read_only)));
         pairs.push((
             "note",
             json!(
-                "calls without \"graph\" now run on this graph for this MCP session (an alias \
-                 moved later does not move it); after a reconnect call use_graph again"
+                "calls without \"graph\" now run on this graph for this MCP session; the session \
+                 keeps the name, so an alias re-pointed later moves it along; after a reconnect \
+                 call use_graph again"
             ),
         ));
         Ok(object(&pairs))
@@ -704,7 +755,7 @@ fn use_graph_listing() -> Value {
     json!({
         "name": USE_GRAPH,
         "title": "Use graph",
-        "description": "Selects the graph the other tools work on for this MCP session (an alias is resolved now). Call it again to switch; after a reconnect call it again.",
+        "description": "Selects the graph the other tools work on for this MCP session (it keeps the name: an alias follows its target). Call it again to switch; after a reconnect call it again.",
         "inputSchema": {
             "type": "object",
             "properties": {"name": {"type": "string", "description": "A graph or alias from list_graphs."}},

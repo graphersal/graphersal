@@ -126,8 +126,12 @@ impl std::fmt::Debug for SessionKey {
 pub(crate) struct TableEntry {
     id: String,
     client: Value,
-    /// The route of the graph `use_graph` selected (directory mode), if any.
+    /// The NAME (graph or alias) `use_graph` selected (directory mode), if any; resolved on
+    /// every call.
     selected: Option<String>,
+    /// The name the selection had before the renames ([`Sessions::rename`]) the session has
+    /// not been told about yet: the first old name of the pending note.
+    renamed_from: Option<String>,
 }
 
 /// The MCP sessions of an endpoint.
@@ -169,14 +173,16 @@ impl Sessions {
         }
     }
 
-    /// Stores `route` as the graph the table session `id` selected (directory mode): whether
-    /// the session is known (signed ids keep nothing: `false`).
-    pub(crate) fn select(&self, id: &str, route: &str) -> bool {
+    /// Stores the name `name` as the graph the table session `id` selected (directory mode),
+    /// dropping a pending rename note (the agent named its graph itself): whether the session
+    /// is known (signed ids keep nothing: `false`).
+    pub(crate) fn select(&self, id: &str, name: &str) -> bool {
         match self {
             Self::Table { ids, .. } => ids.lock().is_ok_and(|mut sessions| {
                 match sessions.iter_mut().find(|entry| entry.id == id) {
                     Some(entry) => {
-                        entry.selected = Some(route.to_string());
+                        entry.selected = Some(name.to_string());
+                        entry.renamed_from = None;
                         true
                     }
                     None => false,
@@ -186,7 +192,46 @@ impl Sessions {
         }
     }
 
-    /// The route of the graph the table session `id` selected, if any.
+    /// Moves every table session whose selection is `old` (ASCII case ignored) to `new`, keeping
+    /// the first old name for the pending note: the number of sessions moved. A session whose
+    /// renames lead back to its first name has no note left.
+    pub(crate) fn rename(&self, old: &str, new: &str) -> usize {
+        let Self::Table { ids, .. } = self else {
+            return 0;
+        };
+        let mut sessions = match ids.lock() {
+            Ok(sessions) => sessions,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        let mut moved = 0;
+        for entry in sessions.iter_mut() {
+            let Some(selected) = entry
+                .selected
+                .take_if(|name| name.eq_ignore_ascii_case(old))
+            else {
+                continue;
+            };
+            let first = entry.renamed_from.take().unwrap_or(selected);
+            entry.renamed_from = (first != new).then_some(first);
+            entry.selected = Some(new.to_string());
+            moved += 1;
+        }
+        moved
+    }
+
+    /// Takes the pending rename note of the table session `id`: `(first old name, current
+    /// name)`, then none until the next rename.
+    pub(crate) fn take_rename_note(&self, id: &str) -> Option<(String, String)> {
+        let Self::Table { ids, .. } = self else {
+            return None;
+        };
+        let mut sessions = ids.lock().ok()?;
+        let entry = sessions.iter_mut().find(|entry| entry.id == id)?;
+        let first = entry.renamed_from.take()?;
+        Some((first, entry.selected.clone()?))
+    }
+
+    /// The name of the graph the table session `id` selected, if any.
     pub(crate) fn selected(&self, id: &str) -> Option<String> {
         match self {
             Self::Table { ids, .. } => ids.lock().ok().and_then(|sessions| {
@@ -258,6 +303,7 @@ impl Sessions {
                         id: session.clone(),
                         client: client.clone(),
                         selected: None,
+                        renamed_from: None,
                     });
                 }
                 if let Ok(mut clients) = clients.write() {
@@ -328,7 +374,8 @@ impl Sessions {
                         (std::mem::size_of::<TableEntry>()
                             + entry.id.capacity()
                             + entry.client.to_string().len()
-                            + entry.selected.as_ref().map_or(0, String::capacity))
+                            + entry.selected.as_ref().map_or(0, String::capacity)
+                            + entry.renamed_from.as_ref().map_or(0, String::capacity))
                             as u64
                     })
                     .sum();
@@ -571,5 +618,39 @@ mod tests {
         let signed = Sessions::signed(&SessionKey::random()).with_max(2);
         let id = signed.create(&json!({"name": "a"}));
         assert!(!signed.select(&id, "acme") && signed.selected(&id).is_none());
+    }
+
+    #[test]
+    fn a_rename_moves_the_selections_and_keeps_one_note_from_the_first_name() {
+        let sessions = Sessions::table();
+        let one = sessions.create(&json!({"name": "a"}));
+        let two = sessions.create(&json!({"name": "b"}));
+        let other = sessions.create(&json!({"name": "c"}));
+        assert!(sessions.select(&one, "prod") && sessions.select(&two, "Prod"));
+        assert!(sessions.select(&other, "acme"));
+        assert_eq!(sessions.take_rename_note(&one), None);
+        assert_eq!(sessions.rename("PROD", "live"), 2);
+        assert_eq!(sessions.rename("live", "main"), 2);
+        assert_eq!(sessions.selected(&one).as_deref(), Some("main"));
+        assert_eq!(sessions.selected(&other).as_deref(), Some("acme"));
+        assert_eq!(
+            sessions.take_rename_note(&one),
+            Some(("prod".into(), "main".into()))
+        );
+        assert_eq!(sessions.take_rename_note(&one), None);
+        assert_eq!(
+            sessions.take_rename_note(&two),
+            Some(("Prod".into(), "main".into()))
+        );
+        // Back to the first name: nothing to tell. A new selection drops the note.
+        assert_eq!(sessions.rename("main", "x"), 2);
+        assert_eq!(sessions.rename("x", "main"), 2);
+        assert_eq!(sessions.take_rename_note(&one), None);
+        assert_eq!(sessions.rename("main", "y"), 2);
+        assert!(sessions.select(&two, "acme"));
+        assert_eq!(sessions.take_rename_note(&two), None);
+        assert_eq!(sessions.rename("nothing", "z"), 0);
+        let signed = Sessions::signed(&SessionKey::random());
+        assert_eq!(signed.rename("prod", "live"), 0);
     }
 }
