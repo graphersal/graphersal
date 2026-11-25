@@ -50,6 +50,11 @@
 //! MCP profile made read-only, and `GET /api/info` answers `readOnly: true` for it. Who may do
 //! what stays the host's decision: the core never authenticates anyone.
 //!
+//! A host may confine every file path a client names (backup jobs, catalog loads, the
+//! directories of Store forks and backups) to one directory (EXPERIMENTAL;
+//! [`ContextBuilder::file_root`]); the jobs of a store it loads it checks with
+//! [`jobs_outside_file_root`]. Without a root a client may name any path the process can write.
+//!
 //! # Extension points
 //!
 //! What a host adds goes through these points; each has the core default a host gets without
@@ -93,6 +98,7 @@
 
 mod api;
 mod context;
+mod file_root;
 mod host_check;
 mod http;
 mod job_workers;
@@ -109,6 +115,8 @@ mod directory_tests;
 #[cfg(test)]
 mod extension_tests;
 #[cfg(test)]
+mod file_root_tests;
+#[cfg(test)]
 mod launch_tests;
 #[cfg(test)]
 mod mount_tests;
@@ -123,6 +131,7 @@ pub use context::{
     Runner, SCHEDULED_JOBS_REFUSAL, SESSION_STACK_BYTES, ServeError, spawn_session,
     start_job_ticker,
 };
+pub use file_root::{JobOutsideFileRoot, jobs_outside_file_root};
 pub use host_check::{Exposure, HostCheck, HostRules};
 pub use http::{HttpError, MAX_BODY_BYTES, Method, Request, Response};
 pub use launch::{Launched, ServedSource, launch};

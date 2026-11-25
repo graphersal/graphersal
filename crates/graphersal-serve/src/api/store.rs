@@ -88,7 +88,8 @@ pub(crate) fn route(
             let store = own_store(context)?;
             let body = request.json_body()?;
             let target = target_of(&body).map_err(http)?;
-            let new_dir = fork_dir(
+            let new_dir = fork_dir_in(
+                context.file_root(),
                 store_path(&store)?,
                 is_single_file(&store)?,
                 &body,
@@ -131,7 +132,8 @@ pub(crate) fn route(
             if id.is_empty() {
                 return Err(HttpError::bad_request("expected {\"id\": \"...\"}"));
             }
-            let new_dir = fork_dir(
+            let new_dir = fork_dir_in(
+                context.file_root(),
                 store_path(&store)?,
                 is_single_file(&store)?,
                 &body,
@@ -161,7 +163,12 @@ pub(crate) fn route(
                 .or_else(|| body.get("fromMemory"))
                 .and_then(Value::as_bool)
                 .unwrap_or(false);
-            let target = backup_dir(store_path(&store)?, is_single_file(&store)?, &body)?;
+            let target = backup_dir_in(
+                context.file_root(),
+                store_path(&store)?,
+                is_single_file(&store)?,
+                &body,
+            )?;
             let into = store_dir_at(target);
             value(session_call(context, move |s| {
                 s.store_backup(into, full, from_memory)
@@ -224,6 +231,25 @@ pub(crate) fn route(
         )),
         _ => Err(HttpError(404, format!("unknown endpoint /api/{endpoint}"))),
     }
+}
+
+/// A client's `dir`: without a file root an absolute path as given and a relative one next to
+/// the store (`parent`); with a root resolved under the root (relative to it, `..` and
+/// symbolic links resolved), `403` when it leaves the root.
+fn requested_dir(
+    root: Option<&Path>,
+    parent: &Path,
+    requested: &str,
+) -> Result<PathBuf, HttpError> {
+    if let Some(root) = root {
+        return crate::file_root::resolve_in_root(root, requested);
+    }
+    let path = Path::new(requested);
+    Ok(if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        parent.join(path)
+    })
 }
 
 fn http(err: StoreError) -> HttpError {
@@ -327,11 +353,24 @@ fn file_safe(text: &str) -> String {
         .collect()
 }
 
-/// The directory of a fork: the body's `dir` (a relative path is next to the store; it must
-/// not exist, its parent must; a `.gstore` name is a single file), or by default
-/// `<store>-fork-<label>` next to the store, with `-2`, `-3`, ... when that exists (a
-/// single-file store forks into `<name>-fork-<label>.gstore`).
+/// [`fork_dir_in`] without a file root (the unit tests).
+#[cfg(test)]
 fn fork_dir(
+    store_dir: &Path,
+    single_file: bool,
+    body: &Value,
+    label: &str,
+) -> Result<PathBuf, HttpError> {
+    fork_dir_in(None, store_dir, single_file, body, label)
+}
+
+/// The directory of a fork: the body's `dir` (a relative path is next to the store, or under
+/// the file root `root` when one is set ([`requested_dir`]); it must not exist, its parent
+/// must; a `.gstore` name is a single file), or by default `<store>-fork-<label>` next to the
+/// store, with `-2`, `-3`, ... when that exists (a single-file store forks into
+/// `<name>-fork-<label>.gstore`).
+fn fork_dir_in(
+    root: Option<&Path>,
     store_dir: &Path,
     single_file: bool,
     body: &Value,
@@ -340,12 +379,7 @@ fn fork_dir(
     let parent = store_dir.parent().unwrap_or(store_dir).to_path_buf();
     let requested = body_text(body, "dir");
     if !requested.is_empty() {
-        let path = Path::new(&requested);
-        let path = if path.is_absolute() {
-            path.to_path_buf()
-        } else {
-            parent.join(path)
-        };
+        let path = requested_dir(root, &parent, &requested)?;
         if path.exists() {
             return Err(HttpError(
                 409,
@@ -398,20 +432,21 @@ fn fork_dir(
     ))
 }
 
-/// The directory of a backup: the body's `dir` (a relative path is next to the store; when it
-/// exists it must be a backup of the store, which the backup checks; its parent must exist; a
-/// `.gstore` name is a single file), or by default `<store>-backup` next to the store
-/// (`<name>-backup.gstore` for a single-file store), which takes increments from then on.
-fn backup_dir(store_dir: &Path, single_file: bool, body: &Value) -> Result<PathBuf, HttpError> {
+/// The directory of a backup: the body's `dir` (a relative path is next to the store, or under
+/// the file root `root` when one is set ([`requested_dir`]); when it exists it must be a backup
+/// of the store, which the backup checks; its parent must exist; a `.gstore` name is a single
+/// file), or by default `<store>-backup` next to the store (`<name>-backup.gstore` for a
+/// single-file store), which takes increments from then on.
+fn backup_dir_in(
+    root: Option<&Path>,
+    store_dir: &Path,
+    single_file: bool,
+    body: &Value,
+) -> Result<PathBuf, HttpError> {
     let parent = store_dir.parent().unwrap_or(store_dir).to_path_buf();
     let requested = body_text(body, "dir");
     if !requested.is_empty() {
-        let path = Path::new(&requested);
-        let path = if path.is_absolute() {
-            path.to_path_buf()
-        } else {
-            parent.join(path)
-        };
+        let path = requested_dir(root, &parent, &requested)?;
         if path == store_dir {
             return Err(HttpError(
                 409,

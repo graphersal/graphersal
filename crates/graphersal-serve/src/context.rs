@@ -34,7 +34,7 @@ use std::cell::RefCell;
 use std::collections::VecDeque;
 use std::fmt;
 use std::panic::AssertUnwindSafe;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::sync::{Arc, Mutex};
@@ -595,6 +595,8 @@ pub struct Context {
     pub(crate) allow_list: Option<Arc<AllowList>>,
     /// The run administration ([`ContextBuilder::admin_runs`]); `None`: off.
     pub(crate) admin_runs: Option<AdminRuns>,
+    /// The file root ([`ContextBuilder::file_root`]); `None`: any path the process can write.
+    pub(crate) file_root: Option<PathBuf>,
 }
 
 /// The run administration of a context ([`ContextBuilder::admin_runs`]): its token, if any.
@@ -658,6 +660,7 @@ pub struct ContextBuilder {
     mount_path: Option<String>,
     allow_list: Option<AllowList>,
     admin_runs: Option<AdminRuns>,
+    file_root: Option<PathBuf>,
 }
 
 impl ContextBuilder {
@@ -917,6 +920,30 @@ impl ContextBuilder {
         self
     }
 
+    /// The **file root**: the directory every file path a client of this context names must
+    /// lie in, so a client with write access cannot write files anywhere the process can.
+    /// `None` (the default, the CLI dev server): any path, as before. With a root:
+    ///
+    /// - `POST /api/jobs/define` runs under `AccessPolicy::allow_all().with_file_root(root)`
+    ///   (`graphersal::auth`): a backup job's relative path is resolved under the root, a path
+    ///   leaving it (absolute elsewhere, `..`, a symbolic link pointing out) is refused in the
+    ///   answer's field errors, and the job stores the resolved path;
+    /// - `POST /api/catalog/load` refuses (`403`, nothing loaded) a catalog with a job that
+    ///   writes outside the root, by [`crate::jobs_outside_file_root`];
+    /// - the body's `dir` of `POST /api/store/fork`, `store/attic/fork` and `store/backup` is
+    ///   resolved under the root the same way (a relative `dir` is relative to the root, not to
+    ///   the store's parent); outside it the answer is `403` "paths must lie inside the server's
+    ///   file root". Without a `dir` the default directory next to the store is kept, wherever
+    ///   the store lies.
+    ///
+    /// The root must exist when a path is checked (else `500` for a `dir`, a refusal for a
+    /// job). Jobs already stored in a store the host loads are not checked here: the host
+    /// checks them with [`crate::jobs_outside_file_root`].
+    pub fn file_root(mut self, root: Option<PathBuf>) -> Self {
+        self.file_root = root;
+        self
+    }
+
     /// The context.
     pub fn build(self) -> Arc<Context> {
         let read_only = Arc::new(AtomicBool::new(self.read_only));
@@ -958,6 +985,7 @@ impl ContextBuilder {
             hooks: self.hooks.unwrap_or_else(|| Arc::new(NoHooks)),
             allow_list: self.allow_list.map(Arc::new),
             admin_runs: self.admin_runs,
+            file_root: self.file_root,
         })
     }
 }
@@ -994,7 +1022,13 @@ impl Context {
             mount_path: None,
             allow_list: None,
             admin_runs: None,
+            file_root: None,
         }
+    }
+
+    /// The file root ([`ContextBuilder::file_root`]), or `None`: any path.
+    pub fn file_root(&self) -> Option<&Path> {
+        self.file_root.as_deref()
     }
 
     /// Whether the run administration is on ([`ContextBuilder::admin_runs`]).
