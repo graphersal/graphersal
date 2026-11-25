@@ -69,14 +69,22 @@
           "Server"
         ],
         "summary": "Server info",
-        "description": "What the page needs to switch to this server: `protocol` (`graphersal/1` in every answer of every Graphersal host: the playground recognizes a host by it, never by `server`; a breaking change of this API bumps the number), `server` (the host's name: `graphersal-dev` for the CLI's dev server, `ContextBuilder::server_name`), `dev` (`true` for a development server such as the CLI's: the playground shows its DEV badge; `ContextBuilder::dev`), `version`, `saveable`, `source`, `presets` (the limits in force), `mcp` (`{endpoint, readOnly, client}` or null), `ai` (`{provider, model, readOnly, sendsDataTo, maxToolCallsPerTurn}` or null; never the key), `damageFound`, `embedders`, `readOnly` (`--read-only`, a Store the process may not write, or the host's runtime read-only toggle on (`ContextBuilder::runtime_read_only`, EXPERIMENTAL; then modifying requests answer the one refusal `the graph is served read-only: writes are refused`, the writes that are no commit with 409): every write is refused), `uiProfile` (only when the host set one: `--ui-profile`, `ContextBuilder::ui_profile`; a built-in profile name or a profile object, EXPERIMENTAL), `adminRuns` (only when the host turned the run administration on: `{tokenRequired}`, EXPERIMENTAL; `--admin-runs`, `ContextBuilder::admin_runs`: `GET /api/admin/runs`, `POST /api/admin/runs/cancel`), `apiMode` (only in allow-list mode: `\"allow-list\"`, EXPERIMENTAL; `ContextBuilder::api_allow_list`: the server then answers only `GET /api/info`, `GET /api/changes` and `POST /api/query` for its selected saved queries, every other `/api/` endpoint and `/mcp` answer 403), `mountPath` (only when the host serves this graph under a URL prefix, `ContextBuilder::mount_path`, EXPERIMENTAL: the prefix such as `/db/acme`, no trailing `/`; then `openapi` is `<mountPath>/openapi.json` and `mcp.endpoint` `<mountPath>/mcp`; the host strips the prefix before the server routes, so every path of this description is relative to it). Answered without the session.",
+        "description": "What the page needs to switch to this server: `protocol` (`graphersal/1` in every answer of every Graphersal host: the playground recognizes a host by it, never by `server`; a breaking change of this API bumps the number), `server` (the host's name: `graphersal-dev` for the CLI's dev server, `ContextBuilder::server_name`), `dev` (`true` for a development server such as the CLI's: the playground shows its DEV badge; `ContextBuilder::dev`), `version`, `saveable`, `source`, `presets` (the limits in force), `mcp` (`{endpoint, readOnly, client}` or null), `ai` (`{provider, model, readOnly, sendsDataTo, maxToolCallsPerTurn}` or null; never the key), `damageFound`, `embedders`, `readOnly` (`--read-only`, a Store the process may not write, or the host's runtime read-only toggle on (`ContextBuilder::runtime_read_only`, EXPERIMENTAL; then modifying requests answer the one refusal `the graph is served read-only: writes are refused`, the writes that are no commit with 409): every write is refused), `uiProfile` (only when the host set one: `--ui-profile`, `ContextBuilder::ui_profile`; a built-in profile name or a profile object, EXPERIMENTAL), `adminRuns` (only when the host turned the run administration on: `{tokenRequired}`, EXPERIMENTAL; `--admin-runs`, `ContextBuilder::admin_runs`: `GET /api/admin/runs`, `POST /api/admin/runs/cancel`), `apiMode` (only in allow-list mode: `\"allow-list\"`, EXPERIMENTAL; `ContextBuilder::api_allow_list`: the server then answers only `GET /api/info`, `GET /api/changes` and `POST /api/query` for its selected saved queries, every other `/api/` endpoint and `/mcp` answer 403), `mountPath` (only when the host serves this graph under a URL prefix, `ContextBuilder::mount_path`, EXPERIMENTAL: the prefix such as `/db/acme`, no trailing `/`; then `openapi` is `<mountPath>/openapi.json` and `mcp.endpoint` `<mountPath>/mcp`; the host strips the prefix before the server routes, so every path of this description is relative to it). Answered without the session. On a request the host marked read-only (`Request::mark_read_only`, EXPERIMENTAL) `readOnly` (and the `mcp` status's `readOnly`) is `true` for that request, while the graph stays writable for other requests.",
         "operationId": "getApiInfo",
         "responses": {
           "200": {
             "description": "JSON answer.",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "readOnly": {
+                      "type": "boolean",
+                      "description": "Writes are refused for this request: the server is read-only (`--read-only`, a Store the process may not write, the host's runtime read-only toggle on) or the host marked the request read-only (`Request::mark_read_only`)."
+                    }
+                  }
+                }
               }
             }
           }
@@ -89,14 +97,22 @@
           "Server"
         ],
         "summary": "Change feed",
-        "description": "`{version, commitSeq, recent: [{version, by, commitSeq, detail?}], view, mcp, damageFound, readOnly}` (`readOnly`: read-only now; it changes at run time with the host's runtime read-only toggle); `by` is the client of the commit (`X-Graphersal-Client` of a page, `mcp`, or `ai` with the conversation id in `detail`). Polled by the page to reload on changes it did not make.",
+        "description": "`{version, commitSeq, recent: [{version, by, commitSeq, detail?}], view, mcp, damageFound, readOnly}` (`readOnly`: read-only now; it changes at run time with the host's runtime read-only toggle); `by` is the client of the commit (`X-Graphersal-Client` of a page, `mcp`, or `ai` with the conversation id in `detail`). Polled by the page to reload on changes it did not make. On a request the host marked read-only (`Request::mark_read_only`, EXPERIMENTAL) `readOnly` (and the `mcp` status's `readOnly`) is `true` for that request, while the graph stays writable for other requests.",
         "operationId": "getApiChanges",
         "responses": {
           "200": {
             "description": "JSON answer.",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "readOnly": {
+                      "type": "boolean",
+                      "description": "Writes are refused for this request: the server is read-only (`--read-only`, a Store the process may not write, the host's runtime read-only toggle on) or the host marked the request read-only (`Request::mark_read_only`)."
+                    }
+                  }
+                }
               }
             }
           }
@@ -389,6 +405,9 @@
                 }
               }
             }
+          },
+          "409": {
+            "$ref": "#/components/responses/E409ReadOnlyRequest"
           }
         }
       }
@@ -419,7 +438,7 @@
           "Queries"
         ],
         "summary": "Run a script",
-        "description": "Runs a script (Gremlin in Rhai, `g.gql(..)` for GQL) as ONE unit (it commits when the answer is `ok`, and is rolled back otherwise). The answer is the playground's ExecuteResponse: `{ok, terminal, results | table | subgraph | text, execution: {error?, profile?}, mutated, changes, change_summary, ...}`; a failing script is reported in `execution.error` with status 200.",
+        "description": "Runs a script (Gremlin in Rhai, `g.gql(..)` for GQL) as ONE unit (it commits when the answer is `ok`, and is rolled back otherwise). The answer is the playground's ExecuteResponse: `{ok, terminal, results | table | subgraph | text, execution: {error?, profile?}, mutated, changes, change_summary, ...}`; a failing script is reported in `execution.error` with status 200. On a request the host marked read-only (`Request::mark_read_only`, EXPERIMENTAL) it runs under the reading authorizer: a script that would write fails with a permission error and changes nothing. The failure is reported in `execution.error` with status 200.",
         "operationId": "postApiExecute",
         "requestBody": {
           "required": true,
@@ -470,7 +489,7 @@
           "Queries"
         ],
         "summary": "Run a saved query",
-        "description": "One run of the saved query `name` with the named arguments `params` (an object; absent or null: none), as ONE unit like `POST /api/execute` but without the display: `{ok: true, results, mutated, changes}` (`results`: every result as JSON, never cut; `changes`: `{data, schema, definitions}`) or `{ok: false, error: {message, help?, ...}, mutated, changes}` with status 200 (an unknown query, a parameter its schema refuses, a write the authorizer denies). The server binds no parameter: the caller passes every one. The playground profile API's `query(name, params)` calls it. A full server runs any saved query under the playground's authorizer; a server in allow-list mode (`GET /api/info` `apiMode: \"allow-list\"`, EXPERIMENTAL) runs only the saved queries its host selected, under the host's access policy, and answers 403 `the saved query \"<name>\" is not offered by this server` for any other name (an unknown one included).",
+        "description": "One run of the saved query `name` with the named arguments `params` (an object; absent or null: none), as ONE unit like `POST /api/execute` but without the display: `{ok: true, results, mutated, changes}` (`results`: every result as JSON, never cut; `changes`: `{data, schema, definitions}`) or `{ok: false, error: {message, help?, ...}, mutated, changes}` with status 200 (an unknown query, a parameter its schema refuses, a write the authorizer denies). The server binds no parameter: the caller passes every one. The playground profile API's `query(name, params)` calls it. A full server runs any saved query under the playground's authorizer; a server in allow-list mode (`GET /api/info` `apiMode: \"allow-list\"`, EXPERIMENTAL) runs only the saved queries its host selected, under the host's access policy, and answers 403 `the saved query \"<name>\" is not offered by this server` for any other name (an unknown one included). On a request the host marked read-only (`Request::mark_read_only`, EXPERIMENTAL) it runs under the reading authorizer: a saved query that would write fails with a permission error and changes nothing. The failure is `{ok: false, error}` with status 200.",
         "operationId": "postApiQuery",
         "requestBody": {
           "required": true,
@@ -1019,6 +1038,9 @@
           "400": {
             "$ref": "#/components/responses/E400"
           },
+          "409": {
+            "$ref": "#/components/responses/E409ReadOnlyRequest"
+          },
           "422": {
             "$ref": "#/components/responses/E422"
           }
@@ -1053,6 +1075,9 @@
           },
           "400": {
             "$ref": "#/components/responses/E400"
+          },
+          "409": {
+            "$ref": "#/components/responses/E409ReadOnlyRequest"
           },
           "422": {
             "$ref": "#/components/responses/E422"
@@ -1762,6 +1787,9 @@
           },
           "400": {
             "$ref": "#/components/responses/E400"
+          },
+          "409": {
+            "$ref": "#/components/responses/E409ReadOnlyRequest"
           }
         }
       }
@@ -1877,6 +1905,9 @@
           },
           "400": {
             "$ref": "#/components/responses/E400"
+          },
+          "409": {
+            "$ref": "#/components/responses/E409ReadOnlyRequest"
           }
         }
       }
@@ -1925,6 +1956,9 @@
           },
           "400": {
             "$ref": "#/components/responses/E400"
+          },
+          "409": {
+            "$ref": "#/components/responses/E409ReadOnlyRequest"
           }
         }
       }
@@ -2097,6 +2131,9 @@
           },
           "400": {
             "$ref": "#/components/responses/E400"
+          },
+          "409": {
+            "$ref": "#/components/responses/E409ReadOnlyRequest"
           }
         }
       }
@@ -2138,6 +2175,9 @@
           },
           "400": {
             "$ref": "#/components/responses/E400"
+          },
+          "409": {
+            "$ref": "#/components/responses/E409ReadOnlyRequest"
           },
           "422": {
             "$ref": "#/components/responses/E422"
@@ -2185,6 +2225,9 @@
           },
           "400": {
             "$ref": "#/components/responses/E400"
+          },
+          "409": {
+            "$ref": "#/components/responses/E409ReadOnlyRequest"
           },
           "422": {
             "$ref": "#/components/responses/E422"
@@ -2309,7 +2352,7 @@
           "Catalog"
         ],
         "summary": "Load a catalog file",
-        "description": "Stores a catalog file in one commit: `{loaded, graph}`.",
+        "description": "Stores a catalog file in one commit: `{loaded, graph}`. With a file root (`ContextBuilder::file_root`, EXPERIMENTAL) a catalog with a job that writes outside the root is refused with 403 and nothing is loaded.",
         "operationId": "postApiCatalogLoad",
         "parameters": [
           {
@@ -2342,6 +2385,19 @@
           },
           "400": {
             "$ref": "#/components/responses/E400"
+          },
+          "403": {
+            "description": "With a file root (`ContextBuilder::file_root`, EXPERIMENTAL): the catalog holds a job that writes outside the root (a stored job path must be absolute and inside the root); nothing is loaded: `nothing was loaded: job '<name>' writes '<path>' (<reason>); stored job paths must be absolute, and paths must lie inside the server's file root`.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "$ref": "#/components/responses/E409ReadOnlyRequest"
           },
           "422": {
             "$ref": "#/components/responses/E422"
@@ -2429,6 +2485,9 @@
           },
           "400": {
             "$ref": "#/components/responses/E400"
+          },
+          "409": {
+            "$ref": "#/components/responses/E409ReadOnlyRequest"
           }
         }
       }
@@ -2529,6 +2588,9 @@
           "400": {
             "$ref": "#/components/responses/E400"
           },
+          "409": {
+            "$ref": "#/components/responses/E409ReadOnlyRequest"
+          },
           "422": {
             "$ref": "#/components/responses/E422"
           }
@@ -2573,6 +2635,9 @@
           "400": {
             "$ref": "#/components/responses/E400"
           },
+          "409": {
+            "$ref": "#/components/responses/E409ReadOnlyRequest"
+          },
           "422": {
             "$ref": "#/components/responses/E422"
           }
@@ -2616,6 +2681,9 @@
           },
           "400": {
             "$ref": "#/components/responses/E400"
+          },
+          "409": {
+            "$ref": "#/components/responses/E409ReadOnlyRequest"
           },
           "422": {
             "$ref": "#/components/responses/E422"
@@ -2696,6 +2764,9 @@
           },
           "400": {
             "$ref": "#/components/responses/E400"
+          },
+          "409": {
+            "$ref": "#/components/responses/E409ReadOnlyRequest"
           }
         }
       }
@@ -2738,6 +2809,9 @@
           "400": {
             "$ref": "#/components/responses/E400"
           },
+          "409": {
+            "$ref": "#/components/responses/E409ReadOnlyRequest"
+          },
           "422": {
             "$ref": "#/components/responses/E422"
           }
@@ -2770,7 +2844,7 @@
           "Jobs"
         ],
         "summary": "Define a job",
-        "description": "Defines or replaces a job of a user: `{ok: true, job}` or `{ok: false, errors}` (always 200).",
+        "description": "Defines or replaces a job of a user: `{ok: true, job}` or `{ok: false, errors}` (always 200). With a file root (`ContextBuilder::file_root`, EXPERIMENTAL) a backup job's `path` is resolved under the root (a relative path is relative to the root; `..` and symbolic links are resolved) and the job stores the resolved path; a path that leaves the root is refused in `{ok: false, errors}` (still 200).",
         "operationId": "postApiJobsDefine",
         "requestBody": {
           "required": true,
@@ -2838,6 +2912,9 @@
           },
           "400": {
             "$ref": "#/components/responses/E400"
+          },
+          "409": {
+            "$ref": "#/components/responses/E409ReadOnlyRequest"
           }
         }
       }
@@ -2879,6 +2956,9 @@
           },
           "400": {
             "$ref": "#/components/responses/E400"
+          },
+          "409": {
+            "$ref": "#/components/responses/E409ReadOnlyRequest"
           },
           "422": {
             "$ref": "#/components/responses/E422"
@@ -2927,6 +3007,9 @@
           },
           "400": {
             "$ref": "#/components/responses/E400"
+          },
+          "409": {
+            "$ref": "#/components/responses/E409ReadOnlyRequest"
           },
           "422": {
             "$ref": "#/components/responses/E422"
@@ -2978,6 +3061,9 @@
           "400": {
             "$ref": "#/components/responses/E400"
           },
+          "409": {
+            "$ref": "#/components/responses/E409ReadOnlyRequest"
+          },
           "422": {
             "$ref": "#/components/responses/E422"
           }
@@ -3021,6 +3107,9 @@
           },
           "400": {
             "$ref": "#/components/responses/E400"
+          },
+          "409": {
+            "$ref": "#/components/responses/E409ReadOnlyRequest"
           },
           "422": {
             "$ref": "#/components/responses/E422"
@@ -3222,6 +3311,9 @@
           },
           "400": {
             "$ref": "#/components/responses/E400"
+          },
+          "409": {
+            "$ref": "#/components/responses/E409ReadOnlyRequest"
           }
         }
       }
@@ -3266,6 +3358,9 @@
           },
           "400": {
             "$ref": "#/components/responses/E400"
+          },
+          "409": {
+            "$ref": "#/components/responses/E409ReadOnlyRequest"
           }
         }
       }
@@ -3307,6 +3402,9 @@
           },
           "400": {
             "$ref": "#/components/responses/E400"
+          },
+          "409": {
+            "$ref": "#/components/responses/E409ReadOnlyRequest"
           }
         }
       }
@@ -3374,7 +3472,7 @@
             }
           },
           "409": {
-            "$ref": "#/components/responses/E409"
+            "$ref": "#/components/responses/E409Write"
           },
           "422": {
             "$ref": "#/components/responses/E422"
@@ -3478,7 +3576,7 @@
             }
           },
           "409": {
-            "$ref": "#/components/responses/E409"
+            "$ref": "#/components/responses/E409Write"
           },
           "422": {
             "$ref": "#/components/responses/E422"
@@ -3525,7 +3623,7 @@
             "$ref": "#/components/responses/E400"
           },
           "409": {
-            "$ref": "#/components/responses/E409"
+            "$ref": "#/components/responses/E409Write"
           },
           "422": {
             "$ref": "#/components/responses/E422"
@@ -3632,7 +3730,7 @@
             "$ref": "#/components/responses/E400"
           },
           "409": {
-            "$ref": "#/components/responses/E409"
+            "$ref": "#/components/responses/E409Write"
           },
           "422": {
             "$ref": "#/components/responses/E422"
@@ -3658,7 +3756,7 @@
             }
           },
           "409": {
-            "$ref": "#/components/responses/E409"
+            "$ref": "#/components/responses/E409Write"
           }
         }
       }
@@ -3669,7 +3767,7 @@
           "Store"
         ],
         "summary": "Fork",
-        "description": "Copies the state at `target` into a new store `dir`: `{fork}` (409: the directory exists).",
+        "description": "Copies the state at `target` into a new store `dir`: `{fork}` (409: the directory exists). With a file root (`ContextBuilder::file_root`, EXPERIMENTAL) `dir` must resolve inside it (a relative `dir` is relative to the root, not to the store's directory): 403 otherwise.",
         "operationId": "postApiStoreFork",
         "requestBody": {
           "required": true,
@@ -3702,11 +3800,17 @@
           "400": {
             "$ref": "#/components/responses/E400"
           },
+          "403": {
+            "$ref": "#/components/responses/E403FileRoot"
+          },
           "409": {
-            "$ref": "#/components/responses/E409"
+            "$ref": "#/components/responses/E409Write"
           },
           "422": {
             "$ref": "#/components/responses/E422"
+          },
+          "500": {
+            "$ref": "#/components/responses/E500FileRoot"
           }
         }
       }
@@ -3751,7 +3855,7 @@
             "$ref": "#/components/responses/E400"
           },
           "409": {
-            "$ref": "#/components/responses/E409"
+            "$ref": "#/components/responses/E409Write"
           },
           "422": {
             "$ref": "#/components/responses/E422"
@@ -3856,7 +3960,7 @@
             "$ref": "#/components/responses/E400"
           },
           "409": {
-            "$ref": "#/components/responses/E409"
+            "$ref": "#/components/responses/E409Write"
           },
           "422": {
             "$ref": "#/components/responses/E422"
@@ -3870,7 +3974,7 @@
           "Store"
         ],
         "summary": "Fork an attic entry",
-        "description": "Copies an attic entry into a new store `dir`.",
+        "description": "Copies an attic entry into a new store `dir`. With a file root (`ContextBuilder::file_root`, EXPERIMENTAL) `dir` must resolve inside it (a relative `dir` is relative to the root, not to the store's directory): 403 otherwise.",
         "operationId": "postApiStoreAtticFork",
         "requestBody": {
           "required": true,
@@ -3906,11 +4010,17 @@
           "400": {
             "$ref": "#/components/responses/E400"
           },
+          "403": {
+            "$ref": "#/components/responses/E403FileRoot"
+          },
           "409": {
-            "$ref": "#/components/responses/E409"
+            "$ref": "#/components/responses/E409Write"
           },
           "422": {
             "$ref": "#/components/responses/E422"
+          },
+          "500": {
+            "$ref": "#/components/responses/E500FileRoot"
           }
         }
       }
@@ -3954,7 +4064,7 @@
             "$ref": "#/components/responses/E400"
           },
           "409": {
-            "$ref": "#/components/responses/E409"
+            "$ref": "#/components/responses/E409Write"
           },
           "422": {
             "$ref": "#/components/responses/E422"
@@ -3991,7 +4101,7 @@
           "Store"
         ],
         "summary": "Back up",
-        "description": "A verified backup into `dir` (default `<store>-backup`; an existing backup takes an increment).",
+        "description": "A verified backup into `dir` (default `<store>-backup`; an existing backup takes an increment). With a file root (`ContextBuilder::file_root`, EXPERIMENTAL) `dir` must resolve inside it (a relative `dir` is relative to the root, not to the store's directory): 403 otherwise.",
         "operationId": "postApiStoreBackup",
         "requestBody": {
           "required": true,
@@ -4023,11 +4133,17 @@
               }
             }
           },
+          "403": {
+            "$ref": "#/components/responses/E403FileRoot"
+          },
           "409": {
-            "$ref": "#/components/responses/E409"
+            "$ref": "#/components/responses/E409Write"
           },
           "422": {
             "$ref": "#/components/responses/E422"
+          },
+          "500": {
+            "$ref": "#/components/responses/E500FileRoot"
           }
         }
       }
@@ -4088,7 +4204,7 @@
             }
           },
           "409": {
-            "$ref": "#/components/responses/E409"
+            "$ref": "#/components/responses/E409Write"
           },
           "422": {
             "$ref": "#/components/responses/E422"
@@ -4609,6 +4725,46 @@
       },
       "E422": {
         "description": "Refused by the engine (the diagnostic in `error`).",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Error"
+            }
+          }
+        }
+      },
+      "E409ReadOnlyRequest": {
+        "description": "A request the host marked read-only (`Request::mark_read_only`, EXPERIMENTAL): every route that writes is refused before anything runs, with `the graph is served read-only: writes are refused. This request has read access only: ask for write access to change the data.` (`READ_ONLY_HEADLINE`, `READ_ONLY_REQUEST_HELP`).",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Error"
+            }
+          }
+        }
+      },
+      "E409Write": {
+        "description": "Not possible in the server's state (no store, a read-only view, a conflict), or a request the host marked read-only (`Request::mark_read_only`, EXPERIMENTAL), refused before anything runs with `the graph is served read-only: writes are refused. This request has read access only: ask for write access to change the data.` (`READ_ONLY_HEADLINE`, `READ_ONLY_REQUEST_HELP`).",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Error"
+            }
+          }
+        }
+      },
+      "E403FileRoot": {
+        "description": "With a file root (`ContextBuilder::file_root`, EXPERIMENTAL): a `dir` that resolves outside it (a relative `dir` is resolved under the root; `..` and symbolic links are resolved): `'<dir>' is outside the server's file root: paths must lie inside the server's file root (a relative path is resolved under it)`. Without a `dir` the default directory next to the store is used, unchecked.",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Error"
+            }
+          }
+        }
+      },
+      "E500FileRoot": {
+        "description": "With a file root (`ContextBuilder::file_root`, EXPERIMENTAL) that is not an existing directory (the host's configuration): `the server's file root is not an existing directory: ask the host's operator`.",
         "content": {
           "application/json": {
             "schema": {
