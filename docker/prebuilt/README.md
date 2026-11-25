@@ -4,7 +4,7 @@ One command builds a Docker image that serves one Graphersal Store **read-only**
 at `/mcp` and the playground at `/`. The image holds everything it needs:
 
 - the prebuilt static Linux `graphersal` binary (nothing is compiled),
-- a compact copy of your Store as one file (`graph.gstore`),
+- your prepared Store file, unchanged (`graph.gstore`),
 - the MCP configuration and its Markdown instructions for agents.
 
 It needs no volume and writes nothing, so it runs with a read-only root file system. It
@@ -21,7 +21,7 @@ access to GitHub: the binary can come from the repository itself.
 | File | What it does |
 |---|---|
 | `build.py` | Finds the binary, store and config, writes the build context `.context/`, runs `docker buildx build` or `podman build`. |
-| `Dockerfile` | Forks and checks the store with the image's own binary, then builds the image. |
+| `Dockerfile` | Copies the binary, the configuration and the store into the image. Nothing runs during the build. |
 | `.gitignore` | Ignores `.context/`. |
 
 ## Requirements
@@ -29,8 +29,8 @@ access to GitHub: the binary can come from the repository itself.
 - Python 3.9 or newer. Only the standard library is used.
 - Docker with buildx (Docker Desktop, or Docker Engine with the buildx plugin), **or** Podman
   (on macOS and Windows with a running `podman machine`).
-- A Store holding your graph: a `*.gstore` file or a store directory. Its embedding models are
-  carried into the image.
+- A prepared single-file Store (`*.gstore`) holding your graph. It goes into the image exactly
+  as given, so prepare it first (see [Preparing the store](#preparing-the-store)).
 
 ## Quick start
 
@@ -112,23 +112,33 @@ Instructions are a Markdown file. There are two ways to give it:
   built-in instructions; `--instructions-mode replace` uses it instead of them. A config that
   already sets `"instructions"` cannot be combined with `--instructions`.
 
-The configuration is loaded against the store during the build. A typo in a tool or folder name
-fails the build, not the container start. After a local build, `build.py` prints what the MCP
-prompt costs an agent (instructions + tool list, in tokens).
+The configuration is not checked during the build: a typo in a tool or folder name fails the
+container start. Check it beforehand with `graphersal mcp-cost` (see
+[Preparing the store](#preparing-the-store)); it also prints what the MCP prompt costs an agent.
 
 ## What the build does
 
 1. `build.py` writes the build context `.context/` next to itself: the binaries, the store and
    the config. Large files are hard links where possible, so nothing is copied.
-2. The Dockerfile runs `graphersal store fork` with the image's own binary. This writes the
-   latest state of the store as one compact file, without history, WAL or free space, and with
-   the embedding models. A 2.2 GiB working store became 565 MiB. Then it runs `store verify` and
-   loads the MCP configuration (`mcp-cost`). These steps run without network.
+2. The Dockerfile copies them into the image. No binary runs during the build, so building for
+   another architecture needs no emulation.
 3. The image gets three layers: binary, configuration, store. A new version of the knowledge base
    rebuilds and ships only the store layer. If nothing changed, the build takes seconds.
 
-The store is only read. Do not build from a store a running server is writing. Stop the server,
-or fork the store first: `graphersal store fork live.gstore snapshot.gstore`.
+## Preparing the store
+
+The store goes into the image exactly as given: with its history, WAL and free space, if it has
+any. Prepare it once, with your own `graphersal` binary, before you build:
+
+```bash
+graphersal store fork live.gstore kb.gstore     # latest state only, one compact file, models carried
+graphersal store verify kb.gstore               # every checksum
+graphersal mcp-cost --graph kb.gstore --read-only --mcp-config mcp-config.json   # the config loads
+```
+
+A 2.2 GiB working store became 565 MiB this way. `store fork` also gives you a consistent copy of
+a store a running server is writing; never build from that store itself. A store directory must
+be forked into one file first.
 
 ## Docker or Podman
 
@@ -160,9 +170,6 @@ With Podman:
 - **Downloads.** With `--version` and `--push`, both platforms are downloaded.
 - **Keeping two platforms locally** needs Docker Desktop's containerd image store (never with
   Podman). Otherwise use `--push` or build one platform.
-- **Building a platform you have no binary for.** The store is prepared by the binary of your
-  engine's own platform. If you only have the other one (an amd64 binary on an Apple Silicon
-  Mac), it runs under emulation. That works, but is slower.
 - **Extra `docker buildx build` (or `podman build`) options** go after `--`:
   `build.py --push -t ... -- --cache-to type=gha --provenance=true`.
 - **A dry run.** `--dry-run` writes `.context/` and prints the build commands without running
@@ -238,14 +245,12 @@ from a context laid out like `.context/`:
 
 ```text
 bin/linux-amd64/graphersal      one binary per platform built
-store/graph.gstore              the source store (file or directory)
+store/graph.gstore              the prepared single-file store, shipped unchanged
 kb/mcp-config.json              the configuration ({} for the defaults)
 kb/instructions.md              the instructions file the configuration names, if any
 ```
 
 ```bash
-docker buildx build --platform linux/amd64 --build-arg PREP_ARCH=amd64 \
+docker buildx build --platform linux/amd64 \
   -f docker/prebuilt/Dockerfile -t my-kb:1 --load <context>
 ```
-
-`PREP_ARCH` names the binary that prepares the store; it must be in `bin/`.

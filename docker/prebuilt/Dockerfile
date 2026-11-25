@@ -1,14 +1,16 @@
 # syntax=docker/dockerfile:1.7
 #
-# A self-contained knowledge base image: a prebuilt static `graphersal` binary, a compact copy of
-# one Store and the MCP configuration baked in, served READ-ONLY with a read-only MCP endpoint.
-# Nothing is compiled. build.py writes the build context (.context/) and runs the build:
+# A self-contained knowledge base image: a prebuilt static `graphersal` binary, one prepared Store
+# file and the MCP configuration baked in, served READ-ONLY with a read-only MCP endpoint.
+# Nothing is compiled and nothing runs during the build: the store is shipped exactly as given
+# (fork, compact and verify it before, e.g. `graphersal store fork` + `store verify`).
+# build.py writes the build context (.context/) and runs the build:
 #
 #   python docker/prebuilt/build.py --store my.gstore -t my-kb:1
 #
 # Build context (what build.py writes; lay it out by hand to build with plain `docker build`):
-#   bin/linux-<amd64|arm64>/graphersal   the binary of every platform built (and of PREP_ARCH)
-#   store/graph.gstore                   the source Store (a file or a directory), only read
+#   bin/linux-<amd64|arm64>/graphersal   the binary of every platform built
+#   store/graph.gstore                   the prepared single-file Store, shipped unchanged
 #   kb/mcp-config.json                   the MCP configuration
 #   kb/<instructions>.md                 the instructions file the configuration names (optional)
 #
@@ -16,28 +18,6 @@
 # private network or behind a reverse proxy (its public names go into GRAPHERSAL_ALLOWED_HOSTS).
 
 ARG BASE=gcr.io/distroless/static-debian12:nonroot
-# The architecture that prepares the store: the building engine's own (build.py picks it), so the
-# store is written once, natively, and shared by every platform of the image.
-ARG PREP_ARCH=amd64
-
-# --- prep: the image's own binary forks the store (latest state only: no WAL history, attic or
-# free space; embedding models carried) and checks it, then loads the MCP configuration against
-# it, so a broken store or a typo in the configuration fails the build, not the container start.
-# Exec-form RUN: the base image has no shell. The source store is COPYed, not bind-mounted: a
-# bind mount is unreadable under Podman with SELinux, and its fix (relabel) is not Docker syntax.
-# This stage is never shipped.
-FROM --platform=linux/${PREP_ARCH} ${BASE} AS prep
-ARG PREP_ARCH
-USER 0:0
-COPY --chmod=0555 bin/linux-${PREP_ARCH}/graphersal /usr/local/bin/graphersal
-COPY kb/ /kb/
-COPY store/ /in/
-RUN --network=none ["/usr/local/bin/graphersal", "store", "fork", "/in/graph.gstore", "/kb/graph.gstore"]
-RUN --network=none ["/usr/local/bin/graphersal", "store", "verify", "/kb/graph.gstore"]
-RUN --network=none ["/usr/local/bin/graphersal", "store", "info", "/kb/graph.gstore"]
-RUN --network=none ["/usr/local/bin/graphersal", "mcp-cost", "--graph", "/kb/graph.gstore", "--read-only", "--mcp-config", "/kb/mcp-config.json"]
-
-# --- the image
 FROM ${BASE}
 ARG TARGETARCH
 ARG GRAPHERSAL_VERSION=unknown
@@ -56,7 +36,7 @@ LABEL org.opencontainers.image.title="graphersal knowledge base" \
 WORKDIR /kb
 COPY --chmod=0555 bin/linux-${TARGETARCH}/graphersal /usr/local/bin/graphersal
 COPY --chmod=0444 kb/ /kb/
-COPY --from=prep --chmod=0444 /kb/graph.gstore /kb/graph.gstore
+COPY --chmod=0444 store/graph.gstore /kb/graph.gstore
 
 USER 65532:65532
 EXPOSE 8080

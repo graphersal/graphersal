@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """Builds a self-contained Graphersal knowledge base image: one command, nothing compiled.
 
-The image holds a prebuilt static Linux `graphersal` binary, a compact copy of one Store and the
-MCP configuration (with its Markdown instructions), and serves them READ-ONLY over HTTP: the
-playground at `/`, MCP at `/mcp`. It needs no volume and writes nothing. See README.md.
+The image holds a prebuilt static Linux `graphersal` binary, one prepared Store file (shipped
+exactly as given: fork, compact and verify it beforehand) and the MCP configuration (with its
+Markdown instructions), and serves them READ-ONLY over HTTP: the playground at `/`, MCP at
+`/mcp`. It needs no volume and writes nothing. See README.md.
 
     python build.py                                  # everything from this folder (see README)
     python build.py --store kb.gstore --binary graphersal-v0.7.1-linux-x86_64.tar.gz -t my-kb:1
@@ -357,13 +358,10 @@ def link_or_copy(src: str, dst: str) -> None:
 
 
 def place(src: Path, dst: Path) -> None:
-    """Puts a file or a directory into the build context: hard links where possible (no copy of a
-    large store), copies otherwise."""
+    """Puts a file into the build context: a hard link where possible (no copy of a large store),
+    a copy otherwise."""
     dst.parent.mkdir(parents=True, exist_ok=True)
-    if src.is_dir():
-        shutil.copytree(src, dst, copy_function=link_or_copy)
-    else:
-        link_or_copy(str(src), str(dst))
+    link_or_copy(str(src), str(dst))
 
 
 def reset_context() -> None:
@@ -388,7 +386,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         "instructions.md, release archives / Linux binaries (also under bin/).",
         epilog="Arguments after `--` go to `docker buildx build` (or `podman build`) unchanged.",
     )
-    parser.add_argument("--store", type=Path, help="the Store: a *.gstore file or a store directory")
+    parser.add_argument("--store", type=Path, help="the prepared single-file Store (*.gstore), copied into the image unchanged")
     parser.add_argument("--config", type=Path, help="the MCP configuration (JSON); default: mcp-config.json if present")
     parser.add_argument("--instructions", type=Path,
                         help="a Markdown file of MCP instructions for agents; default: instructions.md if present "
@@ -425,12 +423,17 @@ def find_store(args: argparse.Namespace) -> Path:
     if args.store:
         if not args.store.exists():
             raise BuildError(f"no store at {args.store}")
-        return args.store.resolve()
-    stores = sorted(HERE.glob("*.gstore"))
-    if len(stores) != 1:
-        found = ", ".join(s.name for s in stores) or "none"
-        raise BuildError(f"pass --store: expected exactly one *.gstore next to build.py, found {found}")
-    return stores[0]
+        store = args.store.resolve()
+    else:
+        stores = sorted(HERE.glob("*.gstore"))
+        if len(stores) != 1:
+            found = ", ".join(s.name for s in stores) or "none"
+            raise BuildError(f"pass --store: expected exactly one *.gstore next to build.py, found {found}")
+        store = stores[0]
+    if not store.is_file():
+        raise BuildError(f"{store} is not a single-file Store: fork it into one first "
+                         "(graphersal store fork <store> kb.gstore)")
+    return store
 
 
 def stage_config(args: argparse.Namespace, kb: Path) -> str:
@@ -494,9 +497,7 @@ def main(argv: list[str]) -> int:
         work = Path(tmp)
         if args.version:
             wanted = requested or (list(RELEASE_PLATFORM) if args.push else [build_arch])
-            # The store is prepared by the binary of the building engine's architecture.
-            fetch_archs = sorted(set(wanted) | {build_arch})
-            binaries = {b.arch: b for b in download(args.version, fetch_archs, args.repo, work)}
+            binaries = {b.arch: b for b in download(args.version, sorted(set(wanted)), args.repo, work)}
         else:
             paths = args.binary or [p for p in (HERE, HERE / "bin") if p.is_dir()]
             binaries = collect_binaries(paths, work)
@@ -515,14 +516,8 @@ def main(argv: list[str]) -> int:
         versions = {binaries[p].version for p in platforms if binaries[p].version}
         if len(versions) > 1:
             raise BuildError(f"the binaries have different versions: {', '.join(sorted(versions))}")
-        # The store is forked and checked by the binary that will serve it, natively when the
-        # engine's architecture is among the binaries, under emulation otherwise.
-        prep_arch = build_arch if build_arch in binaries else platforms[0]
-        if prep_arch != build_arch:
-            log(f"no linux-{build_arch} binary: the store is prepared under linux/{prep_arch} emulation (slower)")
-
         reset_context()
-        for arch in sorted(set(platforms) | {prep_arch}):
+        for arch in platforms:
             place(binaries[arch].path, CONTEXT / "bin" / f"linux-{arch}" / "graphersal")
         place(store, CONTEXT / "store" / "graph.gstore")
         kb = CONTEXT / "kb"
@@ -532,15 +527,14 @@ def main(argv: list[str]) -> int:
     version = versions.pop() if versions else "unknown"
     sources = "; ".join(f"linux-{p}: {binaries[p].source}" for p in platforms)
     tags = args.tag or ["graphersal-kb:latest"]
-    build_args = ["--build-arg", f"PREP_ARCH={prep_arch}",
-                  "--build-arg", f"GRAPHERSAL_VERSION={version}",
+    build_args = ["--build-arg", f"GRAPHERSAL_VERSION={version}",
                   "--build-arg", f"GRAPHERSAL_SOURCE={sources}",
                   "--build-arg", f"BUILD_TIME={datetime.datetime.now(datetime.timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')}"]
     commands = build_commands(engine, platforms, tags, build_args, args.push, args.docker_args)
 
-    log(f"store {store}")
+    log(f"store {store} (shipped as is)")
     log(described)
-    log(f"graphersal {version} for {', '.join(platforms)} (store prepared by linux-{prep_arch}), engine {engine}")
+    log(f"graphersal {version} for {', '.join(platforms)}, engine {engine}")
     if args.dry_run:
         for command in commands:
             if command[0] == "fix-variants":
@@ -559,14 +553,6 @@ def main(argv: list[str]) -> int:
             subprocess.run(["podman", "manifest", "rm", podman_manifest_name()], capture_output=True)
     log(f"built {', '.join(tags)}" + (" and pushed" if args.push else ""))
     if not args.push and len(platforms) == 1:
-        cost = subprocess.run([engine, "run", "--rm", "--network", "none", "--entrypoint", "/usr/local/bin/graphersal",
-                               tags[0], "mcp-cost", "--graph", "/kb/graph.gstore", "--read-only",
-                               "--mcp-config", "/kb/mcp-config.json"], capture_output=True, text=True)
-        if cost.returncode == 0:
-            log("what the MCP prompt costs an agent:")
-            for line in cost.stdout.splitlines():
-                if line.strip().startswith(("instructions:", "tools:", "total:")):
-                    print(f"  {line.strip()}", file=sys.stderr)
         log(f"run:     {engine} run --rm --read-only -p 127.0.0.1:8080:8080 {tags[0]}")
         log("connect: claude mcp add --transport http kb http://localhost:8080/mcp   (playground: http://localhost:8080/)")
     return 0
