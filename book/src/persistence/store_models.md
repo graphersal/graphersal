@@ -43,7 +43,8 @@ graphersal.Store.import_model_into("data", "minishlab/potion-base-8M")  # a clos
 ```
 
 `import_model(source, *, repo=None, license=None, replace=False, default=False)` returns the
-report as a dict; the wheel has no download client, so the cache is filled by the command line.
+report as a dict; the wheel has no download client, so the cache is filled by the command line
+(or by a Rust host, [below](#downloading-from-a-host)).
 In Rust (the cache lookup is `persist::ModelCache`: `ModelCache::new()?.source("minishlab/potion-base-8M")`
 gives the `ModelSource`):
 
@@ -67,6 +68,58 @@ println!("{} ({}), commit {:?}", report.model.repo, report.model.identity, repor
 - `ModelSource::Files(NewModel)` imports files given as streams (a host without a file system,
   such as the browser).
 - A closed store: `Store::import_model_dir` (what the CLI does). See the next section.
+
+## Downloading from a host
+
+The download `graphersal embed-model download` runs is a library function: a host (a server, a
+tool of its own) fills a models directory, or a store, without the command line. It is the
+`graphersal` feature `model-download` (native only; it brings `persist` and `model2vec`, and the
+HTTPS client `ureq` with `ring`), `persist::ModelCache::download`:
+
+```rust,ignore
+use graphersal::exec::CancelToken;
+use graphersal::persist::{DownloadEvent, ModelCache, ModelDownload};
+
+let cancel = CancelToken::new();
+let request = ModelDownload::new("minishlab/potion-base-8M")
+    .with_revision("main")                       // a branch, tag or commit (default main)
+    .with_endpoint("https://huggingface.co")     // the default; a mirror or a test server
+    .with_token(token)                           // gated or private repositories
+    .with_cancel(cancel.clone());                // cancel() from another thread stops it
+let report = ModelCache::at("/srv/models").download(&request, |event| match event {
+    DownloadEvent::Progress { name, bytes, total, .. } => { /* bytes of total, per file */ }
+    DownloadEvent::Note { text, .. } => { /* the metadata could not be read, ... */ }
+    _ => {}
+})?;
+println!("{} in {}", report.identity, report.dir.display());
+```
+
+- It does what the command line does: the three model files, the model card and the
+  `LICENSE*`/`NOTICE*` files of the repository, its metadata (licence, base models, gated); the
+  SHA-256 (`X-Linked-Etag`) or git blob id (ETag) the server states is checked while each file
+  streams; redirects are followed by hand, so the token goes to the endpoint's host only; the
+  manifest `graphersal-embed-model.json` is written and the model loaded once as a check before
+  it is moved to `<dir>/<owner>/<name>`, replacing an earlier download. **Any failure, a
+  cancellation or a kill leaves no model**: at most a hidden staging directory, which the next
+  download of the repository removes. Do not run two downloads of the same repository into
+  one directory at the same time.
+- The library reads no environment variable: the command line passes `$GRAPHERSAL_HF_ENDPOINT`
+  and `$HF_TOKEN`; a host passes what it is configured with. The token never appears in the
+  request's `Debug` text, a report or an error.
+- The report (`ModelDownloadReport`) carries the identity, dimension, commit, licence, licence
+  file, base models, gated flag, the files with their sizes and SHA-256, the notes, and the
+  `warnings` the command line prints (an unknown or non-commercial licence, custom terms, a
+  gated repository; `persist::model_licence_warnings` gives the same texts for a model from
+  elsewhere).
+- Errors are `ModelDownloadError`: `InvalidRequest` (repository name or revision; nothing was
+  fetched), `Refused` (HTTP 401/403: no such repository, or it needs a token), `NotFound` (HTTP
+  404), `Transfer` (unreachable, another HTTP status, a body that broke off), `Integrity` (a hash
+  differs), `NotAModel`, `Io`, `Cancelled`. The text is the command line's message.
+- Into a store without the models directory: `ModelCache::download_staged` stops before the
+  move; `StagedModel::new_model()` gives a `NewModel` for `ModelSource::Files` (what
+  `embed-model download --into` does), and dropping the `StagedModel` removes its files. Keep
+  it alive until the import returned.
+- Cancellation is cooperative: checked before each request and after each chunk of a body.
 
 ## Changing the models of a closed store
 

@@ -56,6 +56,8 @@ pub(crate) mod layer;
 pub(crate) mod manifest;
 #[cfg(not(target_arch = "wasm32"))]
 mod model_cache;
+#[cfg(all(feature = "model-download", not(target_arch = "wasm32")))]
+mod model_download;
 mod recover;
 mod segment;
 #[cfg(not(target_arch = "wasm32"))]
@@ -76,6 +78,11 @@ pub use error::{BackupDamage, DamageSide, PersistError, StoreFailure};
 pub use journal::{Durability, DurableEnd, DurablePosition, Journal, SharedBuffer};
 #[cfg(not(target_arch = "wasm32"))]
 pub use model_cache::ModelCache;
+#[cfg(all(feature = "model-download", not(target_arch = "wasm32")))]
+pub use model_download::{
+    DownloadEvent, DownloadedFile, ModelDownload, ModelDownloadError, ModelDownloadReport,
+    StagedModel, model_licence_warnings,
+};
 pub use recover::{Recovered, Recovery, RecoveryReport, RecoveryTarget, recover};
 pub use segment::{DEFAULT_CHUNK_BYTES, DEFAULT_SEGMENT_BYTES};
 #[cfg(not(target_arch = "wasm32"))]

@@ -170,7 +170,7 @@ fn default_dir() -> Option<PathBuf> {
 
 /// Whether `repo` is a Hugging Face repository name: `owner/name` (or a bare `name`), each part
 /// of ASCII letters, digits, `.`, `_`, `-`, not starting with `.`.
-fn is_repo_name(repo: &str) -> bool {
+pub(crate) fn is_repo_name(repo: &str) -> bool {
     let part_ok = |part: &str| {
         !part.is_empty()
             && part.len() <= 96

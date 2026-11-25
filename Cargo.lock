@@ -632,6 +632,7 @@ dependencies = [
  "rand 0.8.8",
  "regex",
  "rhai",
+ "ring",
  "rustix",
  "ruzstd",
  "safetensors",
@@ -641,6 +642,7 @@ dependencies = [
  "thiserror 1.0.69",
  "tokenizers",
  "tracing",
+ "ureq",
  "web-time",
  "windows-sys 0.61.2",
 ]
