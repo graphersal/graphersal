@@ -12,7 +12,7 @@ with the project's own repositories. Most of a project graph is the product itse
 costs about what the project adds or changes, not a copy of the product. Several layers can
 share one base in the same process.
 
-> **EXPERIMENTAL in 0.7.x.** From Rust a layer can be saved as a layer snapshot and read back
+> **EXPERIMENTAL in 0.8.x.** From Rust a layer can be saved as a layer snapshot and read back
 > over its base, or kept in a layer Store (`Store::create_layer` / `Store::open_layer`); the
 > CLI and the dev server keep a layer in a layer store with `--layer-store`, `--layer` and
 > Python keep it in memory (see [Limitations](#limitations)). How the storage works inside, its capabilities and memory
