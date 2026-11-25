@@ -17,7 +17,8 @@ use crate::host::{ClientRef, Ctx, Host, McpError, clear_busy, take_busy};
 use crate::profile::Profile;
 use crate::resources::{RESOURCES, read_resource};
 use crate::sessions::{
-    MAX_SESSION_ROUTE_BYTES, SessionKey, Sessions, is_valid_session_route, session_route,
+    MAX_SESSION_ROUTE_BYTES, SessionKey, SessionStore, Sessions, is_valid_session_route,
+    session_route,
 };
 use crate::stats::{McpStats, Refusal};
 use crate::tools::{CallRefused, ToolCaller, call_tool, tool_listings, tool_result};
@@ -122,10 +123,40 @@ impl Mcp {
     /// replicas behind a load balancer) accepts the ids of the others. `DELETE` of a valid id
     /// answers `200` and the id stays valid (nothing is stored to forget). The client names
     /// are kept for the statistics, at most [`crate::MAX_CLIENT_NAMES`].
+    ///
+    /// It replaces the session table, and with it a store set by [`Mcp::with_session_store`].
     pub fn with_session_key(mut self, key: SessionKey) -> Self {
         self.sessions = Sessions::signed(&key);
         self.stats = Arc::new(McpStats::new(self.sessions.clients()));
         self
+    }
+
+    /// Keeps the MCP session table in the host's `store`, so the sessions survive a restart:
+    /// the stored sessions are loaded now (replacing the table; the newest
+    /// [`Mcp::with_max_sessions`] by creation time, so set the size first) and the whole table
+    /// is saved after every change ([`SessionStore`]). A restored session keeps its identity,
+    /// its selected graph, a pending rename note and its negotiated protocol revision; its
+    /// client goes on with the id it had.
+    ///
+    /// The table holds only the SHA-256 of each id, so a store never sees a usable id. A save
+    /// that fails is a `tracing` warning and the request goes on with the table in memory.
+    /// Without a store (the default) the table lives in memory only, as before.
+    ///
+    /// `Err` when the store cannot load, or when the ids are signed ([`Mcp::with_session_key`]:
+    /// they keep no table to store).
+    pub fn with_session_store(mut self, store: Arc<dyn SessionStore>) -> Result<Self, McpError> {
+        let sessions = std::mem::replace(&mut self.sessions, Sessions::table());
+        self.sessions = sessions.with_store(store)?;
+        Ok(self)
+    }
+
+    /// Ends every MCP session of `identity` (exact; `None` = the anonymous sessions), for a
+    /// host that revoked a user's token or removed the user: their clients get `404` and must
+    /// initialize again (and are then refused if the host refuses the identity). Saves the
+    /// table when a store is set ([`Mcp::with_session_store`]). The number of sessions ended;
+    /// always `0` with signed ids ([`Mcp::with_session_key`]), which keep nothing to end.
+    pub fn forget_sessions_of(&self, identity: Option<&str>) -> usize {
+        self.sessions.forget_identity(identity)
     }
 
     /// The usage statistics of the endpoint since it was built: in process memory only, never
@@ -656,9 +687,12 @@ impl Mcp {
                         ),
                     ));
                 }
-                let session = self
-                    .sessions
-                    .create_routed(&client, route.as_deref(), peer.identity);
+                let session = self.sessions.create_versioned(
+                    &client,
+                    route.as_deref(),
+                    peer.identity,
+                    version,
+                );
                 self.stats.record_initialize(&session);
                 Some(session)
             }

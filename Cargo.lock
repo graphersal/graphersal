@@ -675,6 +675,7 @@ dependencies = [
  "rand 0.8.8",
  "ring",
  "serde_json",
+ "tracing",
 ]
 
 [[package]]

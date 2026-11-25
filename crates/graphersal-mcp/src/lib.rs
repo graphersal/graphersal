@@ -71,7 +71,11 @@
 //! a request naming the session id with another identity, anonymous included, gets the `404`
 //! of an unknown session, in table and signed mode. The sessions are the endpoint's, shared by
 //! [`Mcp::handle`], [`Mcp::handle_with_profile`] and [`Mcp::handle_directory`], so one id works
-//! on every route the host sends to the same [`Mcp`], for that identity only.
+//! on every route the host sends to the same [`Mcp`], for that identity only. The session table
+//! holds only the SHA-256 of each id; a host keeps it across restarts with
+//! [`Mcp::with_session_store`] (a [`SessionStore`] of [`StoredSession`]s, saved whole after
+//! every change; default: memory only) and ends the sessions of a revoked identity with
+//! [`Mcp::forget_sessions_of`].
 //!
 //! # Directory mode: one endpoint over many graphs
 //!
@@ -229,8 +233,8 @@ pub use protocol::{
 };
 pub use resources::gql_reference_text;
 pub use sessions::{
-    MAX_CLIENT_NAMES, MAX_SESSION_ROUTE_BYTES, MAX_SESSIONS, SessionKey, is_valid_session_route,
-    session_route,
+    MAX_CLIENT_NAMES, MAX_SESSION_ROUTE_BYTES, MAX_SESSIONS, SessionKey, SessionStore,
+    StoredSession, is_valid_session_route, session_route,
 };
 pub use stats::{LATENCY_BUCKETS_MS, MAX_COUNTED_NAMES, McpStats, Refusal};
 pub use stream::serve_lines;
