@@ -33,6 +33,11 @@ pub const READ_ONLY_HEADLINE: &str = "the graph is served read-only: writes are 
 pub const READ_ONLY_HELP: &str =
     "An operator turned read-only on; ask them to turn it off to change the data.";
 
+/// The help text of the `409` that refuses a write on a request the host marked read-only
+/// ([`crate::Request::mark_read_only`]): `"{READ_ONLY_HEADLINE}. {READ_ONLY_REQUEST_HELP}"`.
+pub const READ_ONLY_REQUEST_HELP: &str =
+    "This request has read access only: ask for write access to change the data.";
+
 /// The commit hook of the runtime read-only toggle: vetoes every unit while `on` holds.
 pub(crate) struct ReadOnlyGate {
     on: Arc<AtomicBool>,

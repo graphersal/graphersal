@@ -68,6 +68,23 @@ impl Profile {
         self
     }
 
+    /// Sets the read-only flag: only reading tools, a query that would write refused. A host
+    /// serving one request at a lower access level than its connection's profile (a user with
+    /// read access only) passes `profile.clone().with_read_only(true)` for that request; `false`
+    /// clears the flag.
+    ///
+    /// ```
+    /// use graphersal_mcp::Profile;
+    ///
+    /// let profile = Profile::new(false).with_read_only(true);
+    /// assert!(profile.read_only());
+    /// assert!(!profile.with_read_only(false).read_only());
+    /// ```
+    pub fn with_read_only(mut self, read_only: bool) -> Self {
+        self.read_only = read_only;
+        self
+    }
+
     /// Runs the queries under `policy` (and offers the session's writing tools only where it
     /// allows their writes).
     pub fn with_access_policy(mut self, policy: AccessPolicy) -> Self {

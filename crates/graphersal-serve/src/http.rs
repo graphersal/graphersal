@@ -82,6 +82,7 @@ pub struct Request<'a> {
     body_length: Option<usize>,
     body: Box<dyn Read + 'a>,
     identity: Option<String>,
+    read_only: bool,
 }
 
 impl<'a> Request<'a> {
@@ -95,6 +96,7 @@ impl<'a> Request<'a> {
             body_length: None,
             body: Box::new(body),
             identity: None,
+            read_only: false,
         }
     }
 
@@ -149,6 +151,28 @@ impl<'a> Request<'a> {
     /// The identity a request filter attached ([`Self::set_identity`]), if any.
     pub fn identity(&self) -> Option<&str> {
         self.identity.as_deref()
+    }
+
+    /// Marks the request read-only: it may read the graph but change nothing (EXPERIMENTAL,
+    /// the per-request access level; plan `ai/graphersal-server-access/PLAN.md` A3). A host's
+    /// router or [`crate::RequestFilter`] sets it, e.g. for a user with read access only; the
+    /// core never authenticates anyone. The mark is one-way: nothing clears it.
+    ///
+    /// On a marked request the core runs `POST /api/execute` and `POST /api/query` under the
+    /// reading authorizer (a write fails with `PermissionDenied` and changes nothing), refuses
+    /// every other route that writes with `409` [`crate::READ_ONLY_HEADLINE`] and
+    /// [`crate::READ_ONLY_REQUEST_HELP`] (the store's fork, backup and view included; exports
+    /// and downloads stay open), serves `/mcp` under the context's MCP profile made read-only,
+    /// and answers `readOnly: true` in `GET /api/info` and `GET /api/changes` (and in their
+    /// `mcp` status). The host's extra routes ([`crate::Hooks::route`]) read the mark here and
+    /// decide themselves.
+    pub fn mark_read_only(&mut self) {
+        self.read_only = true;
+    }
+
+    /// Whether the request is marked read-only ([`Self::mark_read_only`]).
+    pub fn is_read_only(&self) -> bool {
+        self.read_only
     }
 
     /// The body.
