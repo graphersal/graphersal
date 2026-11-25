@@ -392,6 +392,7 @@
 
 - [Releases and Versioning](for_developers/release_plan.md)
 - [Version Control and Contributions](for_developers/version_control.md)
+- [Release Notes 0.8.0](release_notes/release_notes_0.8.0.md)
 - [Release Notes 0.7.1](release_notes/release_notes_0.7.1.md)
 - [Release Notes 0.7.0](release_notes/release_notes_0.7.0.md)
 - [Release Notes 0.6.2](release_notes/release_notes_0.6.2.md)
