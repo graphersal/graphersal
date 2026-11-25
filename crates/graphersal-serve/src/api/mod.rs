@@ -346,16 +346,17 @@ fn route(context: &Arc<Context>, request: &mut Request) -> Result<Response, Http
         (Method::Get, "memory") => value(context.call_fallible(|s| s.graph().memory_view())?),
         // The scheduled jobs of the active store (`graphersal_session::jobs`).
         (Method::Get, "jobs") => value(context.call_fallible(|s| s.jobs_view())?),
-        // The dev server's user owns the machine's files (the Store menu writes backups
-        // anywhere), so a backup job may name any directory.
+        // Without a file root the dev server's user owns the machine's files (the Store menu
+        // writes backups anywhere), so a backup job may name any directory; with one
+        // (`ContextBuilder::file_root`) the engine resolves the path under it and refuses one
+        // outside it.
         (Method::Post, "jobs/define") => {
             let body = request.json_body()?;
-            value(context.call(move |s| {
-                s.define_job_with_authorizer(
-                    &body,
-                    Arc::new(graphersal::auth::AccessPolicy::allow_all()),
-                )
-            })?)
+            let mut policy = graphersal::auth::AccessPolicy::allow_all();
+            if let Some(root) = context.file_root() {
+                policy = policy.with_file_root(root);
+            }
+            value(context.call(move |s| s.define_job_with_authorizer(&body, Arc::new(policy)))?)
         }
         (Method::Post, "jobs/drop") => {
             let name = body_name(&request.json_body()?)?;
@@ -544,6 +545,9 @@ fn route(context: &Arc<Context>, request: &mut Request) -> Result<Response, Http
         )),
         (Method::Post, "catalog/load") => {
             let body = request.text_body()?;
+            if let Some(root) = context.file_root() {
+                crate::file_root::check_catalog(root, &body)?;
+            }
             let replace = query_value(query, "replace").as_deref() == Some("true");
             value(context.call_fallible(move |s| s.load_catalog(&body, replace))?)
         }

@@ -53,6 +53,7 @@ excerpts on this page come from it.
 | `ContextBuilder::shared_mcp` / `mcp_profile` | `graphersal-serve`, feature `mcp` | One MCP endpoint for every context, with a profile per context. |
 | `GraphResolver`, `Server::ready_with` | `graphersal-serve` | The extension point that picks the context of each request. |
 | `Request::mark_read_only` | `graphersal-serve` | Serves one request read-only: the host's router or `RequestFilter` marks it, for a caller with read access only (see "Read-only requests" below). EXPERIMENTAL. |
+| `ContextBuilder::file_root`, `jobs_outside_file_root` | `graphersal-serve` | Confines every file path a client names (backup jobs, catalog loads, fork and backup directories) to one directory (see "File root" below). EXPERIMENTAL. |
 | `GraphDirectory`, `Mcp::handle_directory` | `graphersal-mcp` | One MCP endpoint over all graphs: the agent lists them, selects one per session and may switch (see below). EXPERIMENTAL. |
 
 ### Base identity
@@ -165,6 +166,29 @@ serves the request like this (the context itself stays writable for every other 
 The host's own extra routes (`Hooks::route`) see the mark with `request.is_read_only()` and
 decide for themselves. A host that serves MCP in directory mode (`handle_directory`) answers a
 reader's profile from its `GraphDirectory::host` instead.
+
+### File root
+
+Without further settings a client with write access may name any path the server process can
+write: a backup job's directory, the directory of a Store fork or backup. A host that serves
+callers it does not trust with the machine's files sets a file root on each context:
+`ContextBuilder::file_root(Some(root))`. The default, `None`, keeps the old behaviour (the CLI
+dev server never sets one). With a root:
+
+- `POST /api/jobs/define` resolves a backup job's path under the root: a relative path is
+  relative to the root, and a path that leaves it (an absolute path elsewhere, `..`, a symbolic
+  link pointing out) is refused in the answer. The job stores the resolved path.
+- `POST /api/catalog/load` refuses with `403` a catalog with a job that writes outside the
+  root, and loads nothing. A stored job path must be absolute and inside the root.
+- The `dir` of `POST /api/store/fork`, `/api/store/attic/fork` and `/api/store/backup` is
+  resolved the same way: a relative `dir` is relative to the root (not to the store's
+  directory), and one outside it answers `403` with `paths must lie inside the server's file
+  root`. Without a `dir` the default directory next to the store is used, as before.
+
+The root must exist; a requested `dir` under a missing root answers `500`. Jobs already stored
+in a store the host loads (an imported, restored or cloned store) are not checked by the
+context: the host passes the store's definitions to `graphersal_serve::jobs_outside_file_root`
+and disables or refuses the jobs it returns.
 
 ## What a host builds
 
