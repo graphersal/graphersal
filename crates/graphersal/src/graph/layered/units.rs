@@ -14,6 +14,7 @@
 //! | a property write of a base element that changes nothing (an identical value) | [`LayerUndo::UnchangedBaseVertexProperty`] / [`LayerUndo::UnchangedBaseEdgeProperty`]: nothing to undo; recorded only so the change set and the commit count match `TraversalGraph`'s, which records such a write |
 //! | `set_schema` | [`LayerUndo::Schema`]: the layer's old schema |
 //! | catalog writes | [`LayerUndo::Definition`]: the old definition of that kind and name, or "absent", one per definition |
+//! | a removed base element made visible again (a reset, or a create with the id and the exact state of a removed base element: module `reset`) | [`LayerUndo::RestoredBaseVertex`] / [`LayerUndo::RestoredBaseEdge`]: tombstone it again |
 //!
 //! **Handles.** Entries name added elements by id and base elements by their base handle. A
 //! base handle never changes (the base is frozen), so undoing the drop of a base element makes
@@ -151,6 +152,12 @@ pub(crate) enum LayerUndo {
         edge: EdgeHandle,
         key: CompactString,
     },
+    /// A removed base vertex was made visible again with its base state (module `reset`): no
+    /// stub, no image, its base edges still removed (each comes back as an entry of its own,
+    /// logged after it).
+    RestoredBaseVertex { node: VertexHandle },
+    /// A removed base edge was made visible again with its base state (both endpoints live).
+    RestoredBaseEdge { edge: EdgeHandle },
     /// The layer's schema was replaced.
     Schema(Box<GraphSchema>),
     /// A definition of the layer's catalog was stored, replaced or removed; `old` is what was
@@ -574,6 +581,8 @@ impl LayeredGraph {
                 | LayerUndo::EdgeLabel { .. }
                 | LayerUndo::RemovedBaseVertex { .. }
                 | LayerUndo::RemovedBaseEdge { .. }
+                | LayerUndo::RestoredBaseVertex { .. }
+                | LayerUndo::RestoredBaseEdge { .. }
                 | LayerUndo::BaseVertexProperty { .. }
                 | LayerUndo::BaseEdgeProperty { .. }
                 | LayerUndo::BaseVertexLabels { .. }
@@ -679,6 +688,16 @@ impl LayeredGraph {
                 position,
                 &mut self.statistics,
             ),
+            // Restored with nothing at it (its edges, restored or added after it, were undone
+            // first): tombstoned again, its stub (if a later write made one) with it.
+            LayerUndo::RestoredBaseVertex { node } => {
+                self.delta
+                    .remove_base_vertex(&self.base, node, &mut self.statistics);
+            }
+            LayerUndo::RestoredBaseEdge { edge } => {
+                self.delta
+                    .remove_base_edge(&self.base, edge, &mut self.statistics);
+            }
             LayerUndo::BaseVertexProperty {
                 node,
                 key,

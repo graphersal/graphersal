@@ -14,6 +14,7 @@ import { createReadyGate } from './ready.js';
 import { changedData } from './statistics.js';
 import { createPoller, readChanges } from './change-feed.js';
 import { infoAfterChanges } from './server-mode.js';
+import { resetDoneText } from './layer-diff.js';
 import { createBurst, burstAnnouncement } from './change-burst.js';
 import { LayoutJobs } from './graph/layout-jobs.js';
 import { ChatController } from './ai-chat.js';
@@ -1853,6 +1854,38 @@ export async function switchLayer(which) {
     return res;
   } catch (err) {
     toast(`${which === 'drop' ? 'Drop layer' : 'Start layer'} failed: ${err && err.message ? err.message : err}`, 'error', 9000);
+    return { ok: false, error: err && err.message ? err.message : String(err) };
+  } finally {
+    state.layerBusy = false;
+  }
+}
+
+/**
+ * "Discard all changes" of the Layer changes dialog: the engine's `resetLayer` (one commit, the
+ * layer kept, now equal to its base); the graph info, the panels and every tab's result follow,
+ * as after a query that changed the graph. Answers the engine's answer (`{ok, reset, info}` or
+ * `{ok: false, error}`).
+ */
+export async function resetLayer() {
+  if (state.running || state.layerBusy) return { ok: false, error: 'busy' };
+  const engine = state.engine;
+  if (!engine || typeof engine.resetLayer !== 'function') return { ok: false, error: 'This engine cannot discard a layer\'s changes.' };
+  state.layerBusy = true;
+  try {
+    const res = await engine.resetLayer();
+    if (!res || !res.ok) {
+      toast(`Discard layer changes failed: ${(res && res.error) || 'no answer'}`, 'error', 9000);
+      return res || { ok: false, error: 'no answer' };
+    }
+    if (res.info) state.graph = res.info;
+    state.graphVersion++;
+    state.dataVersion++;
+    state.storeVersion++;
+    tabs.markOthersStale(state, null);
+    toast(resetDoneText(res.reset, res.info && res.info.layer ? res.info.layer.base : undefined), 'info', 7000);
+    return res;
+  } catch (err) {
+    toast(`Discard layer changes failed: ${err && err.message ? err.message : err}`, 'error', 9000);
     return { ok: false, error: err && err.message ? err.message : String(err) };
   } finally {
     state.layerBusy = false;

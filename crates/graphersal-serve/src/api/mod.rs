@@ -489,6 +489,8 @@ fn route(context: &Arc<Context>, request: &mut Request) -> Result<Response, Http
             let body = request.json_body()?;
             value(context.call(move |s| s.layer_diff(&body))?)
         }
+        // Discards every change of the served layer (`Session::reset_layer`), one commit; no body.
+        (Method::Post, "layer/reset") => value(context.call(|s| s.reset_layer())?),
         (Method::Get, "statistics") => value(
             context.with_process_memory(context.call_fallible(|s| s.statistics_with_process())?),
         ),
@@ -668,6 +670,7 @@ fn route(context: &Arc<Context>, request: &mut Request) -> Result<Response, Http
             | "memory"
             | "memory/report"
             | "layer/diff"
+            | "layer/reset"
             | "advise"
             | "advise/apply"
             | "advise/dismiss"

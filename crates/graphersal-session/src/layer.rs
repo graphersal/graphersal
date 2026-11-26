@@ -13,11 +13,19 @@
 //! - [`Session::start_layer`] freezes the session's own graph as the base of a new, empty layer
 //!   in memory (the browser playground's demo; the dev server gets its layer from the CLI
 //!   flags); [`Session::drop_layer`] discards that layer and serves the base again.
+//! - [`Session::reset_layer`] discards every change of the layer the session serves (any
+//!   layer: started here, the dev server's `--layer`, a layer store's live graph) and keeps
+//!   serving the layer, now equal to its base: `{ok: true, reset, info}` (`reset` =
+//!   `{added, modified, removed: {vertices, edges}, schema, definitions}`, what was discarded)
+//!   or `{ok: false, error}`. One commit (journaled on a layer store), refused on a read-only
+//!   graph.
 
 use std::sync::Arc;
 
 use graphersal::prelude::*;
-use graphersal::storage::{AnyGraph, ElementKind, LayerBase, LayerDiffRequest, LayerSummary};
+use graphersal::storage::{
+    AnyGraph, ElementKind, LayerBase, LayerDiffRequest, LayerReset, LayerSummary, LayeredGraph,
+};
 use serde_json::{Value, json};
 
 use crate::display::json_safe;
@@ -45,6 +53,18 @@ pub fn layer_info(summary: &LayerSummary) -> Value {
         "removed": counts(&summary.removed),
         "ownBytes": summary.own_bytes,
         "sharedBytes": summary.shared_bytes,
+    })
+}
+
+/// The `reset` block of [`Session::reset_layer`]: what the reset discarded.
+pub fn layer_reset_info(reset: &LayerReset) -> Value {
+    let counts = |counts: &graphersal::storage::LayerCounts| json!({"vertices": counts.vertices, "edges": counts.edges});
+    json!({
+        "added": counts(&reset.added),
+        "modified": counts(&reset.modified),
+        "removed": counts(&reset.removed),
+        "schema": reset.schema,
+        "definitions": reset.definitions,
     })
 }
 
@@ -233,6 +253,45 @@ impl Session {
         self.graph = Arc::new(layer);
         self.layer_base = Some(base);
         self.info()
+    }
+
+    /// Discards every change the served layer made over its base (data, schema, catalog: the
+    /// engine's `Graph<LayeredGraph>::reset_layer`) and keeps serving the layer, which now reads
+    /// as its base: `{ok: true, reset, info}` ([`layer_reset_info`], [`Session::info`]) or
+    /// `{ok: false, error}`, nothing changed then. Works on every layer the session serves (one
+    /// it started, a host's layer, a layer store's live graph, where it is one journaled
+    /// commit). Refused on a graph without layers and on a read-only graph. A layer without
+    /// changes answers an empty `reset` and commits nothing.
+    pub fn reset_layer(&mut self) -> Value {
+        match self.try_reset_layer() {
+            Ok((reset, info)) => {
+                json!({"ok": true, "reset": layer_reset_info(&reset), "info": info})
+            }
+            Err(error) => json!({"ok": false, "error": error.to_string()}),
+        }
+    }
+
+    fn try_reset_layer(&mut self) -> Result<(LayerReset, Value), SessionError> {
+        if self.graph.layer_summary()?.is_none() {
+            return Err(SessionError::invalid(
+                "the graph is not a layer: there are no layer changes to discard",
+            ));
+        }
+        if let Some(reason) = self.write_refusal() {
+            return Err(SessionError::invalid(format!(
+                "the layer's changes cannot be discarded: {reason}"
+            )));
+        }
+        let Some(layer) = self.graph.as_any().downcast_ref::<Graph<LayeredGraph>>() else {
+            return Err(SessionError::invalid(format!(
+                "the layer's changes cannot be discarded on a {} graph",
+                self.graph.storage_type_name()
+            )));
+        };
+        let reset = layer.reset_layer()?;
+        // Without a checkpoint thread (wasm32) the automatic checkpoint runs here.
+        self.run_due_checkpoint();
+        Ok((reset, self.info()?))
     }
 
     /// Discards the layer [`Session::start_layer`] started (its changes are lost) and serves

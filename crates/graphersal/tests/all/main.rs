@@ -146,6 +146,7 @@ mod layered_graph_tests;
 mod layered_index_tests;
 mod layered_memory_report_tests;
 mod layered_persist_tests;
+mod layered_reset_tests;
 mod layered_storage_tests;
 mod layered_store_tests;
 mod layered_unique_tests;

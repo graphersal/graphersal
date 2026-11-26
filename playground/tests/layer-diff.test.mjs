@@ -6,7 +6,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   DIFF_LIMITS, initialDiffState, parseLabels, diffSpec, diffModel, changeRows, entryRows, focusTarget, changeCounts, layerBadge,
-  layerActions, dropConfirmText,
+  layerActions, dropConfirmText, resetAction, resetConfirmText, resetDoneText,
 } from '../js/layer-diff.js';
 import { BUILTIN_PROFILES, CAN_KEYS, CAN_GROUPS, createUi } from '../js/ui-profiles.js';
 
@@ -131,6 +131,35 @@ test('Start / Drop layer: WebAssembly only, start without a layer, drop with one
   assert.equal(layerActions({ engineLayers: true, graph, allowed: false }).start, false, 'the profile hides it');
   assert.match(dropConfirmText(layer), /discard its 5 changes \(\+2 ~1 −2\)/);
   assert.match(dropConfirmText({ base: 'b' }), /no changes/);
+});
+
+test('Discard all changes: on every writable layer of an engine that has it, with its reason when not', () => {
+  const graph = { name: 'Modern', layer };
+  assert.deepEqual(resetAction({ engineReset: true, graph }), { reset: true, reason: null });
+  const cases = [
+    [{ engineReset: true, graph: { name: 'Modern' } }, /not a layer/],
+    [{ engineReset: true, graph: null }, /not a layer/],
+    [{ engineReset: false, graph }, /rebuild/],
+    [{ engineReset: true, graph, storeView: { commitSeq: 2 } }, /past state/],
+    [{ engineReset: true, graph, readOnly: 'the server serves this graph read-only' }, /read-only/],
+    [{ engineReset: true, graph, running: true }, /running/],
+    [{ engineReset: true, graph, allowed: false }, /profile/],
+  ];
+  for (const [s, reason] of cases) {
+    const a = resetAction(s);
+    assert.equal(a.reset, false, JSON.stringify(s));
+    assert.match(a.reason, reason);
+  }
+  assert.match(resetConfirmText(layer), /Discard all 5 changes of this layer \(\+2 ~1 −2\)/);
+  assert.match(resetConfirmText(layer), /schema and catalog/);
+  assert.match(resetConfirmText(layer), /The layer stays and shows modern again; modern itself is not changed/);
+  assert.match(resetConfirmText({ base: 'b' }), /every change of this layer/);
+  const reset = { added: { vertices: 2, edges: 0 }, modified: { vertices: 1, edges: 0 }, removed: { vertices: 0, edges: 2 }, schema: true, definitions: 1 };
+  assert.equal(resetDoneText(reset, 'modern'),
+    'Layer changes discarded (5 element changes, the schema, 1 catalog definition): the layer equals modern again.');
+  const none = { added: { vertices: 0, edges: 0 }, modified: { vertices: 0, edges: 0 }, removed: { vertices: 0, edges: 0 }, schema: false, definitions: 0 };
+  assert.match(resetDoneText(none, 'modern'), /had no changes/);
+  assert.match(resetDoneText(null), /equals its base again/);
 });
 
 test('UI profile key layerDiff: a top-bar key, on in `full` with both engines, off in `demo`', () => {

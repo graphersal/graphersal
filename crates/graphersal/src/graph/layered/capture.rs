@@ -444,6 +444,38 @@ impl LayeredGraph {
                     }
                     drop_edge(&mut shadow, &mut out, id, state);
                 }
+                // A restored base element is reported as the create it equals (its base state,
+                // as `TraversalGraph` reports the create of an element with that state).
+                LayerUndo::RestoredBaseVertex { node } => {
+                    let Some(id) = shadow.base_vertex_id(*node) else {
+                        tracing::error!("layer capture: restored base vertex not found");
+                        continue;
+                    };
+                    match shadow.take_vertex(&id) {
+                        Some(vertex) => out.push(Mutation::AddVertex {
+                            id: id.to_string(),
+                            labels: strings(&vertex.labels),
+                            properties: vertex.properties,
+                        }),
+                        None => tracing::error!(%id, "layer capture: restored vertex not found"),
+                    }
+                }
+                LayerUndo::RestoredBaseEdge { edge } => {
+                    let Some(id) = shadow.base_edge_id(*edge) else {
+                        tracing::error!("layer capture: restored base edge not found");
+                        continue;
+                    };
+                    match shadow.take_edge(&id) {
+                        Some(edge) => out.push(Mutation::AddEdge {
+                            id: id.to_string(),
+                            label: edge.label.as_ref().map(|l| l.to_string()),
+                            out_id: edge.source.to_string(),
+                            in_id: edge.target.to_string(),
+                            properties: edge.properties.unwrap_or_default(),
+                        }),
+                        None => tracing::error!(%id, "layer capture: restored edge not found"),
+                    }
+                }
                 LayerUndo::VertexProperty { id, key, old } => {
                     out.extend(shadow.vertex_property(id, key, old, None));
                 }

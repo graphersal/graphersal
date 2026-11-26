@@ -23,7 +23,8 @@
 //! Mapping of the log ([`LayerUndo`] onto [`RuleEntry`]): added elements by their id, base
 //! elements by their base id (the base is frozen, so the id borrows from it); a property write
 //! (also an identical one, `Unchanged*`, which `TraversalGraph` logs as a property write) is a
-//! `Property`, an insert or a label change an `Element`, a schema change a `Schema`; drops and
+//! `Property`, an insert, a restored base element or a label change an `Element`, a schema
+//! change a `Schema`; drops and
 //! catalog definitions are left out, as in `TraversalGraph`.
 
 use std::sync::Arc;
@@ -122,7 +123,8 @@ impl RuleLog for LayeredGraph {
                         id,
                     }
                 }
-                LayerUndo::BaseVertexLabels { node, .. } => {
+                LayerUndo::BaseVertexLabels { node, .. }
+                | LayerUndo::RestoredBaseVertex { node } => {
                     let Some(id) = base_vertex(*node) else {
                         continue;
                     };
@@ -131,7 +133,7 @@ impl RuleLog for LayeredGraph {
                         id,
                     }
                 }
-                LayerUndo::BaseEdgeLabel { edge, .. } => {
+                LayerUndo::BaseEdgeLabel { edge, .. } | LayerUndo::RestoredBaseEdge { edge } => {
                     let Some(id) = base_edge(*edge) else {
                         continue;
                     };

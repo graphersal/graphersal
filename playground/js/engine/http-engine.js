@@ -350,6 +350,8 @@ export class HttpEngine extends Engine {
       ai: i.ai || null,
       // --read-only (or a Store this process may not write): every write is refused.
       readOnly: !!i.readOnly,
+      // Discard all changes of a layer (`POST /api/layer/reset`): every server of this UI has it.
+      layerReset: true,
       // The UI profile the server names (`--ui-profile`, `ContextBuilder::ui_profile`): a
       // built-in name or a profile object (js/ui-profiles.js validates it), or null: `full`.
       uiProfile: i.uiProfile === undefined ? null : i.uiProfile,
@@ -748,6 +750,11 @@ export class HttpEngine extends Engine {
   /** A layer's diff (`POST /api/layer/diff`; the layer comes from the server's --layer flags). */
   async layerDiff(spec) {
     return this.request('POST', 'layer/diff', JSON.stringify(spec || {}));
+  }
+
+  /** Discards every change of the served layer (`POST /api/layer/reset`, one commit). */
+  async resetLayer() {
+    return this.request('POST', 'layer/reset', '{}');
   }
 
   async advise(spec) {

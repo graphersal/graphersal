@@ -344,6 +344,59 @@ impl Delta {
         }
     }
 
+    /// The empty delta of a layer over `base` that replaces `old` once `old` holds no change
+    /// any more (module `reset`: a reset layer made fresh): `old`'s slot generations are kept,
+    /// the generations of its (empty) stubs bumped, so a handle of an element `old` held and
+    /// removed never names an element the new delta stores later in the same slot.
+    pub(crate) fn fresh_after(base: &TraversalGraph, old: Delta) -> Self {
+        let Delta {
+            mut node_generations,
+            edge_generations,
+            stubs,
+            ..
+        } = old;
+        for stub in stubs.values() {
+            node_generations.bump(stub.index());
+        }
+        Self {
+            node_generations,
+            edge_generations,
+            ..Self::over(base)
+        }
+    }
+
+    /// `true` iff the base vertex `node` has exactly `labels` (in order) and `properties` (the
+    /// same keys in the same order, each value `identity_eq`): a create with this state is the
+    /// base vertex again (module `reset`).
+    pub(crate) fn base_vertex_state_is(
+        base: &TraversalGraph,
+        node: VertexHandle,
+        labels: &[CompactString],
+        properties: &PropertyMap,
+    ) -> bool {
+        base.vertex_weight(node).is_some_and(|vertex| {
+            base.labels.set(vertex.1) == labels && maps_identical(&vertex.2, properties)
+        })
+    }
+
+    /// `true` iff the base edge `edge` has `label` and `properties` (a base edge without a map
+    /// matches an empty one: a create always gives an edge a map), the edge counterpart of
+    /// [`Self::base_vertex_state_is`]; the caller compares the endpoints.
+    pub(crate) fn base_edge_state_is(
+        base: &TraversalGraph,
+        edge: EdgeHandle,
+        label: Option<&str>,
+        properties: &PropertyMap,
+    ) -> bool {
+        base.edge_weight(edge).is_some_and(|weight| {
+            base.labels.name(weight.1).map(CompactString::as_str) == label
+                && match &weight.2 {
+                    Some(map) => maps_identical(map, properties),
+                    None => properties.is_empty(),
+                }
+        })
+    }
+
     /// The property-index overlays.
     #[inline]
     pub(crate) fn indexes(&self) -> &LayerIndexes {
