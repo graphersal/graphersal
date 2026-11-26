@@ -197,8 +197,12 @@ A build that cannot run models (the browser playground, a library build without 
 current position: repository, identity, revision, dimension, licence, size (a model that is
 not loaded shows its size on disk, the blob; a loaded one the memory measured at its load,
 `ModelInfo::memory_bytes`, `ModelInfo::shown_bytes()`), whether it is the default, its state (`loaded`, `not_loaded`, `damaged`, `missing`,
-`unsupported`) and the schema properties that need it. `Store::verify` reads every model's blob
-and checks it is the tar of its identity.
+`unsupported`), the schema properties that need it and its blob's content address
+(`ModelInfo::blob_hash`: the lowercase hex SHA-256 its definition records, which is the blob's
+file name `blobs/<first 2 hex>/<hash>`; given in every state, also for a missing or damaged blob,
+so a problem `Store::verify` reports on a blob names its model; `store models` shows it as the
+`blob` row, the playground session as `blobHash`). `Store::verify` reads every model's blob and
+checks it is the tar of its identity.
 
 ## The licence travels with the model
 

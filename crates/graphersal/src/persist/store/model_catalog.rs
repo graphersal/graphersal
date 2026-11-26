@@ -174,6 +174,12 @@ pub struct ModelInfo {
     pub default: bool,
     /// The bytes of its blob (the files as a tar): its size on disk.
     pub bytes: u64,
+    /// The content address of its blob: the hash its catalog definition records, as lowercase
+    /// hex (SHA-256 for every blob this version writes), which is the blob's file name in the
+    /// store (`blobs/<first 2 hex>/<blob_hash>`, format spec 4.6). Given in every state, also
+    /// [`ModelState::Missing`] and [`ModelState::Damaged`] (it comes from the definition, not
+    /// from the file), so a host maps a verify problem on a blob to its model.
+    pub blob_hash: String,
     /// The estimate its definition records from the import (the f32 embedding matrix plus the
     /// tokenizer FILE; the tokenizer's in-memory form is many times that). Kept for versions up
     /// to 0.5.2, whose memory check reads it; this version neither checks nor shows it: see
@@ -373,6 +379,7 @@ pub(crate) fn model_info(
         gated: model.gated(),
         default: model.is_default(),
         bytes: model.blob().length(),
+        blob_hash: model.blob().hash_hex(),
         load_bytes: model.load_bytes(),
         memory_bytes: match &state {
             ModelState::Loaded => registry::loaded_bytes(definition.name()),

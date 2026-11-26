@@ -357,6 +357,59 @@ fn verify_reports_a_damaged_model_blob_with_the_texts_it_always_had() {
     assert_eq!(model_verdict(&store), (vec![], "NotLoaded".to_string()));
 }
 
+/// `ModelInfo::blob_hash` is the content address of the model's blob: the file name under
+/// `blobs/`, the name a verify problem gives. It comes from the definition, so a missing (and a
+/// damaged) blob still names its hash, and a host maps the problem to its model.
+#[test]
+fn a_model_names_its_blob_hash_also_when_the_blob_is_missing() {
+    let temp = Temp::new("blob-hash");
+    let path = temp.join("s");
+    let store = Store::create(&path, options()).unwrap();
+    let model = import(&store, 1, "acme/tiny").model;
+    let blob = blob_path(&path, &store, &model.identity);
+    let file_name = blob.file_name().unwrap().to_string_lossy().to_string();
+    assert_eq!(model.blob_hash, file_name);
+    assert_eq!(model.blob_hash.len(), 64, "SHA-256 as hex");
+    assert!(
+        model
+            .blob_hash
+            .chars()
+            .all(|c| c.is_ascii_digit() || ('a'..='f').contains(&c)),
+        "lowercase hex: {}",
+        model.blob_hash
+    );
+    assert_eq!(blob_files(&path), vec![file_name.clone()]);
+    let listed = store.models().unwrap();
+    assert_eq!(listed[0].blob_hash, model.blob_hash);
+    assert_eq!(listed[0].state, ModelState::NotLoaded);
+
+    // Damaged: still the same hash.
+    let good = fs::read(&blob).unwrap();
+    flip_byte(&blob);
+    let report = store.verify().unwrap();
+    assert!(matches!(report.models[0].state, ModelState::Damaged { .. }));
+    assert_eq!(report.models[0].blob_hash, model.blob_hash);
+    fs::write(&blob, &good).unwrap();
+
+    // Missing: the verify problem names the blob by the hash the model gives.
+    fs::remove_file(&blob).unwrap();
+    let listed = store.models().unwrap();
+    assert_eq!(listed[0].state, ModelState::Missing);
+    assert_eq!(listed[0].blob_hash, model.blob_hash);
+    let report = store.verify().unwrap();
+    assert_eq!(report.models[0].state, ModelState::Missing);
+    assert_eq!(report.models[0].blob_hash, model.blob_hash);
+    let expected = format!("blobs/{}/{}", &model.blob_hash[..2], model.blob_hash);
+    assert!(
+        report
+            .problems
+            .iter()
+            .any(|p| p.path == expected && p.reason == "the blob is missing"),
+        "{expected}: {:?}",
+        report.problems
+    );
+}
+
 #[test]
 fn every_copy_carries_the_models() {
     let temp = Temp::new("copies");
