@@ -4600,6 +4600,56 @@ mod embed_models {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// `store models` shows each model's blob (its content address: the file name under
+    /// `blobs/`, the name a verify problem gives), also when the blob is missing.
+    #[test]
+    fn store_models_names_the_blob_of_each_model() {
+        let base = fresh_dir("m2v_blob_row");
+        let model = base.join("model");
+        write_model(&model);
+        let store = base.join("store");
+        create_store(&store);
+        let (model_text, store_text) = (model.display().to_string(), store.display().to_string());
+        let res = run_env(
+            &[
+                "embed-model",
+                "import",
+                &model_text,
+                "--into",
+                &store_text,
+                "--repo",
+                "acme/tiny",
+            ],
+            &[],
+        );
+        assert_eq!(res.code, 0, "{} {}", res.stdout, res.stderr);
+        // The one blob file of the store.
+        let mut blobs = Vec::new();
+        for dir in std::fs::read_dir(store.join("blobs")).unwrap().flatten() {
+            if dir.path().is_dir() {
+                for file in std::fs::read_dir(dir.path()).unwrap().flatten() {
+                    blobs.push(file.path());
+                }
+            }
+        }
+        assert_eq!(blobs.len(), 1, "{blobs:?}");
+        let hash = blobs[0].file_name().unwrap().to_string_lossy().to_string();
+        let row = format!("\n  blob:         {hash}\n");
+        let listed = run_env(&["store", "models", &store_text], &[]);
+        assert_eq!(listed.code, 0, "{}", listed.stderr);
+        assert!(listed.stdout.contains(&row), "{row:?}\n{}", listed.stdout);
+        std::fs::remove_file(&blobs[0]).unwrap();
+        let listed = run_env(&["store", "models", &store_text], &[]);
+        assert_eq!(listed.code, 0, "{}", listed.stderr);
+        assert!(listed.stdout.contains(&row), "{row:?}\n{}", listed.stdout);
+        assert!(
+            listed.stdout.contains("its blob is missing"),
+            "{}",
+            listed.stdout
+        );
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
     /// `embed-model import --default` makes the model the store's default, `--replace` puts a
     /// new revision of the repository in place of the old one, `store models default` changes
     /// the default; the database serves its default to `embed` without a name.

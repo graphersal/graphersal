@@ -1259,6 +1259,9 @@ pub fn model_value(model: &ModelInfo, used: bool) -> Value {
         "default": model.default,
         "bytes": model.bytes,
         "bytesText": bytes_text(model.bytes),
+        // The blob's content address (its file name under `blobs/`), so a verify problem on a
+        // blob names its model.
+        "blobHash": model.blob_hash,
         "loadBytes": model.load_bytes,
         // The size shown (user decision 2026-11-04): in memory when loaded, else on disk.
         "memoryBytes": model.memory_bytes,
@@ -1775,6 +1778,22 @@ mod tests {
         let mut bytes = Vec::new();
         store.export_packed(None, &mut bytes).unwrap();
         (bytes, model)
+    }
+
+    /// A model of the Store menu names its blob's content address (`blobHash`), the file name
+    /// under `blobs/` a verify problem gives.
+    #[test]
+    fn a_listed_model_names_its_blob_hash() {
+        let (packed, model) = packed_with_a_model();
+        assert_eq!(model.blob_hash.len(), 64);
+        let mut s = memory_session();
+        s.load_snapshot(&packed, "with-model.gsnap").unwrap();
+        let models = s.store_models().unwrap();
+        assert_eq!(
+            models["models"][0]["blobHash"],
+            model.blob_hash.as_str(),
+            "{models}"
+        );
     }
 
     #[test]

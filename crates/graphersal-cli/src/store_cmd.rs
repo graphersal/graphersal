@@ -379,8 +379,9 @@ pub fn command_help(command: &str) -> Option<String> {
              the licence text comes from (from the repository: its own licence file;\n\
              standard text: the repository has no licence file, so the store keeps the unchanged\n\
              standard text of the licence the model card names; none: no standard text for this\n\
-             licence), whether it is the default, what in the schema uses it, and whether the\n\
-             repository is gated. `remove` drops the model of REPO from the\n\
+             licence), whether it is the default, what in the schema uses it, whether the\n\
+             repository is gated, and its blob (the content address: its file name under blobs/,\n\
+             as a verify problem names it). `remove` drops the model of REPO from the\n\
              current state: ONE commit appended to the WAL without loading the graph (format\n\
              spec 12.12; earlier positions keep it, a prune removes its blob later); refused\n\
              while the schema needs it, and with \"in use\" while a writer has the store open.\n\
@@ -690,6 +691,9 @@ pub fn model_sections(models: &[(&ModelInfo, bool)], missing: &[&String]) -> Str
     for (model, used) in models {
         let mut section = crate::sections::Section::new("Embedding model");
         section.rows(model_rows(model, *used));
+        // The blob's content address (its file name under `blobs/`), never wrapped, so a
+        // verify problem on a blob is matched to its model.
+        section.unwrapped("blob", model.blob_hash.clone());
         sections.push(section);
     }
     for identity in missing {
