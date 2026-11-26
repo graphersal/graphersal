@@ -182,6 +182,9 @@ impl PersistentStorage for LayeredGraph {
             .map_err(|err| err.to_string())?;
         self.units
             .raise_position(changes.commit_seq(), changes.committed_at());
+        // A change set that left the layer without changes (a reset): fresh bookkeeping, as
+        // after the reset itself (module `reset`).
+        self.compact_if_clean();
         Ok(())
     }
 

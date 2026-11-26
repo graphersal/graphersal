@@ -159,7 +159,9 @@ export class WasmEngine extends Engine {
     // ai: null: the AI Chat needs the local dev server (`--ai`); the tab is read-only here.
     // layers: Start / Drop layer over the loaded graph (a cached, older worker.js lacks them).
     const layers = Array.isArray(meta.methods) && meta.methods.includes('startLayer');
-    return { name: 'wasm', version: meta.version, memoryTracked: meta.memoryTracked, storeMemory, layers, ai: null };
+    // layerReset: Discard all changes of a layer (an older cached worker.js lacks it).
+    const layerReset = Array.isArray(meta.methods) && meta.methods.includes('resetLayer');
+    return { name: 'wasm', version: meta.version, memoryTracked: meta.memoryTracked, storeMemory, layers, layerReset, ai: null };
   }
 
   // The AI Chat stub: the agent runs in the dev server only (the API key never reaches a page).
@@ -566,6 +568,12 @@ export class WasmEngine extends Engine {
 
   async dropLayer() {
     const res = await this.call('dropLayer');
+    if (res && res.ok && res.info) this.graph = res.info;
+    return res;
+  }
+
+  async resetLayer() {
+    const res = await this.call('resetLayer');
     if (res && res.ok && res.info) this.graph = res.info;
     return res;
   }

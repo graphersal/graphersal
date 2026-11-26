@@ -1297,7 +1297,9 @@ impl LayeredGraph {
         }
     }
 
-    /// Stores a vertex the write rules accepted: its id checked, then the delta insert.
+    /// Stores a vertex the write rules accepted: its id checked, then the delta insert; a
+    /// vertex with the id and the exact state of a base vertex the layer removed is that base
+    /// vertex again (module `reset`).
     fn store_vertex(
         &mut self,
         id: Option<CompactString>,
@@ -1308,6 +1310,10 @@ impl LayeredGraph {
         if let Err(err) = write_rules::check_vertex_id_free(&*self, &id) {
             self.node_sequence = sequence;
             return Err(err);
+        }
+        if let Some(node) = self.removed_base_vertex_like(&id, &labels, &properties) {
+            self.restore_removed_base_vertex(node)?;
+            return Ok(LayeredVertex::from_base(node));
         }
         let logged = self.units.is_recording().then(|| id.clone());
         let node = self
@@ -1321,7 +1327,9 @@ impl LayeredGraph {
 
     /// Stores an edge the write rules accepted (both endpoints live) once its id is checked:
     /// in the delta topology, a base endpoint through its stub (created on first use, after
-    /// the id check, so a failed write leaves no stub and no dirty bit).
+    /// the id check, so a failed write leaves no stub and no dirty bit). An edge with the id,
+    /// the endpoints and the exact state of a base edge the layer removed is that base edge
+    /// again (module `reset`).
     fn store_edge(
         &mut self,
         id: Option<CompactString>,
@@ -1331,6 +1339,12 @@ impl LayeredGraph {
         properties: PropertyMap,
     ) -> Result<LayeredEdge, GraphError> {
         let id = self.edge_id_for(id)?;
+        if let Some(edge) =
+            self.removed_base_edge_like(&id, label.as_deref(), from, to, &properties)
+        {
+            self.restore_removed_base_edge(edge);
+            return Ok(LayeredEdge::from_base(edge));
+        }
         let from = self.edge_endpoint(from)?;
         let to = self.edge_endpoint(to)?;
         let logged = self.units.is_recording().then(|| id.clone());

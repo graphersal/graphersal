@@ -234,10 +234,10 @@ pub use crate::graph::{
     CommitMetadata, Definition, DefinitionKind, EdgeHandle, EdgeState, ElementRef, ExecutionPolicy,
     Graph, GraphNodeType, GraphRead, GraphStatistics, GraphStorage, GraphWrite, HookError,
     IntoAnyGraph, IsolationLevel, JournalSlot, LayerBase, LayerCounts, LayerDiff, LayerDiffChange,
-    LayerDiffEntry, LayerDiffRequest, LayerOrigin, LayerPropertyChange, LayerSummary, LayeredEdge,
-    LayeredGraph, LayeredVertex, Mark, MemoryStats, Mutation, RollbackReason, ShrinkReport,
-    StorageCapabilities, StorageIdentity, Transactional, TraversalGraph, UnitChanges, UnitMark,
-    VertexHandle, VertexState,
+    LayerDiffEntry, LayerDiffRequest, LayerOrigin, LayerPropertyChange, LayerReset, LayerSummary,
+    LayeredEdge, LayeredGraph, LayeredVertex, Mark, MemoryStats, Mutation, RollbackReason,
+    ShrinkReport, StorageCapabilities, StorageIdentity, Transactional, TraversalGraph, UnitChanges,
+    UnitMark, VertexHandle, VertexState,
 };
 #[cfg(feature = "persist")]
 pub use crate::graph::{BasePatch, LayerParts, PersistentStorage};

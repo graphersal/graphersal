@@ -806,6 +806,14 @@ export class Engine {
   async dropLayer() { throw notImplemented('dropLayer'); }
 
   /**
+   * Discards every change of the served layer (data, schema, catalog: graphersal_session's
+   * `reset_layer`; dev server `POST /api/layer/reset`) and keeps serving it, now equal to its
+   * base: `{ok: true, reset: {added, modified, removed: {vertices, edges}, schema, definitions},
+   * info}` or `{ok: false, error}` (not a layer, read-only). One commit.
+   */
+  async resetLayer() { throw notImplemented('resetLayer'); }
+
+  /**
    * The workload statistics of the graph: `{level, queries, properties, locks, jobs}`; with
    * `history` (`minutes`, `hours`, `days`) every row has `history: [{start, count, failed,
    * items, total_micros, max_micros}]` of that tier (chart data). Read-only.

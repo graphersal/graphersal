@@ -11,6 +11,9 @@
 //   base_labels, labels, out?, in?, properties: {name: {base?, layer?}}} (a missing side is
 //   absent, not null). Lists come vertices before edges.
 // - `startLayer()` / `dropLayer()` (WebAssembly only): {ok: true, info} or {ok: false, error}.
+// - `resetLayer()` / `POST /api/layer/reset` (any layer, both engines): {ok: true, reset: {added,
+//   modified, removed: {vertices, edges}, schema, definitions}, info} or {ok: false, error}: every
+//   change of the layer discarded in one commit, the layer kept (now equal to its base).
 
 /** The limits the dialog offers (the engine's `limit`), the first is the default. */
 export const DIFF_LIMITS = Object.freeze([100, 500, 2000]);
@@ -239,4 +242,48 @@ export function dropConfirmText(layer) {
   const c = changeCounts(layer);
   const what = c && c.total ? `its ${c.total} change${c.total === 1 ? '' : 's'} (${c.text})` : 'the layer (it has no changes)';
   return `Drop the layer and discard ${what}? The base graph comes back unchanged.`;
+}
+
+// ---------------------------------------------------------------- discard all changes (both engines)
+
+/**
+ * Whether "Discard all changes" is offered in the Layer changes dialog: on any layer (the
+ * WebAssembly playground's and the dev server's `--layer` / `--layer-store`), with an engine that
+ * has `resetLayer` (`engineReset`: an older cached worker lacks it), no read-only view of a past
+ * state, a writable graph (`readOnly`: the reason it is not, e.g. a read-only server), no query
+ * running, the profile key `layerDiff`. With the reason when not.
+ * @param {{engineReset?:boolean, graph?:Object|null, storeView?:Object|null, readOnly?:string|null,
+ *          allowed?:boolean, running?:boolean}} s
+ * @returns {{reset:boolean, reason:string|null}}
+ */
+export function resetAction({ engineReset = false, graph = null, storeView = null, readOnly = null, allowed = true, running = false } = {}) {
+  const no = (reason) => ({ reset: false, reason });
+  if (!allowed) return no('not in this UI profile');
+  if (!graph || !graph.layer) return no('the graph is not a layer');
+  if (!engineReset) return no('this engine build cannot discard a layer\'s changes (rebuild the playground)');
+  if (storeView) return no('a read-only view of a past state is shown');
+  if (readOnly) return no(readOnly);
+  if (running) return no('a query is running');
+  return { reset: true, reason: null };
+}
+
+/** The confirmation text of "Discard all changes" (the layer stays, its changes go). */
+export function resetConfirmText(layer) {
+  const c = changeCounts(layer);
+  const base = (layer && layer.base) || 'the base';
+  const what = c && c.total
+    ? `all ${c.total} change${c.total === 1 ? '' : 's'} of this layer (${c.text})`
+    : 'every change of this layer';
+  return `Discard ${what}, its own schema and catalog changes included? The layer stays and shows ${base} again; ${base} itself is not changed. One commit.`;
+}
+
+/** The notice after a reset (`answer.reset`, the layer's base name). */
+export function resetDoneText(reset, base = 'its base') {
+  if (!reset) return `Layer changes discarded: the layer equals ${base} again.`;
+  const n = count(reset.added) + count(reset.modified) + count(reset.removed);
+  const extra = [reset.schema ? 'the schema' : null, reset.definitions ? `${reset.definitions} catalog definition${reset.definitions === 1 ? '' : 's'}` : null]
+    .filter(Boolean);
+  if (!n && !extra.length) return `The layer had no changes: it already equals ${base}.`;
+  const parts = [`${n} element change${n === 1 ? '' : 's'}`, ...extra];
+  return `Layer changes discarded (${parts.join(', ')}): the layer equals ${base} again.`;
 }

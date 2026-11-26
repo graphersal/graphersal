@@ -616,3 +616,55 @@ mod tests {
         assert!(!some.matches_labels(&[]));
     }
 }
+
+/// What [`LayeredGraph::reset_layer`](crate::graph::LayeredGraph::reset_layer) discarded: the
+/// layer's change counts right before the reset (the elements it added, the base elements it
+/// modified and those it removed, which are the base's again now), whether the layer's own
+/// schema was replaced by the base's and how many catalog definitions were put back to the
+/// base's (stored again, replaced or removed). All zero and `false` when the layer held no
+/// change: then the reset committed nothing.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct LayerReset {
+    /// Elements the layer had created (all removed).
+    pub added: LayerCounts,
+    /// Base elements the layer had changed (their base state again).
+    pub modified: LayerCounts,
+    /// Base elements the layer had removed (visible again).
+    pub removed: LayerCounts,
+    /// The layer's schema differed from the base's and is the base's again.
+    pub schema: bool,
+    /// Catalog definitions (saved queries, jobs, property indexes, ...) that differed from the
+    /// base's and are the base's again.
+    pub definitions: usize,
+}
+
+impl LayerReset {
+    /// `true` when the reset found nothing to discard.
+    pub fn is_empty(&self) -> bool {
+        *self == Self::default()
+    }
+
+    /// The reset as a value: `#{added: #{vertices, edges}, modified: #{..}, removed: #{..},
+    /// schema, definitions}`.
+    ///
+    /// ```
+    /// use graphersal::prelude::*;
+    /// use graphersal::storage::LayerReset;
+    ///
+    /// let ElementProperty::Object(map) = LayerReset::default().to_property() else {
+    ///     unreachable!()
+    /// };
+    /// let keys: Vec<&str> = map.keys().map(|k| k.as_str()).collect();
+    /// assert_eq!(keys, ["added", "modified", "removed", "schema", "definitions"]);
+    /// ```
+    pub fn to_property(&self) -> ElementProperty {
+        let mut map = PropertyMap::default();
+        map.insert("added", self.added.to_property());
+        map.insert("modified", self.modified.to_property());
+        map.insert("removed", self.removed.to_property());
+        map.insert("schema", ElementProperty::from(self.schema));
+        map.insert("definitions", count_value(self.definitions as u64));
+        ElementProperty::Object(Box::new(map))
+    }
+}

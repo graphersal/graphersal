@@ -186,6 +186,12 @@ this appears for a plain graph.
   the base. In the tracked process heap it is part of `other`. Optimize → Memory has a **Delta
   only** switch: the memory report then walks only the layer's added and modified elements
   (`scope: "delta"`), and the base stays the single figure `shared_bytes`.
+- **Discard all changes.** The Layer changes dialog has **Discard all changes…** on every
+  writable layer, in the browser and on the dev server (`--layer`, `--layer-store`). After a
+  confirmation it discards everything the layer changed (see
+  [Discarding a layer's changes](#discarding-a-layers-changes)) in one commit; the layer stays
+  and shows its base again, the badge counts drop to zero. It is not offered on a read-only
+  server or while a read-only view of a past state is open.
 - **Starting a layer in the browser.** The WebAssembly playground can make a layer without a
   server. Load a graph, then choose **Store ▸ Start a layer over this graph**. Writes now go to
   the layer and the badge shows them. **Drop layer** in the Layer changes dialog discards the
@@ -193,8 +199,65 @@ this appears for a plain graph.
   engine and restores the graph as it was loaded or last saved, so the layer is lost. On the
   dev server the layer comes from `--layer` / `--layer-store`, and neither action is offered.
 
-The UI profile key `layerDiff` turns the badge, the dialog and the two actions on or off
+The UI profile key `layerDiff` turns the badge, the dialog and its actions on or off
 (the built-in `full` profile has it on).
+
+## Discarding a layer's changes
+
+A reset throws away everything a layer changed and keeps the layer: afterwards it reads
+exactly as its base, `g.layer_diff()` is empty and the badge shows `+0 ~0 −0`. The base is
+never written, so other layers over it are not affected. Use it to start a project layer over
+from scratch without building a new layer or a new layer store.
+
+| Where | How |
+|---|---|
+| Rust | `LayeredGraph::reset_layer()`, or `Graph<LayeredGraph>::reset_layer()` (also on a layer store's live graph, `store.graph().reset_layer()`) |
+| Playground | the Layer changes dialog, **Discard all changes…** |
+| Dev server | `POST /api/layer/reset` (no body) |
+| Session (embedding hosts) | `Session::reset_layer()` |
+
+What it discards:
+
+- the vertices and edges the layer added (with the edges they had to base vertices);
+- its changes to base elements: properties and labels are the base's again;
+- the base elements it removed: they are back, with the ids, labels, properties and edges they
+  have in the base;
+- its own schema and catalog changes (saved queries, jobs, property indexes defined or dropped
+  on the layer): both are the base's again.
+
+It is **one commit**, an ordinary unit like a query: it succeeds or leaves the layer as it
+was, a dry run or a failing transaction around it changes nothing, and commit hooks get its
+change set (the drops, the values written back and the base elements created again). On a
+layer store the commit is in the write-ahead log like any other, so a reopen or a recovery
+gives the reset layer, and `store rollback` can go back before it. The cost follows the size
+of the layer's changes, not of the base. A layer without changes commits nothing.
+
+What it keeps: the commit position and history, the store and its settings, and the id
+sequences: an element created after the reset gets a new id, never one handed out before.
+Workload statistics are not graph data and stay as they are.
+
+A related rule makes the reset replayable: a vertex created with the id and exactly the state
+of a base vertex the layer removed (the same labels in the same order, the same properties in
+the same order) is that base vertex again, not a new element; the same holds for an edge with
+the id, endpoints, label and properties of a removed base edge. Such an element counts as
+`base` and the diff no longer lists it.
+
+```rust
+use std::sync::Arc;
+use graphersal::prelude::*;
+use graphersal::storage::{Graph, LayerDiffRequest, LayeredGraph};
+
+let base = Arc::new(TraversalGraph::tinkerpop_modern());
+let layer = Graph::new(LayeredGraph::over(base).unwrap());
+GraphTraversalSource::new(&mut *layer.write())
+    .v("1").property("age", 30).iterate().unwrap();
+GraphTraversalSource::new(&mut *layer.write()).add_v("person").iterate().unwrap();
+
+let reset = layer.reset_layer().unwrap();
+assert_eq!((reset.added.vertices, reset.modified.vertices), (1, 1));
+assert!(layer.read().layer_diff(&LayerDiffRequest::new()).unwrap().is_empty());
+assert_eq!(layer.read().vertex_count().unwrap(), 6);
+```
 
 ## Keeping a layer durably: `--layer-store`
 
@@ -369,6 +432,9 @@ code written for layers already run.
 
 ## Limitations
 
+- **Discarding only part of a layer.** A reset discards everything; to keep some changes,
+  roll a layer store back to a mark or a time instead (`store rollback`), or write the
+  changes back by hand.
 - **Persistence.** From Rust a layer can be saved as a layer snapshot (above) or kept in a
   layer Store, which journals every commit and opens again only over the same base
   (`graphersal store info` shows a layer store's base); the CLI and the dev server keep it

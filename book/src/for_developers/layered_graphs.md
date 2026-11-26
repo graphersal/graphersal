@@ -145,6 +145,19 @@ assert_eq!(shared.read().vertex_count().unwrap(), 6);
 - **Schema and catalog:** the layer copies the base's schema and catalog when it is created.
   From then on it reads and writes only its copies: `set_schema` checks the layer's own data,
   with the errors of a `TraversalGraph`.
+- **Reset** (`LayeredGraph::reset_layer`, `Graph<LayeredGraph>::reset_layer`): one unit that
+  writes the inverse of the delta through the layer's own write paths: added edges and
+  vertices dropped, modified base edges dropped and restored, modified base vertices written
+  back (labels, then properties) until their image is identical to the base, removed base
+  elements restored, then the catalog and the schema put back to the base's. When base
+  elements are put back, the unit first sets "no schema" and removes the unique index
+  definitions, so its change set passes the write rules at every step when a journal replays
+  it or a replica applies it. A create with the id and the exact state of a removed base
+  element restores that element (the change set's `AddVertex`/`AddEdge` replay to the same
+  state). After its own commit, and after a replayed change set that leaves the layer without
+  changes, the layer replaces its empty bookkeeping with a fresh delta (keeping the delta's
+  slot generations, so no stale handle aliases a later element) and clear dirty bits. User
+  guide: [Discarding a layer's changes](../users_guide/layered_graphs.md#discarding-a-layers-changes).
 
 ## Capabilities
 

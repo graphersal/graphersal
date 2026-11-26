@@ -100,6 +100,7 @@ const JSON_METHODS = {
   layerDiff: (spec) => playground.layerDiff(JSON.stringify(spec || {})),
   startLayer: () => playground.startLayer(),
   dropLayer: () => playground.dropLayer(),
+  resetLayer: () => playground.resetLayer(),
   workloadReport: (history) => playground.workloadReport(history || undefined),
   // The System journal panel (graphersal_session::journal).
   journal: (spec) => playground.journal(JSON.stringify(spec || {})),

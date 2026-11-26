@@ -96,6 +96,11 @@
 //! `layer_parts` for an encoder, replay of journaled change sets outside units, `clear` back
 //! to an empty layer over the same base.
 //!
+//! Reset (task A4, `reset`): [`LayeredGraph::reset_layer`] discards every change of the layer
+//! (data, schema, catalog) in one ordinary unit, writing the inverse of the delta; a create
+//! with the id and the exact state of a removed base element restores that element; a layer
+//! left without changes gets fresh bookkeeping after the reset's commit and after a replay.
+//!
 //! Memory (S1.11, `memory`): `memory_usage` reports the layer's own footprint as the total
 //! and the shared base as `MemoryStats::shared_bytes`, outside the total; the process memory
 //! ceiling checks the outermost unit at its commit on the layer's own footprint, as
@@ -110,6 +115,7 @@ mod index;
 mod memory;
 #[cfg(feature = "persist")]
 mod persist;
+mod reset;
 mod route;
 mod rules;
 mod storage;
@@ -148,7 +154,10 @@ use units::UnitLog;
 /// jobs, host kinds, property indexes: defined, dropped and redefined on the layer only, a
 /// unique one checked over the layer's data); units with an undo log of its own (a traversal that fails leaves
 /// nothing); change capture (commit hooks, dry runs) with the change sets a `TraversalGraph`
-/// reports for the same writes; the process memory ceiling at commit.
+/// reports for the same writes; the process memory ceiling at commit; a reset that discards
+/// every change in one unit ([`LayeredGraph::reset_layer`]). A create with the id and the
+/// exact state of a base element the layer removed restores that base element (its base
+/// handle, its base position) instead of adding a new one.
 ///
 /// **Capabilities:** `writable`, `atomic`, `change_capture`, `property_indexes`, and
 /// `exact_property_index_lookups` as the base states it. Not `durability`.

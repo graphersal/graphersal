@@ -728,6 +728,26 @@
         }
       }
     },
+    "/api/layer/reset": {
+      "post": {
+        "tags": [
+          "Graph"
+        ],
+        "summary": "Discard a layer's changes",
+        "description": "Discards every change the served layer (`--layer`, `--layer-store`) made over its base (data, schema, catalog) in ONE commit (journaled on a layer store); the base is never written, the layer is served on, now equal to its base. No body. `{ok: true, reset: {added, modified, removed: {vertices, edges}, schema, definitions}, info}` (what was discarded, the new graph info) or `{ok: false, error}` (not a layer, a read-only graph). A writing route: refused on a read-only request.",
+        "operationId": "postApiLayerReset",
+        "responses": {
+          "200": {
+            "description": "JSON answer.",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/workload": {
       "get": {
         "tags": [

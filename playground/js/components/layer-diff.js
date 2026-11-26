@@ -6,17 +6,21 @@
 //   edges, with a kind and a label filter, a limit and the truncated notice. A click on an added
 //   or modified entry draws its neighbourhood in the Graph panel and opens it in the inspector
 //   (an edge: its out vertex's neighbourhood); removed elements are listed only (they are not in
-//   the graph any more). In the WebAssembly playground the dialog's footer has Drop layer (Start
-//   layer is in the Store menu, components/store-menu.js). Reloaded when it opens and after
-//   every change of the graph while it is open.
+//   the graph any more). The footer has "Discard all changes…" on every writable layer (both
+//   engines: `resetLayer`, one commit, the layer stays and equals its base again), with a confirm;
+//   in the WebAssembly playground also Drop layer (Start layer is in the Store menu,
+//   components/store-menu.js). Reloaded when it opens and after every change of the graph while
+//   it is open.
 // Model: js/layer-diff.js.
 
 import { ref, reactive, computed, watch } from 'vue';
-import { state, can, isServerMode, openLayerDiff, showNeighbourhood, switchLayer } from '../store.js';
+import { state, can, isServerMode, openLayerDiff, showNeighbourhood, switchLayer, resetLayer } from '../store.js';
+import { serverReadOnlyReason } from '../server-mode.js';
 import { formatValue } from '../util.js';
 import { formatBytes } from '../statistics.js';
 import {
   DIFF_KINDS, DIFF_LIMITS, initialDiffState, diffSpec, diffModel, layerBadge, layerActions, dropConfirmText,
+  resetAction, resetConfirmText,
 } from '../layer-diff.js';
 
 const message = (err) => (err && err.message ? err.message : String(err));
@@ -42,6 +46,7 @@ export const LayerDiffDialog = {
     const loading = ref(false);
     const error = ref('');
     const askDrop = ref(false);
+    const askReset = ref(false);
     let seq = 0;
 
     const layer = computed(() => (state.graph ? state.graph.layer || null : null));
@@ -50,6 +55,14 @@ export const LayerDiffDialog = {
       engineLayers: !!(state.engineInfo && state.engineInfo.layers),
       graph: state.graph,
       storeView: state.storeView,
+      allowed: can('layerDiff'),
+      running: state.running,
+    }));
+    const reset = computed(() => resetAction({
+      engineReset: !!(state.engineInfo && state.engineInfo.layerReset),
+      graph: state.graph,
+      storeView: state.storeView,
+      readOnly: serverReadOnlyReason(state.engineInfo),
       allowed: can('layerDiff'),
       running: state.running,
     }));
@@ -72,6 +85,7 @@ export const LayerDiffDialog = {
     const isOpen = () => !!(dlg.value && dlg.value.open);
     function open() {
       askDrop.value = false;
+      askReset.value = false;
       if (dlg.value && !dlg.value.open) dlg.value.showModal();
       load();
     }
@@ -93,6 +107,12 @@ export const LayerDiffDialog = {
       showNeighbourhood(entry.focus.vertex, entry.focus.element);
     }
 
+    async function discard() {
+      const res = await resetLayer();
+      askReset.value = false;
+      if (res && res.ok) load();
+    }
+
     async function drop() {
       const res = await switchLayer('drop');
       if (res && res.ok) close();
@@ -101,6 +121,7 @@ export const LayerDiffDialog = {
 
     return {
       state, dlg, filter, loading, error, model, layer, actions, askDrop, DIFF_KINDS, DIFF_LIMITS,
+      reset, askReset, discard, resetText: computed(() => resetConfirmText(layer.value)),
       load, close, focus, drop, dropText: computed(() => dropConfirmText(layer.value)),
     };
   },
@@ -153,9 +174,20 @@ export const LayerDiffDialog = {
           </ul>
         </section>
       </template>
+      <div v-if="reset.reset" class="layer-foot">
+        <template v-if="!askReset">
+          <button type="button" class="btn danger" :disabled="state.layerBusy || askDrop" @click="askReset = true"
+            title="Discard every change of this layer (data, schema, catalog) in one commit; the layer stays and shows its base again, the base is not changed">Discard all changes…</button>
+        </template>
+        <template v-else>
+          <span>{{ resetText }}</span>
+          <button type="button" class="btn danger" :disabled="state.layerBusy" @click="discard">{{ state.layerBusy ? 'Discarding…' : 'Discard all changes' }}</button>
+          <button type="button" class="btn" @click="askReset = false">Cancel</button>
+        </template>
+      </div>
       <div v-if="actions.drop" class="layer-foot">
         <template v-if="!askDrop">
-          <button type="button" class="btn danger" :disabled="state.layerBusy" @click="askDrop = true"
+          <button type="button" class="btn danger" :disabled="state.layerBusy || askReset" @click="askDrop = true"
             title="Discard this layer's changes and continue on its base">Drop layer…</button>
         </template>
         <template v-else>

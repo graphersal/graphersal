@@ -93,7 +93,7 @@ pub use hooks::{
 pub(crate) use index::GraphIndex;
 pub use layer_diff::{
     LayerCounts, LayerDiff, LayerDiffChange, LayerDiffEntry, LayerDiffRequest, LayerOrigin,
-    LayerPropertyChange, LayerSummary,
+    LayerPropertyChange, LayerReset, LayerSummary,
 };
 pub use layered::{BaseRef, LayerBase, LayeredEdge, LayeredGraph, LayeredVertex};
 pub use memory::{MemoryStats, ShrinkReport};

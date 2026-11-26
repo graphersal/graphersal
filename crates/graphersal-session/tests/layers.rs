@@ -406,3 +406,64 @@ fn start_layer_after_a_job_tick_releases_the_scheduler() {
     assert!(session.has_store());
     session.tick_jobs(1_700_000_010_000).unwrap();
 }
+
+/// `reset_layer` discards every change of the served layer (the dev server's `--layer`, one
+/// the session started) and keeps serving the layer, now equal to its base; refused on a plain
+/// graph; a second reset finds nothing.
+#[test]
+fn reset_layer_discards_the_changes_and_keeps_the_layer() {
+    let mut started = plain();
+    assert_eq!(started.start_layer()["ok"], true);
+    for (what, mut session) in [("host layer", layered()), ("started layer", started)] {
+        change(&mut session);
+        run(
+            &mut session,
+            r#"g.define_query(#{name: "q_layer", body: "fn q_layer() { g.v().count() }"})"#,
+        );
+        let reset = session.reset_layer();
+        assert_eq!(reset["ok"], true, "{what}: {reset}");
+        assert_eq!(
+            reset["reset"]["added"],
+            json!({"vertices": 1, "edges": 1}),
+            "{what}: {reset}"
+        );
+        assert_eq!(
+            reset["reset"]["modified"],
+            json!({"vertices": 1, "edges": 0})
+        );
+        assert_eq!(
+            reset["reset"]["removed"],
+            json!({"vertices": 1, "edges": 1})
+        );
+        assert_eq!(reset["reset"]["definitions"], 1, "{what}: the saved query");
+        assert_eq!(reset["reset"]["schema"], false);
+        let layer = &reset["info"]["layer"];
+        assert!(layer.is_object(), "{what}: still a layer: {reset}");
+        for side in ["added", "modified", "removed"] {
+            assert_eq!(
+                layer[side],
+                json!({"vertices": 0, "edges": 0}),
+                "{what}: {side}"
+            );
+        }
+        let diff = session.layer_diff(&Value::Null);
+        for list in ["added", "removed", "modified"] {
+            assert_eq!(diff["diff"][list], json!([]), "{what}: {diff}");
+        }
+        let ages = run(&mut session, r#"g.v(1).values("age")"#);
+        assert_eq!(ages["execution"]["results"], json!([29]), "{what}: {ages}");
+        assert_eq!(session.info().unwrap()["vertexCount"], 6);
+        // Writable afterwards; nothing left to discard after a second reset of nothing new.
+        run(&mut session, r#"g.add_v("person").iterate()"#);
+        assert_eq!(session.reset_layer()["reset"]["added"]["vertices"], 1);
+        let empty = session.reset_layer();
+        assert_eq!(empty["ok"], true, "{empty}");
+        assert_eq!(empty["reset"]["added"], json!({"vertices": 0, "edges": 0}));
+    }
+    let refused = plain().reset_layer();
+    assert_eq!(refused["ok"], false, "{refused}");
+    assert!(
+        refused["error"].as_str().unwrap().contains("not a layer"),
+        "{refused}"
+    );
+}

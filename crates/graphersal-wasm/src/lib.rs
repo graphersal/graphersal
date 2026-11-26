@@ -546,6 +546,14 @@ impl Playground {
         to_text(&self.session.drop_layer())
     }
 
+    /// Discards every change of the served layer and keeps serving it, now equal to its base:
+    /// `{ok: true, reset, info}` (what was discarded, the graph info) or `{ok: false, error}`
+    /// (see [`Session::reset_layer`]).
+    #[wasm_bindgen(js_name = resetLayer)]
+    pub fn reset_layer(&mut self) -> String {
+        to_text(&self.session.reset_layer())
+    }
+
     /// The workload statistics of the served graph (JSON text, see
     /// [`Session::workload_report`]); with `history` (`minutes`, `hours`, `days`) every row's
     /// buckets of that tier ([`Session::workload_report_with_history`]).

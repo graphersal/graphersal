@@ -95,6 +95,7 @@ pub(crate) fn route_access(method: &Method, endpoint: &str) -> Option<RouteAcces
             | "element/update"
             | "element/create"
             | "element/delete"
+            | "layer/reset"
             | "advise/apply"
             | "advise/dismiss"
             | "advise/restore"
@@ -205,6 +206,15 @@ mod tests {
                 "/api/{endpoint} has no access class: add it to route_access"
             );
         }
+    }
+
+    #[test]
+    fn a_layer_reset_is_a_write() {
+        assert_eq!(
+            route_access(&Method::Post, "layer/reset"),
+            Some(RouteAccess::Write)
+        );
+        assert_eq!(route_access(&Method::Get, "layer/reset"), None);
     }
 
     #[test]

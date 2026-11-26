@@ -426,6 +426,39 @@ fn the_layer_diff_endpoint_answers_the_sessions_diff() {
     assert_eq!(foreign_host.status(), 403);
 }
 
+/// `POST /api/layer/reset`: the session's `reset_layer` (one commit; the layer stays, now equal
+/// to its base), `{ok: false, error}` on a plain graph, POST only (its access class: the test
+/// `a_layer_reset_is_a_write` of `api/access.rs`).
+#[test]
+fn the_layer_reset_endpoint_discards_the_layers_changes() {
+    let plain = context();
+    let refused = body_json(&handle(&plain, json_request("/api/layer/reset", b"{}")));
+    assert_eq!(refused["ok"], false, "{refused}");
+
+    let layer = layer_context();
+    let written = handle(
+        &layer,
+        json_request(
+            "/api/execute",
+            br#"{"script": "g.v(1).property(\"age\", 30).iterate(); g.add_v(\"person\").iterate()"}"#,
+        ),
+    );
+    assert_eq!(written.status(), 200);
+    let answer = body_json(&handle(&layer, json_request("/api/layer/reset", b"{}")));
+    assert_eq!(answer["ok"], true, "{answer}");
+    assert_eq!(answer["reset"]["added"]["vertices"], 1, "{answer}");
+    assert_eq!(answer["reset"]["modified"]["vertices"], 1, "{answer}");
+    assert_eq!(answer["info"]["layer"]["added"]["vertices"], 0, "{answer}");
+    let diff = body_json(&handle(&layer, json_request("/api/layer/diff", b"{}")));
+    assert_eq!(
+        diff["diff"],
+        json!({"added": [], "removed": [], "modified": [], "truncated": false}),
+        "{diff}"
+    );
+    let wrong_method = handle(&layer, request(Method::Get, "/api/layer/reset", b""));
+    assert_eq!(wrong_method.status(), 405);
+}
+
 /// Waits until `runs` holds `n` runs: the test follows the server, not the clock.
 fn wait_for_runs(runs: &Runs, n: usize) {
     let deadline = Instant::now() + Duration::from_secs(60);
