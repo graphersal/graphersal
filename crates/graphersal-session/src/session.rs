@@ -93,7 +93,11 @@ impl RunOptions {
 /// preset traversal option, no script budget. The dev server of `graphersal-cli` fills them from
 /// its `--timeout`, `--max-*` ... flags. The process memory ceiling (`memory.limit`) is not a
 /// preset: it is one setting of the whole process (`graphersal::exec::set_memory_limit`).
-#[derive(Debug, Clone)]
+///
+/// `PartialEq` compares the options by the values' logical equality ([`ElementProperty`]'s
+/// `PartialEq`): a host uses it to tell whether a session already runs under given presets
+/// ([`Session::set_presets`]).
+#[derive(Debug, Clone, PartialEq)]
 #[non_exhaustive]
 pub struct SessionPresets {
     /// The Rhai resource limits of the session's engine.
@@ -304,6 +308,54 @@ impl Default for Session {
     }
 }
 
+/// The Rhai engine of a session under `presets`: their limits and preset options (as ceilings
+/// when [`SessionPresets::ceilings`]), the playground authorizer, and the progress callback that
+/// stops a run on the token in `token` or past the presets' script budget measured from the
+/// start in `clock`.
+fn build_engine(
+    presets: &SessionPresets,
+    token: Arc<Mutex<CancelToken>>,
+    clock: Arc<Mutex<Option<web_time::Instant>>>,
+) -> rhai::Engine {
+    let mut engine = if presets.ceilings {
+        graphersal::script::engine_with_ceilings(
+            &presets.limits,
+            playground_authorizer(),
+            &presets.option_slice(),
+        )
+    } else {
+        graphersal::script::engine_with_options(
+            &presets.limits,
+            playground_authorizer(),
+            &presets.option_slice(),
+        )
+    };
+    let budget = presets
+        .script_timeout_ms
+        .map(std::time::Duration::from_millis);
+    engine.on_progress(move |ops| {
+        if ops & 255 != 0 {
+            return None;
+        }
+        // Both slots hold a plain value (a token, an instant) that a panic cannot leave
+        // half-written: a poisoned lock is read through, never taken as "not cancelled".
+        if token
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .is_cancelled()
+        {
+            return Some(Dynamic::from(CANCELLED_DIAGNOSTIC));
+        }
+        let limit = budget?;
+        let start = (*clock
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner))?;
+        let elapsed = start.elapsed();
+        (elapsed >= limit).then(|| Dynamic::from(script_timeout_diagnostic(limit, elapsed)))
+    });
+    engine
+}
+
 /// `{data, schema}` of a response: what the committed run changed.
 #[derive(Serialize, Default, Clone, Copy)]
 struct Changes {
@@ -438,48 +490,11 @@ impl Session {
             read_only_runs,
         } = parts;
         let cancel = CancelToken::new();
-        let mut engine = if presets.ceilings {
-            graphersal::script::engine_with_ceilings(
-                &presets.limits,
-                playground_authorizer(),
-                &presets.option_slice(),
-            )
-        } else {
-            graphersal::script::engine_with_options(
-                &presets.limits,
-                playground_authorizer(),
-                &presets.option_slice(),
-            )
-        };
         // A script loop that runs no traversal is stopped here, on Stop or past the script
         // budget; traversals check the token and their own evaluationTimeout themselves.
         let run_cancel = Arc::new(Mutex::new(cancel.clone()));
-        let token = run_cancel.clone();
         let started: Arc<Mutex<Option<web_time::Instant>>> = Arc::new(Mutex::new(None));
-        let clock = started.clone();
-        let budget = presets
-            .script_timeout_ms
-            .map(std::time::Duration::from_millis);
-        engine.on_progress(move |ops| {
-            if ops & 255 != 0 {
-                return None;
-            }
-            // Both slots hold a plain value (a token, an instant) that a panic cannot leave
-            // half-written: a poisoned lock is read through, never taken as "not cancelled".
-            if token
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .is_cancelled()
-            {
-                return Some(Dynamic::from(CANCELLED_DIAGNOSTIC));
-            }
-            let limit = budget?;
-            let start = (*clock
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner))?;
-            let elapsed = start.elapsed();
-            (elapsed >= limit).then(|| Dynamic::from(script_timeout_diagnostic(limit, elapsed)))
-        });
+        let engine = build_engine(&presets, run_cancel.clone(), started.clone());
         Self {
             graph,
             factory,
@@ -1331,6 +1346,19 @@ impl Session {
     /// The host presets of this session.
     pub fn presets(&self) -> &SessionPresets {
         &self.presets
+    }
+
+    /// Replaces the host presets of this session: the next run gets the new Rhai limits,
+    /// preset options, ceilings and script budget (the engine is rebuilt with them). The graph,
+    /// the stores, the scheduled jobs and the run state stay; sessions built from an earlier
+    /// [`Self::template`] keep the presets they were built with. A host that serves the same
+    /// graph from several sessions sets the presets on each of them.
+    ///
+    /// Fails when the presets cannot be applied (reserved; it does not fail today).
+    pub fn set_presets(&mut self, presets: SessionPresets) -> Result<(), SessionError> {
+        self.engine = build_engine(&presets, self.run_cancel.clone(), self.started.clone());
+        self.presets = presets;
+        Ok(())
     }
 
     fn execute_in_scope(
@@ -3844,6 +3872,47 @@ mod tests {
             r#"g.with("traversal.max_traversers", 1000).with("evaluationTimeout", 0).v().to_list()"#,
         );
         assert_eq!(raised["ok"], true, "{raised}");
+    }
+
+    /// `Session::set_presets` replaces the presets of a running session: the next run gets the
+    /// new limits, ceilings and script budget, the graph and the statistics follow, and a
+    /// template taken afterwards carries them.
+    #[test]
+    fn set_presets_applies_to_the_next_run() {
+        let mut s = modern();
+        assert_eq!(run(&mut s, "g.v().to_list()")["ok"], true);
+        let capped = SessionPresets::new()
+            .with_option("traversal.max_traversers", ElementProperty::from(3_i64))
+            .with_ceilings(true)
+            .with_script_timeout_ms(Some(100));
+        s.set_presets(capped.clone()).unwrap();
+        assert_eq!(s.presets(), &capped);
+        assert_eq!(
+            s.info().unwrap()["name"],
+            "Modern (TinkerPop)",
+            "the graph stays"
+        );
+        let refused = run(&mut s, "g.v().to_list()");
+        assert_eq!(refused["ok"], false, "{refused}");
+        let raised = run(
+            &mut s,
+            r#"g.with("traversal.max_traversers", 10).v().to_list()"#,
+        );
+        assert_eq!(raised["ok"], false, "a ceiling: {raised}");
+        let looped = run(&mut s, "let n = 0; loop { n += 1; }");
+        assert_eq!(looped["ok"], false, "the new script budget: {looped}");
+        let stats = s.statistics().unwrap();
+        assert_eq!(
+            stats["limits"]["presets"]["options"]["traversal.max_traversers"],
+            3
+        );
+        let mut copy = s.template().unwrap().session().unwrap();
+        assert_eq!(copy.presets(), &capped);
+        assert_eq!(run(&mut copy, "g.v().to_list()")["ok"], false);
+        // Back to no limit: the same query runs again.
+        s.set_presets(SessionPresets::new()).unwrap();
+        assert_eq!(run(&mut s, "g.v().to_list()")["ok"], true);
+        assert_eq!(run(&mut copy, "g.v().to_list()")["ok"], false, "kept");
     }
 
     /// The process memory block lists the loaded models of the active store and nothing else;

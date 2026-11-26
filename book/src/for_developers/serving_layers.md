@@ -200,6 +200,31 @@ The host's own extra routes (`Hooks::route`) see the mark with `request.is_read_
 decide for themselves. A host that serves MCP in directory mode (`handle_directory`) answers a
 reader's profile from its `GraphDirectory::host` instead.
 
+### Query limits at run time
+
+`launch` (and `ContextBuilder::presets`) take the session presets: the traversal options every
+run gets (`evaluationTimeout`, `traversal.max_traversers`, ...), the Rhai limits, the script
+budget and whether the limits are ceilings (`SessionPresets::with_ceilings`). A host changes
+them on a served context without reloading the graph:
+
+```rust,ignore
+let presets = SessionPresets::new()
+    .with_option("evaluationTimeout", ElementProperty::from(10_000_i64))
+    .with_ceilings(true);
+context.set_presets(presets)?;
+```
+
+- Every run that starts after the call runs under the new presets: a query of the HTTP API, an
+  MCP tool call (also in an MCP session opened before), a scheduled query handed out later.
+  This holds on the session thread and on every worker of a host's `JobQueue`.
+- A run that is already running keeps the presets it started with. The call does not wait for
+  it: each session applies the change just before its next job.
+- `GET /api/info` `presets`, `Context::presets()` and the statistics answer the new presets.
+- Connections, MCP sessions, the graph and the Store stay as they are.
+
+The process memory ceiling (`memory.limit`) is no preset; it stays a setting of the whole
+process. The CLI dev server never changes its presets.
+
 ### File root
 
 Without further settings a client with write access may name any path the server process can

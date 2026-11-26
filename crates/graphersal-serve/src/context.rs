@@ -555,8 +555,9 @@ pub struct Context {
     /// The URL prefix a multi-graph host serves this context under (`/db/acme`, no trailing
     /// `/`; [`ContextBuilder::mount_path`]), or `None`: the server's root.
     pub(crate) mount_path: Option<String>,
-    /// The session presets, as `GET /api/info` reports them.
-    pub(crate) presets: Value,
+    /// The session presets: their JSON (`GET /api/info`) and, once the host changed them
+    /// ([`Context::set_presets`]), the presets every job brings its session to first.
+    pub(crate) presets: Arc<crate::presets::Presets>,
     /// `--read-only` (or a Store opened read-only): the graph refuses every write and
     /// "Save to file" is refused. With [`Self::read_only_toggle`] the toggle's flag, which
     /// [`Context::set_read_only`] flips.
@@ -698,7 +699,8 @@ impl ContextBuilder {
         self
     }
 
-    /// The session presets as `GET /api/info` reports them (`SessionPresets::to_value`).
+    /// The session presets as `GET /api/info` reports them (`SessionPresets::to_value`): the
+    /// presets the session was launched with. [`Context::set_presets`] changes them later.
     pub fn presets(mut self, presets: Value) -> Self {
         self.presets = presets;
         self
@@ -964,7 +966,7 @@ impl ContextBuilder {
             server_name: self.server_name,
             dev: self.dev,
             mount_path: self.mount_path,
-            presets: self.presets,
+            presets: Arc::new(crate::presets::Presets::new(self.presets)),
             read_only: read_only.clone(),
             read_only_toggle: self
                 .runtime_read_only
@@ -1079,6 +1081,29 @@ impl Context {
             toggle.on.store(read_only, Ordering::SeqCst);
             Ok(())
         })
+    }
+
+    /// Changes the session presets (the query limits, their ceilings, the Rhai limits and the
+    /// script budget, as [`launch`](crate::launch) and [`ContextBuilder::presets`] took them) of
+    /// the served graph at run time, without reloading it (EXPERIMENTAL): every run that starts
+    /// after the call (a query of the HTTP API, an MCP tool call, a scheduled query handed out)
+    /// runs under `presets`, on the session thread and on every worker of a host's
+    /// [`JobQueue`]; a run already running, or a scheduled run already handed out, keeps the
+    /// presets it started with. `GET /api/info` `presets` and the statistics answer the new
+    /// ones. The call does not wait for a running job: each session applies the change before
+    /// its next job. Connections, MCP sessions, the graph and the Store stay as they are.
+    ///
+    /// `Err`: reserved (`Result` for shared state, root rule 15; it does not fail today).
+    pub fn set_presets(&self, presets: SessionPresets) -> Result<(), ServeError> {
+        self.presets.set(presets);
+        Ok(())
+    }
+
+    /// The session presets every run starts under now, as `GET /api/info` reports them
+    /// (`SessionPresets::to_value`): the builder's value until [`Self::set_presets`] changed
+    /// them. `Err`: reserved (root rule 15; it does not fail today).
+    pub fn presets(&self) -> Result<Value, ServeError> {
+        Ok(self.presets.value())
     }
 
     /// The `409` of a write that is no commit while the runtime read-only toggle is on
@@ -1260,8 +1285,15 @@ impl Context {
         // The runs this thread registered for this job: running from its start (the run
         // administration's state).
         let starting = runs::pending_runs();
+        let presets = self.presets.clone();
         let job: Job = Box::new(move |session| {
             runs::mark_running(&starting);
+            // The presets the host set since this session last ran a job (Context::set_presets):
+            // in force from this job on; a job already running keeps its own.
+            if let Err(err) = presets.ensure_applied(session) {
+                let _ = reply.send(Err(ServeError::Session(err)));
+                return;
+            }
             if let Some(toggle) = toggle
                 && let Err(err) = toggle.ensure_registered(session)
             {

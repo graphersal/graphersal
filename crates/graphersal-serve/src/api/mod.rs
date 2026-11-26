@@ -873,8 +873,9 @@ fn info_fields(context: &Context) -> Value {
         // A read-only view of a past state of the store (POST /api/store/view): the UI shows a
         // banner with "Back to the live graph".
         "view": store::current_view(context),
-        // The limits every query runs under (from the command line).
-        "presets": context.presets,
+        // The limits every query runs under (from the command line, or as the host changed
+        // them at run time: Context::set_presets).
+        "presets": context.presets.value(),
         // --read-only (or a Store this process may not write), the runtime read-only toggle
         // on (ContextBuilder::runtime_read_only), or a request the host marked read-only
         // (Request::mark_read_only): every write is refused.

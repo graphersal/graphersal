@@ -105,6 +105,7 @@ mod job_workers;
 mod launch;
 mod mcp;
 mod open;
+mod presets;
 mod read_only;
 mod runs;
 mod server;
@@ -120,6 +121,8 @@ mod file_root_tests;
 mod launch_tests;
 #[cfg(test)]
 mod mount_tests;
+#[cfg(test)]
+mod presets_tests;
 #[cfg(test)]
 mod read_mark_tests;
 #[cfg(test)]
