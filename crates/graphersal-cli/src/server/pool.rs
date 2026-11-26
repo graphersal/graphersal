@@ -11,8 +11,8 @@
 //!   `X-Graphersal-Client`, an AI Chat conversation) has at most this many jobs running or
 //!   queued; a further job waits for a slot of ITS client, up to `--queue-timeout`, then 503.
 //! - **Cancellation** is not the pool's: every run a client may cancel has a token of its own,
-//!   registered before its job is queued ([`super::runs`]), so a cancel reaches it in the queue
-//!   or on a worker alike.
+//!   registered before its job is queued ([`graphersal_serve::Runs`]), so a cancel reaches it
+//!   in the queue or on a worker alike.
 //! - **Graceful stop** ([`Pool::drain`]): no new job is taken, the running and queued ones get
 //!   the drain timeout, then the queued ones are refused and the runs cancelled.
 
@@ -266,7 +266,7 @@ impl Pool {
 
     /// The graceful stop: no new job is taken; waits up to `timeout` for the running and
     /// queued jobs, then refuses the queued ones, cancels the runs (`cancel`: the server's
-    /// [`super::runs::Runs::cancel_all`], which answers how many) and waits a little for the
+    /// [`graphersal_serve::Runs::cancel_all`], which answers how many) and waits a little for the
     /// running jobs to end.
     pub(super) fn drain(&self, timeout: Duration, cancel: impl FnOnce() -> usize) -> Drained {
         let deadline = Instant::now() + timeout;
