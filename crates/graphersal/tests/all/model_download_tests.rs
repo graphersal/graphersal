@@ -622,3 +622,120 @@ fn a_staged_download_goes_into_a_store_and_never_into_the_cache() {
     assert!(!cache.path_of("acme/tiny").exists());
     assert!(leftovers(&models).is_empty(), "{:?}", leftovers(&models));
 }
+
+/// The blob of a model is its content address: two downloads of the same repository at the
+/// same commit, at different times, give the SAME blob, whether the download goes into a store
+/// straight away (`ModelSource::Files`) or through the models directory (`ModelSource::Dir` of
+/// the installed download, as `embed-model import` does). The download time stays in the models
+/// directory's manifest and never reaches the blob, so a store waiting for that blob (a missing
+/// one, a `.gsnap` exported without it) is served by a fresh download.
+#[test]
+fn a_download_of_the_same_commit_gives_the_same_blob() {
+    let endpoint = Endpoint::start(good);
+    let temp = Temp::new("download-same-blob");
+    let request = ModelDownload::new("acme/tiny").with_endpoint(endpoint.url());
+    let new_store = |name: &str| {
+        let dir = temp.join(name);
+        Store::create(&dir, options()).unwrap().close().unwrap();
+        dir
+    };
+    let import = |store: &Path, source: ModelSource| {
+        Store::import_model_dir(store, source, ImportModelOptions::new())
+            .unwrap()
+            .model
+    };
+
+    // First download, straight into a store.
+    let first = ModelCache::at(temp.join("models-1"))
+        .download_staged(&request, |_| {})
+        .unwrap();
+    let one = new_store("store-1");
+    let from_files = import(&one, ModelSource::Files(first.new_model().unwrap()));
+    let first_manifest =
+        std::fs::read_to_string(first.dir().join(ModelCache::MANIFEST_FILE)).unwrap();
+    drop(first);
+
+    // The second one a second later: into a store, then into the models directory and from
+    // there into a third store.
+    std::thread::sleep(std::time::Duration::from_millis(1100));
+    let second = ModelCache::at(temp.join("models-2"))
+        .download_staged(&request, |_| {})
+        .unwrap();
+    let two = new_store("store-2");
+    let again = import(&two, ModelSource::Files(second.new_model().unwrap()));
+    let installed = second.install().unwrap();
+    let second_manifest =
+        std::fs::read_to_string(installed.dir.join(ModelCache::MANIFEST_FILE)).unwrap();
+    let three = new_store("store-3");
+    let from_dir = import(&three, ModelSource::Dir(installed.dir.clone()));
+
+    // The download times differ (the models directory's manifests) ...
+    let downloaded_at = |text: &str| {
+        let value: serde_json::Value = serde_json::from_str(text).unwrap();
+        value["downloaded_at"].as_str().unwrap().to_string()
+    };
+    assert_ne!(
+        downloaded_at(&first_manifest),
+        downloaded_at(&second_manifest)
+    );
+    // ... the blobs do not.
+    assert_eq!(from_files.commit.as_deref(), Some(COMMIT));
+    assert_eq!(again.blob_hash, from_files.blob_hash);
+    assert_eq!(from_dir.blob_hash, from_files.blob_hash);
+    assert_eq!(from_dir.identity, from_files.identity);
+    assert_eq!(from_dir.bytes, from_files.bytes);
+
+    // The blob itself carries no time.
+    let hash = &from_files.blob_hash;
+    let blob = std::fs::read(one.join("blobs").join(&hash[..2]).join(hash)).unwrap();
+    let text = String::from_utf8_lossy(&blob);
+    assert!(
+        !text.contains("downloaded_at"),
+        "the blob names a download time"
+    );
+    assert!(!text.contains("added_at"), "the blob names an import time");
+}
+
+/// A host checks a request before it starts a download (`ModelDownload::validate`): the same
+/// check, and the same error, as the download's own first step.
+#[test]
+fn a_host_validates_a_request_before_the_download() {
+    let endpoint = Endpoint::start(good);
+    let temp = Temp::new("download-validate");
+    let cache = ModelCache::at(temp.join("models"));
+    for ok in [
+        ModelDownload::new("acme/tiny"),
+        ModelDownload::new("bert-base-uncased"),
+        ModelDownload::new("a.b/c_d-e").with_revision("refs/pr/1"),
+        ModelDownload::new("acme/tiny").with_revision(COMMIT),
+    ] {
+        assert_eq!(ok.validate(), Ok(()), "{ok:?}");
+        assert!(ModelDownload::is_repo_name(ok.repo()), "{ok:?}");
+    }
+    for bad in [
+        ModelDownload::new(""),
+        ModelDownload::new("../../etc"),
+        ModelDownload::new("a/b/c"),
+        ModelDownload::new("a/.hidden"),
+        ModelDownload::new("a b/c"),
+        ModelDownload::new("acme/tiny").with_revision("../x"),
+        ModelDownload::new("acme/tiny").with_revision("/main"),
+        ModelDownload::new("acme/tiny").with_revision("main branch"),
+        ModelDownload::new("acme/tiny").with_revision(""),
+    ] {
+        let bad = bad.with_endpoint(endpoint.url());
+        let refused = bad.validate().unwrap_err();
+        assert!(
+            matches!(refused, ModelDownloadError::InvalidRequest { .. }),
+            "{refused:?}"
+        );
+        assert_eq!(
+            ModelDownload::is_repo_name(bad.repo()),
+            refused.to_string().contains("is not a revision"),
+            "{refused}"
+        );
+        assert_eq!(cache.download(&bad, |_| {}).unwrap_err(), refused);
+    }
+    assert!(endpoint.paths().is_empty(), "{:?}", endpoint.paths());
+    assert!(!temp.join("models").exists());
+}

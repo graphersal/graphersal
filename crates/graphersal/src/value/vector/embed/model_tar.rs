@@ -1086,6 +1086,47 @@ mod tests {
         );
     }
 
+    /// A manifest with keys this version does not write (a download time such as
+    /// `downloaded_at`, an `added_at`) still reads: the blob is opaque content, its manifest
+    /// read by the keys it knows, so a blob written with such keys keeps loading and listing.
+    #[test]
+    fn a_manifest_with_extra_keys_still_reads() {
+        let canonical = String::from_utf8(manifest(&FILES).to_bytes()).unwrap();
+        let extended = canonical.replacen(
+            "{\"format\":3,",
+            "{\"format\":3,\"downloaded_at\":\"2026-11-01T10:00:00Z\",\
+             \"added_at\":\"2026-11-01T10:00:00Z\",",
+            1,
+        );
+        assert_ne!(extended, canonical);
+        assert_eq!(
+            ModelManifest::parse(extended.as_bytes()).unwrap(),
+            manifest(&FILES)
+        );
+        let mut entries: Vec<TarFile> = FILES
+            .iter()
+            .map(|(name, _, data)| TarFile {
+                name: name.to_string(),
+                size: data.len() as u64,
+                sha256: sha256_hex(data),
+                content: TarContent::Bytes(data.to_vec()),
+            })
+            .collect();
+        entries.push(TarFile {
+            name: MODEL_MANIFEST.into(),
+            size: extended.len() as u64,
+            sha256: sha256_hex(extended.as_bytes()),
+            content: TarContent::Bytes(extended.clone().into_bytes()),
+        });
+        let mut bytes = Vec::new();
+        TarStream::new(entries).read_to_end(&mut bytes).unwrap();
+        let tar = read_tar(&bytes).unwrap();
+        assert_eq!(tar.manifest, manifest(&FILES));
+        assert_eq!(tar.file_of("model"), Some(&[7u8; 700][..]));
+        let scanned = scan_tar(&bytes[..]).unwrap();
+        assert_eq!(scanned.manifest, manifest(&FILES));
+    }
+
     #[test]
     fn every_flipped_byte_is_refused_or_read_without_a_panic() {
         let good = tar_of(&FILES);
