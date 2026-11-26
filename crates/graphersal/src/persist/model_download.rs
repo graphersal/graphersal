@@ -146,6 +146,56 @@ impl ModelDownload {
     pub fn endpoint(&self) -> &str {
         &self.endpoint
     }
+
+    /// Whether `repo` is a Hugging Face repository name a download accepts: `owner/name` (or a
+    /// bare `name`), each part 1 to 96 ASCII letters, digits, `.`, `_` and `-`, not starting
+    /// with `.`. The same check [`Self::validate`] and a store's model import make; a host uses
+    /// it for a repository name it gets on its own (an import's `--repo`).
+    pub fn is_repo_name(repo: &str) -> bool {
+        super::model_cache::is_repo_name(repo)
+    }
+
+    /// Checks the request the way a download starts: the repository name
+    /// ([`Self::is_repo_name`]) and the revision (a branch, tag or commit of ASCII letters,
+    /// digits, `.`, `_`, `-` and `/`, not starting with `/`, without `..`). A host calls it to
+    /// refuse a bad request before it starts a download (a job, a thread); the download makes
+    /// the same check first and fails with the same error, having fetched nothing. The
+    /// endpoint is not checked here (a wrong one fails the first request).
+    ///
+    /// # Errors
+    ///
+    /// [`ModelDownloadError::InvalidRequest`] naming what is wrong (the text the command line
+    /// prints as its usage error).
+    ///
+    /// ```rust
+    /// use graphersal::persist::{ModelDownload, ModelDownloadError};
+    ///
+    /// assert!(ModelDownload::new("minishlab/potion-base-8M").validate().is_ok());
+    /// let err = ModelDownload::new("../etc").validate().unwrap_err();
+    /// assert!(matches!(err, ModelDownloadError::InvalidRequest { .. }));
+    /// assert!(ModelDownload::new("acme/tiny").with_revision("../x").validate().is_err());
+    /// ```
+    pub fn validate(&self) -> Result<(), ModelDownloadError> {
+        let repo = self.repo.as_str();
+        if !Self::is_repo_name(repo) {
+            return Err(ModelDownloadError::InvalidRequest {
+                reason: format!(
+                    "'{repo}' is not a Hugging Face repository name: owner/name of letters, \
+                     digits, '.', '_' and '-' (for example minishlab/potion-base-8M)"
+                ),
+            });
+        }
+        let revision = self.revision.as_str();
+        if !is_revision(revision) {
+            return Err(ModelDownloadError::InvalidRequest {
+                reason: format!(
+                    "'{revision}' is not a revision: a branch, tag or commit of letters, digits, \
+                     '.', '_', '-' and '/'"
+                ),
+            });
+        }
+        Ok(())
+    }
 }
 
 /// What a download reports while it runs (the callback of [`ModelCache::download`]).
@@ -467,24 +517,9 @@ fn run_download(
     request: &ModelDownload,
     events: &mut dyn FnMut(&DownloadEvent<'_>),
 ) -> Result<StagedModel, ModelDownloadError> {
+    request.validate()?;
     let repo = request.repo.as_str();
     let revision = request.revision.as_str();
-    if !super::model_cache::is_repo_name(repo) {
-        return Err(ModelDownloadError::InvalidRequest {
-            reason: format!(
-                "'{repo}' is not a Hugging Face repository name: owner/name of letters, digits, \
-                 '.', '_' and '-' (for example minishlab/potion-base-8M)"
-            ),
-        });
-    }
-    if !is_revision(revision) {
-        return Err(ModelDownloadError::InvalidRequest {
-            reason: format!(
-                "'{revision}' is not a revision: a branch, tag or commit of letters, digits, \
-                 '.', '_', '-' and '/'"
-            ),
-        });
-    }
     cancelled(request)?;
     let endpoint = request.endpoint.as_str();
     let target = cache.path_of(repo);

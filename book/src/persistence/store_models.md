@@ -111,6 +111,19 @@ println!("{} in {}", report.identity, report.dir.display());
   `warnings` the command line prints (an unknown or non-commercial licence, custom terms, a
   gated repository; `persist::model_licence_warnings` gives the same texts for a model from
   elsewhere).
+- `ModelDownload::validate()` makes the download's first check on its own (the repository
+  name, `ModelDownload::is_repo_name`, and the revision) and returns the same
+  `InvalidRequest`, so a host refuses a bad request before it starts a download job; the
+  command line runs it before anything else.
+- The same commit gives the same blob: a model's blob holds only its files and their stable
+  description (repository, revision, commit, licence, licence text, base models, gated flag,
+  the files' names, roles, sizes and SHA-256), never a time. The download time
+  (`downloaded_at`) stays in the models directory's manifest. Two downloads of the same
+  repository and revision at the same commit, imported at any time, through the models
+  directory or straight into a store, therefore give the same blob (`ModelInfo::blob_hash`),
+  and a store that waits for that blob (missing, or exported without it) is served by a fresh
+  download. A model imported from a directory without that manifest records no revision or
+  commit (only what `--repo`/`--license` give), so its blob differs from a download's.
 - Errors are `ModelDownloadError`: `InvalidRequest` (repository name or revision; nothing was
   fetched), `Refused` (HTTP 401/403: no such repository, or it needs a token), `NotFound` (HTTP
   404), `Transfer` (unreachable, another HTTP status, a body that broke off), `Integrity` (a hash

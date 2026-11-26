@@ -299,25 +299,6 @@ pub fn models_dir(explicit: Option<&str>) -> Result<PathBuf, String> {
     }
 }
 
-/// Whether `repo` is a Hugging Face repository name: `owner/name` (or a bare `name`), each part
-/// of ASCII letters, digits, `.`, `_`, `-`, not starting with `.`.
-pub fn is_repo_name(repo: &str) -> bool {
-    let part_ok = |part: &str| {
-        !part.is_empty()
-            && part.len() <= 96
-            && !part.starts_with('.')
-            && part
-                .chars()
-                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
-    };
-    let mut parts = repo.split('/');
-    match (parts.next(), parts.next(), parts.next()) {
-        (Some(name), None, None) => part_ok(name),
-        (Some(owner), Some(name), None) => part_ok(owner) && part_ok(name),
-        _ => false,
-    }
-}
-
 // ---------------------------------------------------------------------------------------------
 // list
 // ---------------------------------------------------------------------------------------------
@@ -474,13 +455,15 @@ fn download(
     models: &Path,
     into: Option<&str>,
 ) -> Result<(), DownloadError> {
+    // The library's own check of the repository and the revision, before anything else.
+    let mut request = ModelDownload::new(repo).with_revision(revision);
+    request.validate().map_err(download_failed)?;
     if let Some(store) = into
         && !Store::is_store(store)
             .map_err(|err| DownloadError::Usage(format!("--into {store}: {err}")))?
     {
         return Err(DownloadError::Usage(not_a_store(store)));
     }
-    let mut request = ModelDownload::new(repo).with_revision(revision);
     if let Some(endpoint) = env("GRAPHERSAL_HF_ENDPOINT") {
         request = request.with_endpoint(endpoint);
     }
@@ -642,7 +625,7 @@ fn import(dir: &Path, store: &str, flags: &ImportFlags<'_>) -> Result<(), Downlo
         return Err(DownloadError::Usage(not_a_store(store)));
     }
     if let Some(repo) = flags.repo
-        && !is_repo_name(repo)
+        && !ModelDownload::is_repo_name(repo)
     {
         return Err(DownloadError::Usage(format!(
             "--repo {repo}: not a Hugging Face repository name (owner/name)"
@@ -771,7 +754,7 @@ mod tests {
     #[test]
     fn repo_names() {
         for ok in ["minishlab/potion-base-8M", "bert-base-uncased", "a.b/c_d-e"] {
-            assert!(is_repo_name(ok), "{ok}");
+            assert!(ModelDownload::is_repo_name(ok), "{ok}");
         }
         for bad in [
             "",
@@ -784,7 +767,7 @@ mod tests {
             "a b/c",
             "a/.hidden",
         ] {
-            assert!(!is_repo_name(bad), "{bad}");
+            assert!(!ModelDownload::is_repo_name(bad), "{bad}");
         }
     }
 
