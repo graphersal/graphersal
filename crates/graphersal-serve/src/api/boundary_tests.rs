@@ -10,7 +10,10 @@ use std::time::{Duration, Instant};
 use graphersal_session::SessionPresets;
 use serde_json::{Value, json};
 
-use crate::context::{Busy, BusyReason, Context, Hooks, Job, JobQueue, Runner, spawn_session};
+use crate::context::{
+    Busy, BusyReason, Client, Context, FEED_OTHER_IDENTITY, Hooks, Job, JobQueue, RequestFilter,
+    Runner, spawn_session,
+};
 use crate::host_check::{Exposure, HostCheck, HostRules};
 use crate::http::{HttpError, MAX_BODY_BYTES, Method, Request, Response};
 use crate::ui::Ui;
@@ -518,6 +521,169 @@ fn a_cancel_reaches_only_the_clients_own_run() {
     // A runId that is not a short string is refused.
     let bad = handle(&context, json_request("/api/cancel", br#"{"runId": 7}"#));
     assert_eq!(bad.status(), 400);
+}
+
+/// A host's request filter for the run ownership tests: the identity is the request's
+/// `X-User` (none without it).
+struct UserFilter;
+
+impl RequestFilter for UserFilter {
+    fn filter(&self, request: &mut Request<'_>) -> Result<(), HttpError> {
+        if let Some(user) = request.header("X-User").map(str::to_string) {
+            request.set_identity(user);
+        }
+        Ok(())
+    }
+}
+
+/// A context behind [`UserFilter`], with `runs` shared.
+fn context_with_identities(runs: Arc<Runs>) -> Arc<Context> {
+    Context::builder(session_runner(), check())
+        .runs(runs)
+        .filter(Arc::new(UserFilter))
+        .build()
+}
+
+/// A request of `user` (none: anonymous) from the page `tab`.
+fn as_user<'a>(request: Request<'a>, user: Option<&str>, tab: &str) -> Request<'a> {
+    let request = request.with_header("X-Graphersal-Client", tab);
+    match user {
+        Some(user) => request.with_header("X-User", user),
+        None => request,
+    }
+}
+
+/// Starts the endless query `runId` `r1` of `user` from the page `tab` on its own thread.
+fn start_endless(
+    context: &Arc<Context>,
+    user: Option<&'static str>,
+    tab: &'static str,
+) -> std::thread::JoinHandle<Response> {
+    const ENDLESS: &str = "g.inject(1).repeat(__.identity()).times(100000000).count().next()";
+    let context = context.clone();
+    std::thread::spawn(move || {
+        let body = json!({ "script": ENDLESS, "runId": "r1" }).to_string();
+        handle(
+            &context,
+            as_user(json_request("/api/execute", body.as_bytes()), user, tab),
+        )
+    })
+}
+
+/// `POST /api/cancel` of `user` from the page `tab`: the run `r1`, or every run of the page.
+fn cancel_as(context: &Arc<Context>, user: Option<&str>, tab: &str, run_id: bool) -> Value {
+    let request = if run_id {
+        json_request("/api/cancel", br#"{"runId": "r1"}"#)
+    } else {
+        request(Method::Post, "/api/cancel", b"")
+    };
+    body_json(&handle(context, as_user(request, user, tab)))["cancelled"].clone()
+}
+
+/// SEC M3: the page id `X-Graphersal-Client` is chosen by the client, so a run belongs to the
+/// request's identity AND the page id; another identity (anonymous included) with the same page
+/// id cancels nothing, the same identity does.
+#[test]
+fn a_cancel_reaches_only_runs_of_the_same_identity() {
+    let runs = Arc::new(Runs::default());
+    let context = context_with_identities(runs.clone());
+    let running = start_endless(&context, Some("alice"), "tab");
+    wait_for_runs(&runs, 1);
+    for run_id in [true, false] {
+        assert_eq!(cancel_as(&context, Some("bob"), "tab", run_id), false);
+        assert_eq!(cancel_as(&context, None, "tab", run_id), false);
+        // An identity that only looks like a prefix of alice's key reaches nothing either.
+        assert_eq!(cancel_as(&context, Some("alic"), "tab", run_id), false);
+    }
+    assert_eq!(runs.len(), 1, "the run still runs");
+    assert_eq!(cancel_as(&context, Some("alice"), "tab", true), true);
+    let answer = running.join().unwrap();
+    let text = String::from_utf8_lossy(answer.body()).to_lowercase();
+    assert!(text.contains("cancel"), "{text}");
+    wait_for_runs(&runs, 0);
+
+    // The same identity from the page without a runId (Stop of every run of the page).
+    let running = start_endless(&context, Some("alice"), "tab");
+    wait_for_runs(&runs, 1);
+    assert_eq!(cancel_as(&context, Some("alice"), "tab", false), true);
+    running.join().unwrap();
+    wait_for_runs(&runs, 0);
+}
+
+/// Without an identity the run belongs to the page id as before: an anonymous request with the
+/// same `X-Graphersal-Client` cancels it (the CLI's dev server has no identities); an
+/// identified one does not.
+#[test]
+fn without_an_identity_a_run_belongs_to_the_page_id_as_before() {
+    let runs = Arc::new(Runs::default());
+    let context = context_with_identities(runs.clone());
+    let running = start_endless(&context, None, "tab");
+    wait_for_runs(&runs, 1);
+    assert_eq!(cancel_as(&context, Some("alice"), "tab", true), false);
+    assert_eq!(cancel_as(&context, None, "other-tab", true), false);
+    assert_eq!(cancel_as(&context, None, "tab", true), true);
+    running.join().unwrap();
+    wait_for_runs(&runs, 0);
+}
+
+/// The run key: plain without an identity, prefixed by the identity's length and the identity
+/// with one, so no identity and page id pair gives another pair's key.
+#[test]
+fn the_run_key_starts_with_the_identity_and_its_length() {
+    let mut client = Client::with_detail("tab", None);
+    assert_eq!(client.pool_key(), "page:tab");
+    client.identity = Some("alice".into());
+    assert_eq!(client.pool_key(), "5:alice/page:tab");
+    // "a/page:b" + page "c" vs "a" + page "b/page:c" (not a valid page id, but still apart).
+    let mut one = Client::with_detail("c", None);
+    one.identity = Some("a/page:b".into());
+    let mut two = Client::with_detail("b/page:c", None);
+    two.identity = Some("a".into());
+    assert_ne!(one.pool_key(), two.pool_key());
+}
+
+/// `GET /api/changes` names the page of a change only to a request of the same identity:
+/// another identity (anonymous included) sees [`FEED_OTHER_IDENTITY`], never the page id.
+#[test]
+fn the_change_feed_hides_the_page_ids_of_other_identities() {
+    let context = context_with_identities(Arc::new(Runs::default()));
+    let write = json!({ "script": "g.add_v(\"thing\").iterate()" }).to_string();
+    let written = handle(
+        &context,
+        as_user(
+            json_request("/api/execute", write.as_bytes()),
+            Some("alice"),
+            "alice-tab",
+        ),
+    );
+    assert_eq!(written.status(), 200);
+    let written = handle(
+        &context,
+        as_user(
+            json_request("/api/execute", write.as_bytes()),
+            None,
+            "anon-tab",
+        ),
+    );
+    assert_eq!(written.status(), 200);
+    let feed_of = |user: Option<&str>| {
+        let feed = body_json(&handle(
+            &context,
+            as_user(request(Method::Get, "/api/changes", b""), user, "reader"),
+        ));
+        feed["recent"]
+            .as_array()
+            .expect("recent changes")
+            .iter()
+            .map(|change| change["by"].as_str().unwrap_or_default().to_string())
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(feed_of(Some("alice")), ["alice-tab", FEED_OTHER_IDENTITY]);
+    assert_eq!(
+        feed_of(Some("bob")),
+        [FEED_OTHER_IDENTITY, FEED_OTHER_IDENTITY]
+    );
+    assert_eq!(feed_of(None), [FEED_OTHER_IDENTITY, "anon-tab"]);
 }
 
 /// A host adding an `/api/info` field, a process statistic and an endpoint of its own.

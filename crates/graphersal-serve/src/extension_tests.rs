@@ -814,7 +814,11 @@ fn an_mcp_connection_of_a_context_runs_there_with_its_identity() {
     assert_eq!(started.len(), 1);
     assert_eq!(started[0].0.kind(), RunKind::Tool);
     assert_eq!(started[0].0.identity(), Some("carol"));
-    assert_eq!(started[0].0.client(), format!("mcp:{}", connection.key()));
+    // The run key starts with the identity (SEC M3: runs belong to identity + client).
+    assert_eq!(
+        started[0].0.client(),
+        format!("5:carol/mcp:{}", connection.key())
+    );
     // Without an endpoint there is no connection.
     let plain = Context::builder(session_on("empty"), check()).build();
     let missing = plain
