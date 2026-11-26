@@ -7,7 +7,8 @@
 // The server answers `{version, commitSeq, recent: [{version, by, commitSeq}], view, mcp}`:
 // `version` grows with every change of the served graph (a commit, a view opened or closed, a
 // rollback), `recent` names who made the last ones (`by`: the `X-Graphersal-Client` id of a page,
-// `mcp`, or empty).
+// `mcp`, or empty; `"another identity"` for a change made under another identity than this
+// page's when the host attaches identities, which is never this page's id).
 
 /** Poll interval while the page is visible. */
 export const POLL_MS = 2000;

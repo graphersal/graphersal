@@ -8,7 +8,9 @@
 //! a query runs. Every run a client may cancel (a query, a layout slice, an MCP query, an AI Chat
 //! tool call) has a [`CancelToken`] of its own, registered before its job is queued
 //! ([`crate::runs`]): Stop cancels the page's run `runId` or all its runs, never another
-//! client's; a run cancelled while it waits stops when it starts, a running one at its next
+//! client's (with an identity from the host's request filter, a run belongs to the identity and
+//! the page id together: another identity sending the same `X-Graphersal-Client` reaches none of
+//! them); a run cancelled while it waits stops when it starts, a running one at its next
 //! check, and its unit rolls back.
 //!
 //! Safety for a local endpoint without authentication: a request whose `Host` is not this
@@ -163,7 +165,8 @@ fn route(context: &Arc<Context>, request: &mut Request) -> Result<Response, Http
         (Method::Get, "info") => Ok(Response::json(200, &info(context))),
         (Method::Get, "changes") => Ok(Response::json(200, &changes(context))),
         (Method::Get, "mcp/stats") => mcp::stats(context),
-        // Stop of a page: its run `runId`, or all its runs; never another client's.
+        // Stop of a page: its run `runId`, or all its runs; never another client's, nor another
+        // identity's with the same page id (the key includes the identity: Client::pool_key).
         (Method::Post, "cancel") => {
             let run_id = cancel_run_id(request)?;
             let key = CLIENT.with(|c| c.borrow().pool_key());
@@ -912,13 +915,14 @@ fn info_fields(context: &Context) -> Value {
 }
 
 /// `GET /api/changes`: the change feed (`{version, commitSeq, recent: [{version, by,
-/// commitSeq}]}`) plus what the top bar shows live (`view`, `mcp`); answered without the
+/// commitSeq}]}`, a change of another identity than the request's without its client:
+/// `Feed::to_value`) plus what the top bar shows live (`view`, `mcp`); answered without the
 /// session, so a page polls it cheaply while a query runs.
 fn changes(context: &Context) -> Value {
     let mut answer = context
         .feed
         .lock()
-        .map(|feed| feed.to_value())
+        .map(|feed| feed.to_value(CLIENT.with(|c| c.borrow().identity.clone()).as_deref()))
         .unwrap_or_else(|_| json!({}));
     answer["view"] = store::current_view(context);
     answer["mcp"] = mcp::status(context);

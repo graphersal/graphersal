@@ -401,8 +401,8 @@ size.
 
 `--admin-runs` (EXPERIMENTAL, off by default) lets whoever runs the server see and stop every
 query of every client: browser pages, MCP agents and AI Chat turns. A page's Stop button
-(`POST /api/cancel`) reaches only that page's own runs; the run administration reaches all of
-them.
+(`POST /api/cancel`) reaches only that page's own runs (under a host that attaches identities,
+only those of the same identity and page id); the run administration reaches all of them.
 
 ```bash
 graphersal --graph data.gstore --server --admin-runs --admin-runs-token my-admin-secret
@@ -411,7 +411,8 @@ graphersal --graph data.gstore --server --admin-runs --admin-runs-token my-admin
 - `GET /api/admin/runs` lists every run that waits for the session or runs now, oldest first:
   `{runs: [{id, client, alias, kind, state, cancelled, startedAtMs, durationMs, text, identity,
   mount}], textHeadChars}`. `client` is `page:<id>` (a browser tab's `X-Graphersal-Client`),
-  `mcp:<MCP session>` or `ai:<conversation>`; `kind` is `query`, `layout`, `tool` (an MCP or AI
+  `mcp:<MCP session>` or `ai:<conversation>`, under a host that attaches identities prefixed by
+  `<length>:<identity>/` (`5:alice/page:tab`); `kind` is `query`, `layout`, `tool` (an MCP or AI
   Chat tool call) or `other`; `state` is `queued` or `running`; `text` is the first 200
   characters of the query (`textHeadChars`).
 - `POST /api/admin/runs/cancel` `{"id": 12}` cancels the run `12` whatever its client: a waiting
@@ -1180,7 +1181,7 @@ workspace (which reads the whole graph) is shown as an error.
 | Endpoint | Engine method |
 |---|---|
 | `GET /api/info` | `info()` (`protocol: "graphersal/1"`: the protocol id of this API, by which the page recognizes a Graphersal host; a breaking change of the API bumps the number; `server: "graphersal-dev"`: only the host's name; `dev: true`: a development server, the page shows its DEV SERVER badge; `version`, `saveable`, `source`, `presets`: the limits in force, `mcp`: `{endpoint, readOnly, client}` or null, `ai`: `{provider, model, readOnly, sendsDataTo, maxToolCallsPerTurn}` or null (never the key; `sendsDataTo` is the provider's host, null for one on this machine), `damageFound`: `{text, frozen, foundBy, policy, problems}` or null, `embedders`: `[{name, model, dimension, default}]`, the built-in `hash-ngram/1` and every model of the database, `adminRuns`: `{tokenRequired}` only with `--admin-runs`) |
-| `GET /api/changes` | `changes()`: the change feed `{version, commitSeq, recent: [{version, by, commitSeq, detail?}], view, mcp, damageFound, readOnly}` (`readOnly` as in `GET /api/info`: it changes while the server runs when its host turns read-only on or off); `by` is the page's `X-Graphersal-Client` header (every request of the page sends it), `mcp`, or `ai` (an AI Chat conversation, its id in `detail`) |
+| `GET /api/changes` | `changes()`: the change feed `{version, commitSeq, recent: [{version, by, commitSeq, detail?}], view, mcp, damageFound, readOnly}` (`readOnly` as in `GET /api/info`: it changes while the server runs when its host turns read-only on or off); `by` is the page's `X-Graphersal-Client` header (every request of the page sends it), `mcp`, or `ai` (an AI Chat conversation, its id in `detail`); under a host that attaches identities, a change made under another identity than the request's (anonymous included) reads `by: "another identity"` without `detail` |
 | `POST /mcp` | the MCP endpoint (with `--mcp`, [above](#mcp-an-ai-agent-on-the-same-graph)) |
 | `POST /api/ai/conversations` | with `--ai` (EXPERIMENTAL): a new AI Chat conversation `{id}` (random, 128 bits) owned by the page's `X-Graphersal-Client` (required); every other client gets `403` for it, an unknown id is `404`, and without `--ai` every `/api/ai/*` is `404` |
 | `POST /api/ai/conversations/<id>/messages` `{text}` | starts a turn on the server (`{turn}`; `409` while one runs): the provider is called, the tools it asks for run on the session like MCP tool calls (commits in the change feed as `ai`), until it answers without a tool call or reaches `max_tool_calls_per_turn` |
@@ -1190,7 +1191,7 @@ workspace (which reads the whole graph) is shown as an error.
 | `GET /api/graph` | `graphInfo()`; on a layer (`--layer`, `--layer-store`) it carries `layer: {base, baseRef: {graphId, commitSeq, committedAt} \| null, added: {vertices, edges}, modified: {..}, removed: {..}, ownBytes, sharedBytes}` (counts from the layer's own bookkeeping, no diff walk), absent on any other graph |
 | `POST /api/execute` `{script, options}` | `execute(script, options)` |
 | `POST /api/query` `{name, params?, runId?}` | `runSavedQuery(name, params)`, the profile API's `query`: one run of the saved query `name` with the named arguments `params` (the caller passes every parameter; the server binds none), without the display: `{ok: true, results, mutated, changes}` (every result, never cut) or `{ok: false, error: {message, help?}, mutated, changes}` (an unknown query, a parameter its schema refuses, a denied write; status 200). A malformed call is a 400 |
-| `POST /api/cancel` | `stop(runId)`: cancels the page's run `runId` (body `{"runId": ".."}`, the id given to `POST /api/execute`), or without a body every run of the page (queries, layout slices); never another client's: `{cancelled}` |
+| `POST /api/cancel` | `stop(runId)`: cancels the page's run `runId` (body `{"runId": ".."}`, the id given to `POST /api/execute`), or without a body every run of the page (queries, layout slices); never another client's, and under a host that attaches identities never another identity's with the same page id: `{cancelled}` |
 | `GET /api/admin/runs` | with `--admin-runs` (EXPERIMENTAL; [Run administration](#run-administration)): every client's queued and running runs `{runs: [{id, client, alias, kind, state, cancelled, startedAtMs, durationMs, text, identity, mount}], textHeadChars}`; the header `X-Graphersal-Admin-Token` with `--admin-runs-token`; `404` without the flag |
 | `POST /api/admin/runs/cancel` `{id}` | with `--admin-runs`: cancels the run `id` whatever its client: `{cancelled}` |
 | `GET /api/schema` | `schema()` (the schema views) |

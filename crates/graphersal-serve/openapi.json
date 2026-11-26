@@ -97,7 +97,7 @@
           "Server"
         ],
         "summary": "Change feed",
-        "description": "`{version, commitSeq, recent: [{version, by, commitSeq, detail?}], view, mcp, damageFound, readOnly}` (`readOnly`: read-only now; it changes at run time with the host's runtime read-only toggle); `by` is the client of the commit (`X-Graphersal-Client` of a page, `mcp`, or `ai` with the conversation id in `detail`). Polled by the page to reload on changes it did not make. On a request the host marked read-only (`Request::mark_read_only`, EXPERIMENTAL) `readOnly` (and the `mcp` status's `readOnly`) is `true` for that request, while the graph stays writable for other requests.",
+        "description": "`{version, commitSeq, recent: [{version, by, commitSeq, detail?}], view, mcp, damageFound, readOnly}` (`readOnly`: read-only now; it changes at run time with the host's runtime read-only toggle); `by` is the client of the commit (`X-Graphersal-Client` of a page, `mcp`, or `ai` with the conversation id in `detail`); when the host attaches identities to requests, a commit made under another identity than this request's (anonymous included) reads `by: \"another identity\"` without `detail`, so no other principal's page id is shown. Polled by the page to reload on changes it did not make. On a request the host marked read-only (`Request::mark_read_only`, EXPERIMENTAL) `readOnly` (and the `mcp` status's `readOnly`) is `true` for that request, while the graph stays writable for other requests.",
         "operationId": "getApiChanges",
         "responses": {
           "200": {
@@ -148,7 +148,7 @@
           "Server"
         ],
         "summary": "Stop the page's runs",
-        "description": "Cancels the run `runId` of this page (`X-Graphersal-Client`), or without one every run of this page (queries and force-layout slices): a run still waiting for the session runs nothing, a running one stops at its next check; both are rolled back. Never cancels another page's, an MCP client's or an AI Chat turn's run. `{cancelled}`: whether such a run was found. The body is optional.",
+        "description": "Cancels the run `runId` of this page (`X-Graphersal-Client`), or without one every run of this page (queries and force-layout slices): a run still waiting for the session runs nothing, a running one stops at its next check; both are rolled back. Never cancels another page's, an MCP client's or an AI Chat turn's run; when the host attaches identities to requests, a run belongs to the identity and the page id together, so another identity (anonymous included) with the same `X-Graphersal-Client` cancels nothing. `{cancelled}`: whether such a run was found. The body is optional.",
         "operationId": "postApiCancel",
         "requestBody": {
           "required": false,

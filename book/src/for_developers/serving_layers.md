@@ -140,6 +140,23 @@ only. A resolver that checks a routed id for a caller uses
 `mcp.verified_session_route_for(id, identity)`; `verified_session_route(id)` checks it as
 anonymous.
 
+### Runs belong to their identity
+
+The page id a browser sends (`X-Graphersal-Client`) is chosen by the client, so it cannot own a
+run alone. When the host's request filter attaches an identity (`Request::set_identity`), every
+run, the Stop of a page (`POST /api/cancel`), MCP request cancellation and the fairness key of a
+host's job queue use the identity together with the page id: a caller with another identity, or
+an anonymous one, that sends the same page id cancels nothing. The key is `<length>:<identity>/`
+before the plain key (`5:alice/page:tab`; `RunInfo::client`, the run administration's `client`).
+Without an identity the key is the plain one, as in the CLI's dev server. The run
+administration (`ContextBuilder::admin_runs`) keeps its own rules: it lists and cancels runs by
+the registry's id, whatever their identity.
+
+The change feed (`GET /api/changes`) names who made a change (`recent[].by`, `detail`) only to a
+request of the same identity; a change made under another identity, anonymous included, reads
+`by: "another identity"` without `detail`, so a reader learns no other principal's page id.
+Without identities every change is shown as before.
+
 ### Sessions survive a restart
 
 By default the session table lives in memory: a restarted host forgets every MCP session, and

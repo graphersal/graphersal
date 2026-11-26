@@ -12,6 +12,11 @@
 //! - its client and the client's own id of the run ([`Runs::cancel_alias`]): a page's `runId`
 //!   (a query tab's Stop), an MCP request id (`notifications/cancelled`);
 //! - its client ([`Runs::cancel_client`]): `POST /api/cancel` without a `runId`;
+//!
+//! The client key includes the request's identity when the host's request filter attached one
+//! ([`RunInfo::client`]): the page id is chosen by the client, so with identities a run belongs
+//! to the identity and the page id together, and another principal sending the same page id
+//! reaches none of its runs.
 //! - all at once ([`Runs::cancel_all`]): the graceful stop (SIGTERM).
 //!
 //! Stopping another client's runs is an administrative act and not part of this module's
@@ -119,7 +124,9 @@ impl RunInfo {
     }
 
     /// The client's key: `page:<X-Graphersal-Client>`, `mcp:<MCP session id>` (or `mcp`),
-    /// `ai:<conversation>`.
+    /// `ai:<conversation>`; prefixed by `<byte length>:<identity>/` when the request carried an
+    /// identity ([`crate::Request::set_identity`]; `5:alice/page:tab`), so a run belongs to the
+    /// identity and the client id together.
     pub fn client(&self) -> &str {
         &self.client
     }
@@ -248,7 +255,8 @@ pub(crate) struct RunDetails {
 /// One registered run.
 struct Run {
     /// What the run is (also what the observer was told); `info.client` is the client's key
-    /// (`Client::pool_key`): `page:<tab>`, `mcp:<session>`, `ai:<id>`.
+    /// (`Client::pool_key`): `page:<tab>`, `mcp:<session>`, `ai:<id>`, prefixed by the
+    /// identity (`<len>:<identity>/`) when the request carried one.
     info: RunInfo,
     token: CancelToken,
     /// When the run was registered.

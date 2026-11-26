@@ -206,7 +206,8 @@ impl Busy {
 /// `Retry-After: 1`. To let the queue's first worker use the session thread the graph was
 /// loaded on, pass its loop as [`spawn_session`]'s `takeover`.
 pub trait JobQueue: Send + Sync {
-    /// Queues `job` for the client `key` (`page:<tab>`, `mcp:<session>`, `ai:<conversation>`);
+    /// Queues `job` for the client `key` (`page:<tab>`, `mcp:<session>`, `ai:<conversation>`,
+    /// prefixed by `<byte length>:<identity>/` when the request carried an identity);
     /// `Err` when refused. The job's answer comes through the job itself.
     fn submit(&self, key: &str, job: Job) -> Result<(), Busy>;
 
@@ -351,15 +352,32 @@ impl Client {
 
     /// The key the pool counts and the run registry cancels this client's jobs by: `mcp` (+ its MCP session
     /// id), `ai` + the conversation id, or `page` + a browser page's `X-Graphersal-Client`.
+    ///
+    /// With an identity (the host's request filter, [`Request::set_identity`]) the key starts
+    /// with it, as `<byte length>:<identity>/` (`5:alice/page:tab`): the client id is chosen by
+    /// the client, so two principals sending the same `X-Graphersal-Client` get two keys and
+    /// one cannot cancel the other's runs (SEC M3). The length prefix keeps the key unambiguous
+    /// whatever the identity contains, and a key without an identity starts with a letter.
+    /// Without an identity the key is the plain one (the CLI's dev server).
     pub(crate) fn pool_key(&self) -> String {
-        match (self.name.as_str(), &self.key, &self.detail) {
+        let base = match (self.name.as_str(), &self.key, &self.detail) {
             ("mcp", Some(key), _) => format!("mcp:{key}"),
             ("mcp", None, _) => "mcp".to_string(),
             ("ai", _, detail) => format!("ai:{}", detail.as_deref().unwrap_or_default()),
             (name, _, _) => format!("page:{name}"),
+        };
+        match &self.identity {
+            Some(identity) => format!("{}:{identity}/{base}", identity.len()),
+            None => base,
         }
     }
 }
+
+/// The `by` of a change feed entry made under another identity than the one of the request
+/// that reads the feed (`GET /api/changes`): never that principal's client id. It cannot be a
+/// client id (`X-Graphersal-Client` keeps letters, digits, `-` and `_` only), so no page takes
+/// such a change for its own.
+pub(crate) const FEED_OTHER_IDENTITY: &str = "another identity";
 
 impl Feed {
     fn record(&mut self, client: Client, commit_seq: u64) {
@@ -375,11 +393,21 @@ impl Feed {
         });
     }
 
-    pub(crate) fn to_value(&self) -> Value {
+    /// The feed as `viewer` (the identity of the request that reads it) may see it: a change
+    /// made under another identity (anonymous counts as one) names neither its client nor its
+    /// detail, `by` is [`FEED_OTHER_IDENTITY`]. Without identities every change is shown as
+    /// it is.
+    pub(crate) fn to_value(&self, viewer: Option<&str>) -> Value {
         json!({
             "version": self.version,
             "commitSeq": self.commit_seq,
             "recent": self.recent.iter().map(|entry| {
+                if entry.client.identity.as_deref() != viewer {
+                    return json!({
+                        "version": entry.version, "by": FEED_OTHER_IDENTITY,
+                        "commitSeq": entry.commit_seq,
+                    });
+                }
                 let mut change = json!({
                     "version": entry.version, "by": entry.client.name,
                     "commitSeq": entry.commit_seq,
@@ -1276,6 +1304,7 @@ impl Context {
             _ => graphersal::workload::Channel::Playground,
         };
         let key = client.pool_key();
+        let from_mcp = client.name == "mcp";
         // Built read-only with the runtime toggle: its commit hook goes on the graph before the
         // first job runs (the toggle registers it once).
         let toggle = self
@@ -1341,9 +1370,7 @@ impl Context {
             Jobs::Queue(queue) => {
                 queue.submit(&key, job).map_err(|refused| {
                     // The MCP endpoint's usage statistics count its refusals by kind.
-                    if key.starts_with("mcp")
-                        && let Some(mcp) = &self.mcp
-                    {
+                    if from_mcp && let Some(mcp) = &self.mcp {
                         mcp::record_refusal(mcp, refused.reason());
                     }
                     ServeError::Busy(refused)
