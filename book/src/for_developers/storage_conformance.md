@@ -1,12 +1,12 @@
 # Storage Conformance Tests
 
-> `GraphStorage` is **experimental in 0.8.x**: its methods and associated types may change in any
-> 0.8.x release (`LayeredGraph`, a layer over a frozen base, implements it since 0.7.0). The trait's own rustdoc
+> `GraphStorage` is **experimental in 0.9.x**: its methods and associated types may change in any
+> 0.9.x release (`LayeredGraph`, a layer over a frozen base, implements it since 0.7.0). The trait's own rustdoc
 > is the implementer's guide: handles, units, capabilities, change capture and statistics.
 
 The crate `graphersal-storage-tests` (on crates.io, **EXPERIMENTAL** like the trait: it may break in any minor
 release before 1.0, so pin the exact version) runs one contract against any `GraphStorage` implementation. Add it
-as a dev-dependency (`graphersal-storage-tests = "=0.8.0"`) and, in a test of the implementing crate:
+as a dev-dependency (`graphersal-storage-tests = "=0.9.0"`) and, in a test of the implementing crate:
 
 ```rust,ignore
 graphersal_storage_tests::conformance!(my_storage, base = MyStorage::new() => base);

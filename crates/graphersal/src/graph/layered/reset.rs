@@ -253,7 +253,7 @@ impl LayeredGraph {
         }
         let common: Vec<&CompactString> = current
             .keys()
-            .filter(|key| base_map.contains_key(*key))
+            .filter(|key| base_map.contains_key(key))
             .collect();
         let in_order = common
             .iter()
