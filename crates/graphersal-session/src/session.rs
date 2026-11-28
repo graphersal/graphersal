@@ -7,7 +7,7 @@
 //! keys keep the engine's order.
 
 use crate::error::SessionError;
-use std::io::Cursor;
+use std::io::{BufRead, Cursor, Read, Seek, SeekFrom};
 use std::sync::{Arc, Mutex};
 
 use graphersal::auth::{AccessPolicy, ActionKind, Authorizer, ResourceKind};
@@ -625,8 +625,20 @@ impl Session {
         name: &str,
         schema: Option<&str>,
     ) -> Result<Value, SessionError> {
+        self.load_graphml_reader(text, name, schema)
+    }
+
+    /// [`Self::load_graphml`] reading the document from `reader` as it parses it: the document
+    /// is never held in memory as a whole (a host with a file opens it and passes a
+    /// `BufReader`).
+    pub fn load_graphml_reader(
+        &mut self,
+        reader: impl BufRead,
+        name: &str,
+        schema: Option<&str>,
+    ) -> Result<Value, SessionError> {
         let schema = parse_schema_file(schema)?;
-        let graph = import_with_schema(text, schema)?;
+        let graph = import_with_schema(reader, schema)?;
         crate::queries::carry_catalog(&mut *graph.write(), self.catalog()?)?;
         let graph = self.factory.adopt(graph.into_inner())?;
         self.replace(graph, name, "file");
@@ -645,8 +657,19 @@ impl Session {
         name: &str,
         schema: Option<&str>,
     ) -> Result<Value, SessionError> {
+        self.load_graphson_reader(text, name, schema)
+    }
+
+    /// [`Self::load_graphson`] reading the text from `reader` as it parses it: the file is
+    /// never held in memory as a whole (a host with a file opens it and passes a `BufReader`).
+    pub fn load_graphson_reader(
+        &mut self,
+        reader: impl BufRead,
+        name: &str,
+        schema: Option<&str>,
+    ) -> Result<Value, SessionError> {
         let schema = parse_schema_file(schema)?;
-        let (graph, report) = import_graphson_with_schema(text, schema)?;
+        let (graph, report) = import_graphson_with_schema(reader, schema)?;
         crate::queries::carry_catalog(&mut *graph.write(), self.catalog()?)?;
         let graph = self.factory.adopt(graph.into_inner())?;
         self.replace(graph, name, "file");
@@ -660,17 +683,30 @@ impl Session {
     /// [`graphersal::storage::PersistentStorage`] reads snapshots ([`StorageKind::persistent`]);
     /// any other fails with the "not supported by this storage" error.
     pub fn load_snapshot(&mut self, bytes: &[u8], name: &str) -> Result<Value, SessionError> {
-        let mut reader = bytes;
+        self.load_snapshot_reader(Cursor::new(bytes), name)
+    }
+
+    /// [`Self::load_snapshot`] reading the file from `reader`, never holding it as a whole: the
+    /// graph is decoded as it streams, then the reader is rewound once to keep the embedding
+    /// models the file carries (a host with a file opens it and passes a `BufReader`).
+    pub fn load_snapshot_reader(
+        &mut self,
+        mut reader: impl Read + Seek,
+        name: &str,
+    ) -> Result<Value, SessionError> {
         let graph = self.factory.load_snapshot(&mut reader)?;
         self.replace(graph, name, "file");
         // The embedding models the file carries go into the store in memory (format spec
         // 4.5): kept and handed on with it, even where they cannot run (the browser).
         if let Some(store) = self.active_store() {
-            let mut packed = bytes;
-            if let Err(err) = store.import_models_from_packed(&mut packed) {
+            let rewound = reader.seek(SeekFrom::Start(0));
+            if let Err(err) = rewound.map_err(|err| err.to_string()).and_then(|_| {
+                store
+                    .import_models_from_packed(&mut reader)
+                    .map_err(|err| format_diagnostic(&err))
+            }) {
                 self.warnings.push(format!(
-                    "the embedding models of the file were not kept: {}",
-                    format_diagnostic(&err)
+                    "the embedding models of the file were not kept: {err}"
                 ));
             }
         }
@@ -1861,13 +1897,13 @@ fn report_warnings(report: &graphersal::io::ImportReport) -> Vec<String> {
 
 /// A new graph that stores `schema` (if any), with the GraphSON `text` imported into it.
 fn import_graphson_with_schema(
-    text: &[u8],
+    text: impl BufRead,
     schema: Option<GraphSchema>,
 ) -> Result<(Graph, graphersal::io::ImportReport), SessionError> {
     let Some(schema) = schema else {
         // A graph nobody sees yet: loaded outside units (no undo log, no change capture).
         return graphersal::io::GraphSONImport::new()
-            .load(Cursor::new(text))
+            .load(text)
             .map_err(|err| format_diagnostic(&err))
             .map_err(SessionError::from);
     };
@@ -1877,7 +1913,7 @@ fn import_graphson_with_schema(
         .set_schema(schema)
         .map_err(|err| format_diagnostic(&err))?;
     let report = graph
-        .import_graphson_reader(Cursor::new(text))
+        .import_graphson_reader(text)
         .map_err(|err| format_diagnostic(&err))?;
     Ok((graph, report))
 }
@@ -2056,10 +2092,13 @@ fn parse_schema_file(schema: Option<&str>) -> Result<Option<GraphSchema>, Sessio
         .map_err(SessionError::from)
 }
 
-fn import_with_schema(text: &[u8], schema: Option<GraphSchema>) -> Result<Graph, SessionError> {
+fn import_with_schema(
+    text: impl BufRead,
+    schema: Option<GraphSchema>,
+) -> Result<Graph, SessionError> {
     let Some(schema) = schema else {
         // A graph nobody sees yet: loaded outside units (no undo log, no change capture).
-        return GraphSource::from_graphml_reader(Cursor::new(text))
+        return GraphSource::from_graphml_reader(text)
             .map_err(|err| format_diagnostic(&err))
             .map_err(SessionError::from);
     };
@@ -2069,7 +2108,7 @@ fn import_with_schema(text: &[u8], schema: Option<GraphSchema>) -> Result<Graph,
         .set_schema(schema)
         .map_err(|err| format_diagnostic(&err))?;
     graph
-        .import_graphml_reader(Cursor::new(text))
+        .import_graphml_reader(text)
         .map_err(|err| format_diagnostic(&err))?;
     Ok(graph)
 }
