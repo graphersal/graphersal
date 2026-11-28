@@ -2783,6 +2783,25 @@ pub enum IOError {
         reason: String,
     },
 
+    /// Edges of the imported file name vertices that are neither in the file nor in the
+    /// target graph (dangling edges). The import stores every edge as soon as it reads it and
+    /// fails at its end when an endpoint never came; nothing of the file is kept.
+    #[error(
+        "{count} vertices named by edges are neither in the file nor in the target graph \
+         ({}{}); the first such edge: {first_edge}",
+        .vertices.iter().map(|id| format!("\"{id}\"")).collect::<Vec<_>>().join(", "),
+        if *.count > .vertices.len() { ", ..." } else { "" }
+    )]
+    #[non_exhaustive]
+    DanglingEdges {
+        /// How many vertices are missing.
+        count: usize,
+        /// The first missing vertex ids (at most five), in the order the file names them.
+        vertices: Vec<String>,
+        /// Where the first edge to a missing vertex is (`line 3: edge "e1" from "a" to "zz"`).
+        first_edge: String,
+    },
+
     /// A graph-level error encountered while applying imported data, forwarded as-is.
     #[error(transparent)]
     Graph(#[from] GraphError),
@@ -2857,6 +2876,13 @@ impl DiagnosticError for IOError {
                  schema to import the text unchanged. GraphSON keeps array/object values typed: \
                  g.export_graphson(\"graph.json\")."
             )),
+            IOError::DanglingEdges { .. } => Some(
+                "Every edge endpoint must be a vertex of the file or of the target graph. Add \
+                 the missing vertices to the file (one vertex record each), remove the edges \
+                 that name them, or import into a graph that already holds them; the file is \
+                 imported as a whole or not at all."
+                    .to_string(),
+            ),
             IOError::Graph(err) => err.help(),
         }
     }

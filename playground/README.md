@@ -945,7 +945,7 @@ load's third argument): that restores vertices, edges, ids, labels, properties, 
 mode, and an `open`/`closed` violation fails the load (nothing changes). A drop of ONE file on the
 card loads it without a schema; a graph file + a `.json` schema dropped together pair up when the
 graph file is not `.json` itself (`droppedFiles`). What a GraphSON import skips (dates, unsupported
-types, dangling edges) comes back in the graph info's `warnings` and is shown as a notice. **Load
+types, duplicate vertices or edges) comes back in the graph info's `warnings` and is shown as a notice. **Load
 schema** (start page, next to "Load from file") applies a schema file to the current graph only.
 GraphSON keeps every value type by itself; GraphML gets the declared types (`uuid`, `array`,
 `object`) back from the schema. Save checks the files by loading them back the way Load from file

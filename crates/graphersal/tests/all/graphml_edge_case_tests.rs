@@ -142,8 +142,8 @@ fn an_edge_without_a_source_or_with_an_unknown_one_fails() {
     }
     let xml = r#"<graphml><graph><node id="1"/><edge source="nope" target="1"/></graph></graphml>"#;
     match import(xml).err() {
-        Some(IOError::Graph(GraphError::VertexNotFound { id, .. })) => assert_eq!(id, "nope"),
-        other => panic!("expected VertexNotFound, got {other:?}"),
+        Some(IOError::DanglingEdges { vertices, .. }) => assert_eq!(vertices, ["nope"]),
+        other => panic!("expected DanglingEdges, got {other:?}"),
     }
 }
 

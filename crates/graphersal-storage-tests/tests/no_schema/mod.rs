@@ -113,6 +113,19 @@ impl<G: GraphStorage> GraphStorage for NoSchema<G> {
         self.0.insert_vertex(id, labels, properties)
     }
 
+    fn insert_vertex_stub(&mut self, id: CompactString) -> Result<Self::VertexId, GraphError> {
+        self.0.insert_vertex_stub(id)
+    }
+
+    fn complete_vertex_stub(
+        &mut self,
+        vertex: Self::VertexId,
+        labels: Vec<CompactString>,
+        properties: PropertyMap,
+    ) -> Result<(), GraphError> {
+        self.0.complete_vertex_stub(vertex, labels, properties)
+    }
+
     fn add_vertex_label(
         &mut self,
         node: Self::VertexId,

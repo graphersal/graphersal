@@ -9,7 +9,7 @@ use quick_xml::events::{BytesEnd, BytesStart, BytesText, Event};
 use quick_xml::reader::Reader;
 use quick_xml::writer::Writer;
 
-use crate::error::{GraphError, IOError};
+use crate::error::IOError;
 use crate::graph::shape::{MapBuilder, ShapeTable};
 use crate::graph::{GraphNodeType, GraphStorage, JsonType, SchemaFormat};
 use crate::traversal::memory_budget::UnitBudget;
@@ -149,7 +149,7 @@ impl GraphMLImport {
     /// The import is ONE unit of work on the live graph `g` (`book/src/users_guide/transactions.md`):
     /// on an atomic storage a failure leaves nothing behind, and its commit is
     /// captured and runs the commit hooks like a traversal (a veto is
-    /// [`IOError::Graph`] holding [`GraphError::CommitRejected`]).
+    /// [`IOError::Graph`] holding [`GraphError::CommitRejected`](crate::error::GraphError::CommitRejected)).
     /// A graph that is not published yet is loaded outside units by the constructors
     /// ([`GraphSource::from_graphml`](crate::GraphSource::from_graphml),
     /// [`GraphSource::from_graphml_reader`](crate::GraphSource::from_graphml_reader)).
@@ -157,7 +157,7 @@ impl GraphMLImport {
     /// Under the process memory ceiling (`memory.limit`, [`crate::exec::memory_limit`], on by
     /// default) the import checks it every 4096 elements and at its end: an import that grows
     /// the memory in use over it is rolled back and fails with [`IOError::Graph`] holding
-    /// [`GraphError::ResourceLimitExceeded`] (operation `"GraphML import"`). Without a ceiling
+    /// [`GraphError::ResourceLimitExceeded`](crate::error::GraphError::ResourceLimitExceeded) (operation `"GraphML import"`). Without a ceiling
     /// (`none`) nothing is checked.
     pub fn import_reader<S: GraphStorage, R: std::io::BufRead>(
         &self,
@@ -206,7 +206,10 @@ impl GraphMLImport {
         let mut node_shapes = ShapeTable::new();
         let mut edge_shapes = ShapeTable::new();
         let mut data_key: Option<CompactString> = None;
-        let mut node_map: HashMap<CompactString, S::VertexId> = HashMap::with_capacity(65536);
+        // Edge endpoints whose `<node>` comes later in the document: stored as stubs at once
+        // (`GraphStorage::insert_vertex_stub`), completed by their node, an error when one is
+        // left at the end. Every edge is stored as soon as it is read, nothing is buffered.
+        let mut stubs: HashMap<S::VertexId, StubOrigin> = HashMap::new();
 
         // quick-xml reports one run of character data as several `Text` and `GeneralRef` (entity
         // or character reference) events. They are collected here, still escaped, and handled as
@@ -314,7 +317,7 @@ impl GraphMLImport {
                                     &mut node,
                                     &mut data,
                                     &mut node_shapes,
-                                    &mut node_map,
+                                    &mut stubs,
                                     &keys,
                                     has_defaults,
                                     budget,
@@ -329,7 +332,8 @@ impl GraphMLImport {
                                     &mut edge,
                                     &mut data,
                                     &mut edge_shapes,
-                                    &node_map,
+                                    &mut stubs,
+                                    reader.buffer_position(),
                                     &keys,
                                     has_defaults,
                                     budget,
@@ -364,7 +368,7 @@ impl GraphMLImport {
                                 &mut node,
                                 &mut data,
                                 &mut node_shapes,
-                                &mut node_map,
+                                &mut stubs,
                                 &keys,
                                 has_defaults,
                                 budget,
@@ -378,7 +382,8 @@ impl GraphMLImport {
                             &mut edge,
                             &mut data,
                             &mut edge_shapes,
-                            &node_map,
+                            &mut stubs,
+                            reader.buffer_position(),
                             &keys,
                             has_defaults,
                             budget,
@@ -393,6 +398,9 @@ impl GraphMLImport {
             buf.clear();
         }
 
+        if let Some(error) = dangling_edges(g, &stubs)? {
+            return Err(error);
+        }
         g.shrink_to_fit()?;
         Ok(())
     }
@@ -474,7 +482,7 @@ impl GraphMLImport {
         node: &mut Node,
         data: &mut MapBuilder,
         shapes: &mut ShapeTable,
-        node_map: &mut HashMap<CompactString, S::VertexId>,
+        stubs: &mut HashMap<S::VertexId, StubOrigin>,
         keys: &HashMap<CompactString, Key>,
         has_defaults: bool,
         budget: &mut Option<UnitBudget>,
@@ -512,11 +520,19 @@ impl GraphMLImport {
         };
         let mut vertex_data = vertex_data;
         lift_declared_properties(g, GraphNodeType::Vertex, &labels, &mut vertex_data)?;
-        let index = g
-            .insert_vertex(Some(v_id.clone()), labels, vertex_data)
-            .map_err(IOError::Graph)?;
-
-        node_map.insert(v_id, index);
+        // A stub of this id (an edge named it before) is completed; any other vertex with it
+        // is refused by `insert_vertex`.
+        match g.get_vertex_by_id(&v_id)? {
+            Some(stub) if stubs.contains_key(&stub) => {
+                g.complete_vertex_stub(stub, labels, vertex_data)
+                    .map_err(IOError::Graph)?;
+                stubs.remove(&stub);
+            }
+            _ => {
+                g.insert_vertex(Some(v_id), labels, vertex_data)
+                    .map_err(IOError::Graph)?;
+            }
+        }
         crate::traversal::memory_budget::tick(budget, &*g).map_err(IOError::Graph)
     }
 
@@ -527,7 +543,8 @@ impl GraphMLImport {
         edge: &mut Edge,
         data: &mut MapBuilder,
         shapes: &mut ShapeTable,
-        node_map: &HashMap<CompactString, S::VertexId>,
+        stubs: &mut HashMap<S::VertexId, StubOrigin>,
+        position: u64,
         keys: &HashMap<CompactString, Key>,
         has_defaults: bool,
         budget: &mut Option<UnitBudget>,
@@ -550,17 +567,8 @@ impl GraphMLImport {
             data.shift_remove("labelE");
         }
 
-        let source_idx = node_map.get(&edge.source).ok_or_else(|| {
-            IOError::Graph(GraphError::VertexNotFound {
-                id: edge.source.to_string(),
-            })
-        })?;
-
-        let target_idx = node_map.get(&edge.target).ok_or_else(|| {
-            IOError::Graph(GraphError::VertexNotFound {
-                id: edge.target.to_string(),
-            })
-        })?;
+        let source_idx = endpoint(g, stubs, &edge.source, edge, position)?;
+        let target_idx = endpoint(g, stubs, &edge.target, edge, position)?;
 
         let edge_data = data.finish(shapes);
         // An absent or empty `id` lets the graph assign one.
@@ -576,11 +584,71 @@ impl GraphMLImport {
             )?;
         }
 
-        g.insert_edge(edge_id, edge_label, *source_idx, *target_idx, edge_data)
+        g.insert_edge(edge_id, edge_label, source_idx, target_idx, edge_data)
             .map_err(IOError::Graph)?;
 
         crate::traversal::memory_budget::tick(budget, &*g).map_err(IOError::Graph)
     }
+}
+
+/// Where a stub vertex was first named: the edge (id and endpoints) and its position.
+struct StubOrigin {
+    position: u64,
+    edge: Option<CompactString>,
+    source: CompactString,
+    target: CompactString,
+}
+
+/// The vertex `id` an edge names: one already stored, else a new stub.
+fn endpoint<S: GraphStorage>(
+    g: &mut S,
+    stubs: &mut HashMap<S::VertexId, StubOrigin>,
+    id: &CompactString,
+    edge: &Edge,
+    position: u64,
+) -> Result<S::VertexId, IOError> {
+    if let Some(vertex) = g.get_vertex_by_id(id)? {
+        return Ok(vertex);
+    }
+    let vertex = g.insert_vertex_stub(id.clone()).map_err(IOError::Graph)?;
+    stubs.insert(
+        vertex,
+        StubOrigin {
+            position,
+            edge: edge.id.clone().filter(|id| !id.is_empty()),
+            source: edge.source.clone(),
+            target: edge.target.clone(),
+        },
+    );
+    Ok(vertex)
+}
+
+/// The error of an import that ends with stubs left: edges name vertices that are neither in
+/// the document nor in the target graph.
+fn dangling_edges<S: GraphStorage>(
+    g: &S,
+    stubs: &HashMap<S::VertexId, StubOrigin>,
+) -> Result<Option<IOError>, IOError> {
+    let mut missing: Vec<(&S::VertexId, &StubOrigin)> = stubs.iter().collect();
+    missing.sort_by_key(|(_, origin)| origin.position);
+    let Some((_, first)) = missing.first() else {
+        return Ok(None);
+    };
+    let mut vertices = Vec::new();
+    for (vertex, _) in missing.iter().take(5) {
+        vertices.push(g.vertex_id(**vertex)?.unwrap_or("").to_string());
+    }
+    Ok(Some(IOError::DanglingEdges {
+        count: stubs.len(),
+        vertices,
+        first_edge: format!(
+            "position {}: edge \"{}\" from \"{}\" to \"{}\"",
+            first.position,
+            first.edge.as_deref().unwrap_or(""),
+            first.source,
+            first.target
+        ),
+    }))
 }
 
 /// The operation [`GraphError::ResourceLimitExceeded`] names for a GraphML import.
@@ -1657,10 +1725,13 @@ mod tests {
           <edge id="e1" source="1" target="999"/>
         </graph></graphml>"#;
         let res = parse_xml_str(xml);
-        if let Err(IOError::Graph(GraphError::VertexNotFound { id })) = res {
-            assert_eq!(id, "999");
+        if let Err(IOError::DanglingEdges {
+            count, vertices, ..
+        }) = res
+        {
+            assert_eq!((count, vertices), (1, vec!["999".to_string()]));
         } else {
-            panic!("Expected GraphError::VertexNotFound for target vertex 999");
+            panic!("Expected IOError::DanglingEdges for target vertex 999");
         }
     }
 }

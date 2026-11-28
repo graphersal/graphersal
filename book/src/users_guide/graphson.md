@@ -101,8 +101,8 @@ to parse; the import stops with `IOError::GraphSONParse`.
 | `properties.k` with one entry | the entry's value |
 | `properties.k` with several entries (list cardinality) | one `array` of the values (reported) |
 | meta-properties of an entry | the reserved object property `_meta`: `_meta.k = {..}` for one entry, an array of objects aligned with the values for several (reported) |
-| `outE` and `inE` | edges. `outE` is the source of truth; an `inE` copy with the same id is matched with it (a disagreement is reported, the `outE` copy wins); an edge found only in `inE` (a file written with `Direction.IN`) is added. Without an id, an `inE` entry is taken only when its tail vertex has no `outE` |
-| an edge whose other endpoint is not in the file | connected to the target graph's vertex of that id if one exists, else skipped (reported) |
+| `outE` and `inE` | edges. Each edge is stored when its first copy is read; the other copy with the same id is recognized and skipped (a different label is reported, the first copy is kept; other endpoints mean another edge with the same id, skipped and reported); an edge found only in `inE` (a file written with `Direction.IN`) is added. Without an id, an `inE` entry is taken only when its tail vertex has no `outE` |
+| an edge whose other endpoint is not in the file | connected to the target graph's vertex of that id if one exists, else the import fails with `IOError::DanglingEdges` |
 | a vertex id used twice | the first vertex wins, the second and its edges are skipped (reported) |
 
 Export does the reverse: every vertex is one line with `id`, `label`, `inE`, `outE` and
@@ -135,7 +135,7 @@ representation:
 | `SkippedMalformedValue` | a value whose payload does not fit its type, or nested too deeply |
 | `SkippedMalformedEntry` | a vertex-property or edge entry without the expected shape |
 | `SkippedDuplicateVertex` | a vertex whose id came earlier in the file |
-| `SkippedDanglingEdge` | an edge to a vertex that does not exist |
+| `SkippedDanglingEdge` | deprecated since 0.10.0 and never reported: an edge to a vertex that does not exist fails the import (`IOError::DanglingEdges`) |
 | `SkippedDuplicateEdge` | an edge whose id a different edge of the file already has |
 | `SkippedReservedMeta` | a `_meta` property of a vertex that also has meta-properties |
 | `MultiValuedToArray`, `MetaPropertiesToMeta`, `LabelSplit`, `VertexWithoutId`, `EdgeCopiesDisagree`, `IgnoredKey { key }` | representation changes |
@@ -150,13 +150,19 @@ per note.
 One line (line form) or the whole document (wrapped form) is read only up to
 `GraphSONImport::max_text_bytes` (512 MiB natively, 64 MiB on wasm32); a longer one fails with
 `IOError::InputTooLarge` before it is held in memory (`GraphSONImport::new().with_max_text_bytes(n)`
-changes it). Use the line form for large graphs: it is read line by line, and only the edges are
-buffered until every vertex is known. JSON nesting is bounded, so no input can exhaust the stack.
+changes it). Use the line form for large graphs: it is read line by line and nothing is
+buffered, so an import needs little more memory than the graph it builds. Every edge is stored
+as soon as it is read; an endpoint whose vertex comes later in the file is stored as a stub, an
+empty vertex that the vertex's own line completes with its labels and properties (the schema
+checks the vertex and its edges' connections then). JSON nesting is bounded, so no input can
+exhaust the stack.
 
 Fatal errors stop the import, and on a live graph roll it back as a whole: invalid JSON or a line
 that is not an object (`IOError::GraphSONParse` with the line), an unsupported variant
-(`IOError::UnsupportedGraphSON`), an oversized line, and every graph error, such as a schema
-violation or a vertex id that already exists in the target graph (`IOError::Graph`).
+(`IOError::UnsupportedGraphSON`), an oversized line, an edge to a vertex that is neither in the
+file nor in the target graph (`IOError::DanglingEdges`, naming the first missing ids and the line
+of the first such edge), and every graph error, such as a schema violation or a vertex id that
+already exists in the target graph (`IOError::Graph`).
 
 ## Schema
 
@@ -242,6 +248,7 @@ Listed in [TinkerPop Deviations](../for_developers/tinkerpop_deviations.md#graph
   (user decision: the stored offset is kept as written, never recomputed from a zone name, as in
   the store). A duration with both months or days and a time part is exported as
   `graphersal:Interval`, which TinkerPop cannot read.
-- **Lenient structure**: an edge to a missing vertex is skipped (TinkerPop's `readGraph` fails), a
-  duplicate vertex id keeps the first vertex, and vertex-property ids are not kept.
+- **Lenient structure**: a duplicate vertex id keeps the first vertex, and vertex-property ids are
+  not kept. An edge to a missing vertex fails the import, as TinkerPop's `readGraph` does (user
+  decision 2026-11-28; before 0.10.0 it was skipped and reported).
 - **Widening**: `g:Int32` and `g:Float` come back as `g:Int64` and `g:Double` on export.

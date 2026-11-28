@@ -177,9 +177,25 @@ impl TraversalGraph {
         // Built newest first, reversed at the end: every multi-mutation entry pushes its
         // mutations in reverse forward order.
         let mut out: Vec<Mutation> = Vec::with_capacity(entries.len());
+        // Stubs completed in the walked range: their state right after the completion, which
+        // their `AddVertex` reports (a stub never shows in a change set).
+        let mut completed: HashMap<CompactString, ShadowVertex> = HashMap::new();
         for entry in entries.iter().rev() {
             match entry {
-                UndoEntry::AddedVertex { id, .. } => match shadow.take_vertex(id) {
+                UndoEntry::CompletedStub { id } => match shadow.vertex(id) {
+                    Some(vertex) => {
+                        let state = ShadowVertex {
+                            labels: std::mem::take(&mut vertex.labels),
+                            properties: std::mem::take(&mut vertex.properties),
+                        };
+                        completed.insert(id.clone(), state);
+                    }
+                    None => tracing::error!(%id, "capture: completed stub not found"),
+                },
+                UndoEntry::AddedVertex { id, .. } => match shadow
+                    .take_vertex(id)
+                    .map(|stub| completed.remove(id).unwrap_or(stub))
+                {
                     Some(vertex) => out.push(Mutation::AddVertex {
                         id: id.to_string(),
                         labels: strings(&vertex.labels),

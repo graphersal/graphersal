@@ -958,6 +958,51 @@ pub trait GraphStorage: Send + Sync {
         properties: PropertyMap,
     ) -> Result<Self::EdgeId, GraphError>;
 
+    /// Stores a STUB vertex: a vertex known only by its id, without labels or properties, that
+    /// a later [`Self::complete_vertex_stub`] fills. The file importers (GraphSON, GraphML) call
+    /// it for an edge endpoint whose own record comes later in the file, so they can store
+    /// every edge as soon as they read it instead of buffering the edges until every vertex is
+    /// known. A stub never outlives the import that made it: the importer completes every stub
+    /// or fails (and a failed live import rolls its unit back).
+    ///
+    /// A stub is not checked against the schema (it has no labels yet), and an edge with a stub
+    /// endpoint is stored without the schema's connection check (the endpoint's labels are not
+    /// known yet); [`Self::complete_vertex_stub`] runs both checks. The id must be free
+    /// (`GraphError::VertexIdUniqueConstraint`). Inside a unit, change capture reports a stub
+    /// completed in the same unit as ONE `AddVertex` with its completed state.
+    ///
+    /// Default: [`Self::insert_vertex`] with no labels and no properties: right on a graph
+    /// without a schema, refused by a schema that requires labels or properties.
+    fn insert_vertex_stub(&mut self, id: CompactString) -> Result<Self::VertexId, GraphError> {
+        self.insert_vertex(Some(id), Vec::new(), PropertyMap::default())
+    }
+
+    /// Completes a stub made by [`Self::insert_vertex_stub`] with its labels and properties: the
+    /// vertex then holds exactly what [`Self::insert_vertex`] would have stored, checked the
+    /// same way, and the schema's connection check runs for every edge it already has (an
+    /// edge whose other endpoint is still a stub is checked when that one is completed). On an
+    /// error nothing is changed.
+    ///
+    /// A vertex that is not a stub is refused with `GraphError::Unsupported`.
+    ///
+    /// Default: every label with [`Self::add_vertex_label`], then every property with
+    /// [`Self::set_vertex_property`], so a storage without its own stubs gets the same data
+    /// (checked write by write; it cannot tell a stub from an empty vertex).
+    fn complete_vertex_stub(
+        &mut self,
+        vertex: Self::VertexId,
+        labels: Vec<CompactString>,
+        properties: PropertyMap,
+    ) -> Result<(), GraphError> {
+        for label in labels {
+            self.add_vertex_label(vertex, label)?;
+        }
+        for (key, value) in properties {
+            self.set_vertex_property(vertex, key, value)?;
+        }
+        Ok(())
+    }
+
     /// Creates a vertex the way a query does (SQL's `INSERT`): the stored schema's create-time
     /// defaults first, then [`Self::insert_vertex`]. The same as [`Self::add_vertex_with`] with
     /// [`CreateContext::for_storage`] (`now`/`today` = the start of the outermost open unit,
@@ -2370,39 +2415,9 @@ impl GraphStorage for TraversalGraph {
         &mut self,
         id: Option<CompactString>,
         labels: Vec<CompactString>,
-        mut properties: PropertyMap,
+        properties: PropertyMap,
     ) -> Result<VertexHandle, GraphError> {
-        let labels = normalize_vertex_labels(labels)?;
-        check_properties(&properties)?;
-        self.check_derived_map(
-            crate::graph::schema::ElementKind::Vertex,
-            &labels,
-            &properties,
-        )?;
-
-        // Coerce to, and validate against, the active schema.
-        {
-            let schema = self.schema.read();
-            crate::graph::schema::SchemaValidator::validate_vertex(
-                &schema,
-                &labels,
-                &mut properties,
-            )?;
-        }
-        // Compression rules (D7): strings at rule paths are stored compressed.
-        self.compression_prepare_vertex(&labels, &mut properties);
-        // Unique property indexes: no other vertex may hold one of its keys.
-        if self.property_indexes.has_unique()
-            && let Some(conflict) = self.property_indexes.unique_conflict(
-                crate::graph::schema::ElementKind::Vertex,
-                None,
-                labels.iter().map(CompactString::as_str),
-                Some(&properties),
-                None,
-            )
-        {
-            return Err(self.unique_violation(conflict));
-        }
+        let (labels, properties) = self.checked_vertex(labels, properties, None)?;
 
         let sequence = self.node_sequence;
         let id = match id {
@@ -2424,6 +2439,47 @@ impl GraphStorage for TraversalGraph {
             }
             Ok(self.insert_vertex_raw(id, labels, properties))
         }
+    }
+
+    fn insert_vertex_stub(&mut self, id: CompactString) -> Result<VertexHandle, GraphError> {
+        if self.index.contains_node(&self.graph, &id) {
+            return Err(GraphError::VertexIdUniqueConstraint { id: id.to_string() });
+        }
+        if let Ok(parsed_id) = id.parse::<u64>() {
+            self.node_sequence = self.node_sequence.max(parsed_id);
+        }
+        if self.undo.is_recording() {
+            self.undo.record(UndoEntry::AddedVertex { id: id.clone() });
+        }
+        let handle = self.insert_vertex_raw(id, Vec::new(), PropertyMap::default());
+        self.stubs.insert(handle.index().slot());
+        Ok(handle)
+    }
+
+    fn complete_vertex_stub(
+        &mut self,
+        vertex: VertexHandle,
+        labels: Vec<CompactString>,
+        properties: PropertyMap,
+    ) -> Result<(), GraphError> {
+        let Some(weight) = self.vertex_weight(vertex) else {
+            return Err(GraphError::vertex_removed());
+        };
+        if !self.stubs.contains(&vertex.index().slot()) {
+            return Err(GraphError::Unsupported {
+                operation: "completing a vertex that is not a stub",
+            });
+        }
+        let id = weight.0.clone();
+        let (labels, properties) =
+            self.checked_vertex(labels, properties, Some(vertex.index().slot()))?;
+        self.check_stub_connections(vertex, &labels)?;
+        if self.undo.is_recording() {
+            self.undo.record(UndoEntry::CompletedStub { id });
+        }
+        self.stubs.remove(&vertex.index().slot());
+        self.replace_vertex_state_raw(vertex, labels, properties);
+        Ok(())
     }
 
     fn add_vertex_with(
@@ -2687,16 +2743,29 @@ impl GraphStorage for TraversalGraph {
         let source_labels: &[CompactString] = self.labels.set(source.1);
         let target_labels: &[CompactString] = self.labels.set(target.1);
 
+        // A stub endpoint has no labels yet: its connections are checked when it is completed.
+        let stub_endpoint = !self.stubs.is_empty()
+            && (self.stubs.contains(&from.index().slot())
+                || self.stubs.contains(&to.index().slot()));
+
         // Coerce to, and validate against, the active schema.
         {
             let schema = self.schema.read();
-            crate::graph::schema::SchemaValidator::validate_edge(
-                &schema,
-                label.as_deref(),
-                source_labels,
-                target_labels,
-                &mut properties,
-            )?;
+            if stub_endpoint {
+                crate::graph::schema::SchemaValidator::validate_edge_without_topology(
+                    &schema,
+                    label.as_deref(),
+                    &mut properties,
+                )?;
+            } else {
+                crate::graph::schema::SchemaValidator::validate_edge(
+                    &schema,
+                    label.as_deref(),
+                    source_labels,
+                    target_labels,
+                    &mut properties,
+                )?;
+            }
         }
         self.compression_prepare_edge(label.as_deref(), &mut properties);
         if self.property_indexes.has_unique()
@@ -3608,6 +3677,94 @@ impl GraphStorage for TraversalGraph {
 }
 
 impl TraversalGraph {
+    /// The checks of a vertex write with all its labels and properties, in `insert_vertex`'s
+    /// order (labels, values, vector rules, schema coercion and validation, compression,
+    /// unique indexes); answers what to store. `me` is the slot of the vertex being completed
+    /// (a stub), `None` for a new one.
+    fn checked_vertex(
+        &mut self,
+        labels: Vec<CompactString>,
+        mut properties: PropertyMap,
+        me: Option<u32>,
+    ) -> Result<(Vec<CompactString>, PropertyMap), GraphError> {
+        let labels = normalize_vertex_labels(labels)?;
+        check_properties(&properties)?;
+        self.check_derived_map(
+            crate::graph::schema::ElementKind::Vertex,
+            &labels,
+            &properties,
+        )?;
+
+        // Coerce to, and validate against, the active schema.
+        {
+            let schema = self.schema.read();
+            crate::graph::schema::SchemaValidator::validate_vertex(
+                &schema,
+                &labels,
+                &mut properties,
+            )?;
+        }
+        // Compression rules (D7): strings at rule paths are stored compressed.
+        self.compression_prepare_vertex(&labels, &mut properties);
+        // Unique property indexes: no other vertex may hold one of its keys.
+        if self.property_indexes.has_unique()
+            && let Some(conflict) = self.property_indexes.unique_conflict(
+                crate::graph::schema::ElementKind::Vertex,
+                me,
+                labels.iter().map(CompactString::as_str),
+                Some(&properties),
+                None,
+            )
+        {
+            return Err(self.unique_violation(conflict));
+        }
+        Ok((labels, properties))
+    }
+
+    /// The schema's connection check of every edge a stub already has, as if it carried
+    /// `labels`; an edge whose other endpoint is still a stub waits for that one.
+    fn check_stub_connections(
+        &self,
+        vertex: VertexHandle,
+        labels: &[CompactString],
+    ) -> Result<(), GraphError> {
+        let schema = self.schema.read();
+        if matches!(schema.mode, crate::graph::schema::SchemaMode::None) {
+            return Ok(());
+        }
+        let index = vertex.index();
+        for direction in [Direction::Outgoing, Direction::Incoming] {
+            for edge in self.graph.edges_directed(index, direction) {
+                let (source, target) = (edge.source(), edge.target());
+                // A self-loop shows up in both directions: checked once.
+                if direction == Direction::Incoming && source == index {
+                    continue;
+                }
+                let other = if source == index { target } else { source };
+                if other != index && self.stubs.contains(&other.slot()) {
+                    continue;
+                }
+                let other_labels: &[CompactString] = match self.graph.node_weight(other) {
+                    Some(weight) => self.labels.set(weight.1),
+                    None => &[],
+                };
+                let (source_labels, target_labels) = if source == index {
+                    (labels, if other == index { labels } else { other_labels })
+                } else {
+                    (other_labels, labels)
+                };
+                let label = self.labels.name(edge.weight().1).map(CompactString::as_str);
+                crate::graph::schema::SchemaValidator::check_connection(
+                    &schema,
+                    label,
+                    source_labels,
+                    target_labels,
+                )?;
+            }
+        }
+        Ok(())
+    }
+
     /// Runs `change` (a schema or catalog change) in the open unit, or, outside any unit
     /// (`graph.write().set_schema(..)` on a live graph), as a unit of its own: recorded, part
     /// of the commit sequence, captured and seen by the commit hooks. Loading a graph nobody
@@ -4265,6 +4422,21 @@ impl<G: GraphStorage> GraphStorage for Box<G> {
     }
 
     #[inline]
+    fn insert_vertex_stub(&mut self, id: CompactString) -> Result<Self::VertexId, GraphError> {
+        (**self).insert_vertex_stub(id)
+    }
+
+    #[inline]
+    fn complete_vertex_stub(
+        &mut self,
+        vertex: Self::VertexId,
+        labels: Vec<CompactString>,
+        properties: PropertyMap,
+    ) -> Result<(), GraphError> {
+        (**self).complete_vertex_stub(vertex, labels, properties)
+    }
+
+    #[inline]
     fn set_vertex_property(
         &mut self,
         node: Self::VertexId,
@@ -4799,6 +4971,21 @@ impl<G: GraphStorage> GraphStorage for &mut G {
         properties: PropertyMap,
     ) -> Result<Self::EdgeId, GraphError> {
         (**self).insert_edge(id, label, from, to, properties)
+    }
+
+    #[inline]
+    fn insert_vertex_stub(&mut self, id: CompactString) -> Result<Self::VertexId, GraphError> {
+        (**self).insert_vertex_stub(id)
+    }
+
+    #[inline]
+    fn complete_vertex_stub(
+        &mut self,
+        vertex: Self::VertexId,
+        labels: Vec<CompactString>,
+        properties: PropertyMap,
+    ) -> Result<(), GraphError> {
+        (**self).complete_vertex_stub(vertex, labels, properties)
     }
 
     #[inline]

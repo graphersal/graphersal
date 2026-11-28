@@ -636,7 +636,7 @@ impl Session {
     /// Replaces the graph by one imported from GraphSON text (line or wrapped form). Like
     /// [`Self::load_graphml`], the new graph starts without the current graph's schema and
     /// `schema` (optional JSON text) is set first, the data imported against it as one unit.
-    /// Data the import skips (dates, unsupported types, dangling edges) is listed in
+    /// Data the import skips (dates, unsupported types, duplicate vertices or edges) is listed in
     /// `info().warnings`. The saved queries (the catalog) are kept: GraphSON carries none. On
     /// failure the current graph stays.
     pub fn load_graphson(

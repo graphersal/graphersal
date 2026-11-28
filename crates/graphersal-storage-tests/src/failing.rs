@@ -429,6 +429,19 @@ impl GraphStorage for Failing {
         GraphStorage::insert_vertex(&mut self.inner, id, labels, properties)
     }
 
+    fn insert_vertex_stub(&mut self, id: CompactString) -> Result<ForwardVertexId, GraphError> {
+        GraphStorage::insert_vertex_stub(&mut self.inner, id)
+    }
+
+    fn complete_vertex_stub(
+        &mut self,
+        vertex: ForwardVertexId,
+        labels: Vec<CompactString>,
+        properties: PropertyMap,
+    ) -> Result<(), GraphError> {
+        GraphStorage::complete_vertex_stub(&mut self.inner, vertex, labels, properties)
+    }
+
     fn add_vertex_label(
         &mut self,
         node: ForwardVertexId,

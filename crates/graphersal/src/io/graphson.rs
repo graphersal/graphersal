@@ -133,7 +133,14 @@ pub enum ImportNoteKind {
     /// A vertex whose id an earlier vertex of the file already has (the first one wins; the
     /// skipped vertex's edges are skipped with it).
     SkippedDuplicateVertex,
-    /// An edge whose other endpoint is neither in the file nor in the target graph.
+    /// An edge whose other endpoint is neither in the file nor in the target graph. Never
+    /// reported since 0.10.0: such an edge fails the import with
+    /// [`IOError::DanglingEdges`] (kept so code that
+    /// matches it compiles).
+    #[deprecated(
+        since = "0.10.0",
+        note = "never reported: a dangling edge fails the import with IOError::DanglingEdges"
+    )]
     SkippedDanglingEdge,
     /// An edge whose id an earlier, different edge of the file already has.
     SkippedDuplicateEdge,
@@ -147,8 +154,8 @@ pub enum ImportNoteKind {
     LabelSplit,
     /// A vertex without an id: the graph assigned one.
     VertexWithoutId,
-    /// The `inE` copy of an edge disagrees with its `outE` copy (label or endpoints): the `outE`
-    /// copy is kept.
+    /// The second copy of an edge (the `outE` and the `inE` entry with the same id and the same
+    /// endpoints) has another label: the copy read first is kept.
     EdgeCopiesDisagree,
     /// A key the GraphSON graph format does not define (for example Cosmos DB's `type`), ignored.
     IgnoredKey {
@@ -179,7 +186,8 @@ pub enum ImportNoteKind {
     },
 }
 
-// The deprecated `SubMicrosecondsCut` arm keeps these matches exhaustive (rule 15).
+// The deprecated `SubMicrosecondsCut` and `SkippedDanglingEdge` arms keep these matches
+// exhaustive (rule 15).
 #[allow(deprecated)]
 impl ImportNoteKind {
     /// Whether this kind of note means that data was not imported.
@@ -762,14 +770,12 @@ struct Entry {
     meta: PropertyMap,
 }
 
-/// An edge read from an `outE` or `inE` list, applied once every vertex is known.
-struct PendingEdge {
-    id: Option<CompactString>,
-    label: CompactString,
+/// Where a stub vertex was first named: the record and the id of the edge that named it.
+struct StubOrigin {
+    record: usize,
+    edge: Option<CompactString>,
     from: CompactString,
     to: CompactString,
-    properties: PropertyMap,
-    record: usize,
 }
 
 /// The operation `GraphError::ResourceLimitExceeded` names for a GraphSON import.
@@ -779,15 +785,32 @@ pub(crate) const GRAPHSON_IMPORT: &str = "GraphSON import";
 pub(crate) const GRAPHSON_LOAD: &str = "GraphSON load";
 
 /// The state of one import.
+///
+/// Every edge is stored as soon as its first copy is read (the line form lists an edge twice:
+/// in the `outE` of its tail and the `inE` of its head). An endpoint whose record comes later
+/// is stored as a stub ([`GraphStorage::insert_vertex_stub`]) that its record completes; a
+/// stub left at the end fails the import ([`IOError::DanglingEdges`]). The second copy is
+/// recognized through the graph's own edge id index, so nothing of an edge is buffered.
 struct Importer<'g, S: GraphStorage> {
     g: &'g mut S,
     framing: Framing,
     report: ReportBuilder,
-    vertices: HashMap<CompactString, S::VertexId>,
-    out_edges: Vec<PendingEdge>,
-    in_edges: Vec<PendingEdge>,
-    /// Vertices whose record had an `outE` key: their `inE`-only edges without an id are copies.
-    has_out_e: HashSet<CompactString>,
+    /// The target graph was empty when the import began: every vertex and edge it holds is
+    /// one of the file, so its id indexes answer "already read" without sets of our own.
+    started_empty: bool,
+    /// The ids of the file's vertices read so far; kept only when the target graph was not
+    /// empty (a vertex there before the import is no duplicate of the file).
+    file_vertices: HashSet<CompactString>,
+    /// The ids of the file's edges stored so far; kept only when the target graph was not empty.
+    file_edges: HashSet<CompactString>,
+    /// The stubs not completed yet, with where each was first named.
+    stubs: HashMap<S::VertexId, StubOrigin>,
+    /// Vertices of the file whose record had no `outE` key: an `inE` entry without an id whose
+    /// tail is one of them is the only copy of its edge.
+    without_out_e: HashSet<S::VertexId>,
+    /// Edges without an id stored from an `inE` entry while their tail was a stub: (head, label)
+    /// per tail, so the tail's `outE` copy of the same edge is skipped when its record comes.
+    unpaired_in: HashMap<S::VertexId, Vec<(S::VertexId, CompactString)>>,
     vertex_count: usize,
     edge_count: usize,
     /// The memory budget of a live import (`None`: a load, or no budget configured).
@@ -911,15 +934,18 @@ impl GraphSONImport {
         mut reader: R,
         budget: &mut Option<UnitBudget>,
     ) -> Result<ImportReport, IOError> {
+        let started_empty = g.vertex_count()? == 0 && g.edge_count()? == 0;
         let mut importer = Importer {
             g,
             budget,
             framing: Framing::Lines,
             report: ReportBuilder::default(),
-            vertices: HashMap::new(),
-            out_edges: Vec::new(),
-            in_edges: Vec::new(),
-            has_out_e: HashSet::new(),
+            started_empty,
+            file_vertices: HashSet::new(),
+            file_edges: HashSet::new(),
+            stubs: HashMap::new(),
+            without_out_e: HashSet::new(),
+            unpaired_in: HashMap::new(),
             vertex_count: 0,
             edge_count: 0,
             vertex_map: MapBuilder::default(),
@@ -1005,7 +1031,7 @@ impl GraphSONImport {
                 }
             }
         }
-        importer.edges()?;
+        importer.check_no_stubs_left()?;
         importer.g.shrink_to_fit()?;
         let (vertices, edges) = (importer.vertex_count, importer.edge_count);
         Ok(importer.report.finish(vertices, edges))
@@ -1177,14 +1203,22 @@ impl<S: GraphStorage> Importer<'_, S> {
         let at = self.location(record);
         let shown_id = id.as_deref().unwrap_or("").to_string();
 
+        // A stub of this id (an edge named it before) is completed; another vertex of the file
+        // with it makes this record a duplicate. A vertex of the target graph with it is left
+        // to `insert_vertex`, which refuses the id.
+        let mut stub = None;
         if let Some(existing) = &id
-            && self.vertices.contains_key(existing)
+            && let Some(vertex) = self.g.get_vertex_by_id(existing)?
         {
-            self.report
-                .note(ImportNoteKind::SkippedDuplicateVertex, || {
-                    format!("{at}: vertex \"{existing}\"")
-                });
-            return Ok(());
+            if self.stubs.contains_key(&vertex) {
+                stub = Some(vertex);
+            } else if self.started_empty || self.file_vertices.contains(existing) {
+                self.report
+                    .note(ImportNoteKind::SkippedDuplicateVertex, || {
+                        format!("{at}: vertex \"{existing}\"")
+                    });
+                return Ok(());
+            }
         }
 
         let labels = match label {
@@ -1205,10 +1239,19 @@ impl<S: GraphStorage> Importer<'_, S> {
         let data = self.vertex_properties(properties, &at, &shown_id);
 
         let had_id = id.is_some();
-        let handle = self
-            .g
-            .insert_vertex(id, labels, data)
-            .map_err(IOError::Graph)?;
+        let handle = match stub {
+            Some(vertex) => {
+                self.g
+                    .complete_vertex_stub(vertex, labels, data)
+                    .map_err(IOError::Graph)?;
+                self.stubs.remove(&vertex);
+                vertex
+            }
+            None => self
+                .g
+                .insert_vertex(id, labels, data)
+                .map_err(IOError::Graph)?,
+        };
         let vertex_id = match self.g.vertex_id(handle)? {
             Some(text) => CompactString::from(text),
             None => CompactString::default(),
@@ -1218,16 +1261,23 @@ impl<S: GraphStorage> Importer<'_, S> {
                 format!("{at}: given id \"{vertex_id}\"")
             });
         }
-        self.vertices.insert(vertex_id.clone(), handle);
+        if !self.started_empty {
+            self.file_vertices.insert(vertex_id.clone());
+        }
+        if out_e.is_none() {
+            self.without_out_e.insert(handle);
+        }
         self.vertex_count += 1;
         crate::traversal::memory_budget::tick(self.budget, &*self.g).map_err(IOError::Graph)?;
 
         if let Some(out_e) = out_e {
-            self.has_out_e.insert(vertex_id.clone());
-            self.buffer_edges(out_e, true, &vertex_id, record);
+            self.edges_of(out_e, true, handle, &vertex_id, record)?;
         }
+        // The `outE` copies of edges stored from an `inE` entry while this vertex was a stub
+        // have been seen now (or the record has no `outE`).
+        self.unpaired_in.remove(&handle);
         if let Some(in_e) = in_e {
-            self.buffer_edges(in_e, false, &vertex_id, record);
+            self.edges_of(in_e, false, handle, &vertex_id, record)?;
         }
         Ok(())
     }
@@ -1409,14 +1459,17 @@ impl<S: GraphStorage> Importer<'_, S> {
         });
     }
 
-    /// Buffers the edges of an `outE` (`out == true`) or `inE` map of the vertex `this`.
-    fn buffer_edges(
+    /// Stores the edges of an `outE` (`out == true`) or `inE` map of the vertex `this` (handle
+    /// `this_vertex`), each as soon as it is read: a second copy of an edge already stored is
+    /// recognized and skipped, an endpoint not read yet becomes a stub.
+    fn edges_of(
         &mut self,
         edges: PhysicalValue<'static>,
         out: bool,
+        this_vertex: S::VertexId,
         this: &CompactString,
         record: usize,
-    ) {
+    ) -> Result<(), IOError> {
         let at = self.location(record);
         let PhysicalValue::Object(groups) = edges else {
             self.report.note(ImportNoteKind::SkippedMalformedEntry, || {
@@ -1425,7 +1478,7 @@ impl<S: GraphStorage> Importer<'_, S> {
                     if out { "outE" } else { "inE" }
                 )
             });
-            return;
+            return Ok(());
         };
         let other_key = if out { "inV" } else { "outV" };
         for (label, list) in groups {
@@ -1462,138 +1515,208 @@ impl<S: GraphStorage> Importer<'_, S> {
                     });
                     continue;
                 };
-                let mut properties = std::mem::take(&mut self.edge_map);
-                properties.clear();
-                if let Some(PhysicalValue::Object(prop_fields)) = props {
-                    let mut notes = Vec::new();
-                    for (key, value) in prop_fields {
-                        match decode_property(value, &mut notes) {
-                            Ok(decoded) => {
-                                let shown = id.clone().unwrap_or_default();
-                                self.converted(&mut notes, || {
-                                    format!("{at}: edge \"{shown}\", property \"{key}\"")
-                                });
-                                properties.insert(CompactString::from(key), decoded);
-                            }
-                            Err(skip) => {
-                                notes.clear();
-                                let shown = id.clone().unwrap_or_default();
-                                self.skip_value(skip, || {
-                                    format!("{at}: edge \"{shown}\", property \"{key}\"")
-                                });
-                            }
-                        }
-                    }
-                }
-                let properties_map = properties.finish(&mut self.edge_shapes);
-                self.edge_map = properties;
-                let properties = properties_map;
                 let (from, to) = if out {
                     (this.clone(), other)
                 } else {
                     (other, this.clone())
                 };
-                let pending = PendingEdge {
-                    id,
-                    label: label.clone(),
-                    from,
-                    to,
-                    properties,
-                    record,
-                };
-                if out {
-                    self.out_edges.push(pending);
-                } else {
-                    self.in_edges.push(pending);
-                }
+                self.edge_entry(
+                    EdgeEntry {
+                        id,
+                        label: label.clone(),
+                        from,
+                        to,
+                        out,
+                        record,
+                    },
+                    this_vertex,
+                    props,
+                )?;
             }
-        }
-    }
-
-    /// Adds the buffered edges: every `outE` edge, then the `inE` edges that have no `outE` copy.
-    fn edges(&mut self) -> Result<(), IOError> {
-        // id -> (label, from, to) of the edges added so far.
-        let mut seen: HashMap<CompactString, (CompactString, CompactString, CompactString)> =
-            HashMap::new();
-        let out_edges = std::mem::take(&mut self.out_edges);
-        for edge in out_edges {
-            if let Some(id) = &edge.id
-                && let Some(first) = seen.get(id)
-            {
-                let at = self.location(edge.record);
-                if *first != (edge.label.clone(), edge.from.clone(), edge.to.clone()) {
-                    self.report.note(ImportNoteKind::SkippedDuplicateEdge, || {
-                        format!("{at}: edge \"{id}\"")
-                    });
-                }
-                continue;
-            }
-            self.insert_edge(edge, &mut seen)?;
-        }
-        let in_edges = std::mem::take(&mut self.in_edges);
-        for edge in in_edges {
-            match &edge.id {
-                Some(id) => {
-                    if let Some(first) = seen.get(id) {
-                        if *first != (edge.label.clone(), edge.from.clone(), edge.to.clone()) {
-                            let at = self.location(edge.record);
-                            self.report.note(ImportNoteKind::EdgeCopiesDisagree, || {
-                                format!("{at}: edge \"{id}\"")
-                            });
-                        }
-                        continue;
-                    }
-                }
-                None => {
-                    // Without an id an inE entry cannot be paired: it is a copy whenever its tail
-                    // vertex listed its outE.
-                    if self.has_out_e.contains(&edge.from) {
-                        continue;
-                    }
-                }
-            }
-            self.insert_edge(edge, &mut seen)?;
         }
         Ok(())
     }
 
-    fn insert_edge(
+    /// Stores one edge entry, unless it is the second copy of an edge already stored.
+    fn edge_entry(
         &mut self,
-        edge: PendingEdge,
-        seen: &mut HashMap<CompactString, (CompactString, CompactString, CompactString)>,
+        entry: EdgeEntry,
+        this_vertex: S::VertexId,
+        props: Option<PhysicalValue<'static>>,
     ) -> Result<(), IOError> {
-        let from = self.endpoint(&edge.from)?;
-        let to = self.endpoint(&edge.to)?;
-        let (Some(from), Some(to)) = (from, to) else {
-            let at = self.location(edge.record);
-            let shown = edge.id.clone().unwrap_or_default();
-            let (a, b) = (edge.from.clone(), edge.to.clone());
-            self.report.note(ImportNoteKind::SkippedDanglingEdge, || {
-                format!("{at}: edge \"{shown}\" from \"{a}\" to \"{b}\"")
-            });
+        let other_id = if entry.out { &entry.to } else { &entry.from };
+        if let Some(id) = &entry.id {
+            if let Some(existing) = self.g.get_edge_by_id(id)?
+                && (self.started_empty || self.file_edges.contains(id))
+            {
+                self.second_copy(&entry, existing)?;
+                return Ok(());
+            }
+        } else if entry.out {
+            // An `outE` entry without an id whose `inE` copy was stored while this vertex
+            // was a stub.
+            if let Some(waiting) = self.unpaired_in.get_mut(&this_vertex)
+                && let Some(head) = self.g.get_vertex_by_id(other_id)?
+                && let Some(position) = waiting
+                    .iter()
+                    .position(|(h, l)| *h == head && *l == entry.label)
+            {
+                waiting.swap_remove(position);
+                return Ok(());
+            }
+        } else if let Some(tail) = self.g.get_vertex_by_id(other_id)?
+            && !self.stubs.contains_key(&tail)
+            && (self.started_empty || self.file_vertices.contains(other_id))
+            && !self.without_out_e.contains(&tail)
+        {
+            // An `inE` entry without an id cannot be paired by id: it is a copy whenever its
+            // tail's record (read already) listed its `outE`.
             return Ok(());
-        };
-        if let Some(id) = &edge.id {
-            seen.insert(
-                id.clone(),
-                (edge.label.clone(), edge.from.clone(), edge.to.clone()),
-            );
         }
-        let label = (!edge.label.is_empty()).then_some(edge.label);
+
+        let other = match self.g.get_vertex_by_id(other_id)? {
+            Some(vertex) => vertex,
+            None => {
+                let vertex = self
+                    .g
+                    .insert_vertex_stub(other_id.clone())
+                    .map_err(IOError::Graph)?;
+                self.stubs.insert(
+                    vertex,
+                    StubOrigin {
+                        record: entry.record,
+                        edge: entry.id.clone(),
+                        from: entry.from.clone(),
+                        to: entry.to.clone(),
+                    },
+                );
+                vertex
+            }
+        };
+        if entry.id.is_none() && !entry.out && self.stubs.contains_key(&other) {
+            self.unpaired_in
+                .entry(other)
+                .or_default()
+                .push((this_vertex, entry.label.clone()));
+        }
+        let properties = self.edge_properties(props, &entry);
+        let (from, to) = if entry.out {
+            (this_vertex, other)
+        } else {
+            (other, this_vertex)
+        };
+        if !self.started_empty
+            && let Some(id) = &entry.id
+        {
+            self.file_edges.insert(id.clone());
+        }
+        let label = (!entry.label.is_empty()).then_some(entry.label);
         self.g
-            .insert_edge(edge.id, label, from, to, edge.properties)
+            .insert_edge(entry.id, label, from, to, properties)
             .map_err(IOError::Graph)?;
         self.edge_count += 1;
         crate::traversal::memory_budget::tick(self.budget, &*self.g).map_err(IOError::Graph)
     }
 
-    /// An edge endpoint: a vertex of the file, else one already in the target graph.
-    fn endpoint(&self, id: &str) -> Result<Option<S::VertexId>, IOError> {
-        match self.vertices.get(id) {
-            Some(vertex) => Ok(Some(*vertex)),
-            None => self.g.get_vertex_by_id(id).map_err(IOError::Graph),
+    /// An entry whose id names an edge of the file already stored: the other copy of that edge
+    /// (skipped; noted when its label differs) or a different edge with the same id (skipped
+    /// and noted). The first copy read is kept.
+    fn second_copy(&mut self, entry: &EdgeEntry, existing: S::EdgeId) -> Result<(), IOError> {
+        let same_ends = match self.g.edge_endpoints(existing)? {
+            Some((from, to)) => {
+                self.g.vertex_id(from)? == Some(entry.from.as_str())
+                    && self.g.vertex_id(to)? == Some(entry.to.as_str())
+            }
+            None => false,
+        };
+        let at = self.location(entry.record);
+        let id = entry.id.clone().unwrap_or_default();
+        if !same_ends {
+            self.report.note(ImportNoteKind::SkippedDuplicateEdge, || {
+                format!("{at}: edge \"{id}\"")
+            });
+        } else if self.g.edge_label(existing)?.unwrap_or("") != entry.label.as_str() {
+            self.report.note(ImportNoteKind::EdgeCopiesDisagree, || {
+                format!("{at}: edge \"{id}\"")
+            });
         }
+        Ok(())
     }
+
+    /// Decodes the `properties` of an edge entry.
+    fn edge_properties(
+        &mut self,
+        props: Option<PhysicalValue<'static>>,
+        entry: &EdgeEntry,
+    ) -> PropertyMap {
+        let at = self.location(entry.record);
+        let mut properties = std::mem::take(&mut self.edge_map);
+        properties.clear();
+        if let Some(PhysicalValue::Object(prop_fields)) = props {
+            let mut notes = Vec::new();
+            for (key, value) in prop_fields {
+                match decode_property(value, &mut notes) {
+                    Ok(decoded) => {
+                        let shown = entry.id.clone().unwrap_or_default();
+                        self.converted(&mut notes, || {
+                            format!("{at}: edge \"{shown}\", property \"{key}\"")
+                        });
+                        properties.insert(CompactString::from(key), decoded);
+                    }
+                    Err(skip) => {
+                        notes.clear();
+                        let shown = entry.id.clone().unwrap_or_default();
+                        self.skip_value(skip, || {
+                            format!("{at}: edge \"{shown}\", property \"{key}\"")
+                        });
+                    }
+                }
+            }
+        }
+        let map = properties.finish(&mut self.edge_shapes);
+        self.edge_map = properties;
+        map
+    }
+
+    /// Fails the import when a stub was never completed: an edge names a vertex that is
+    /// neither in the file nor in the target graph.
+    fn check_no_stubs_left(&mut self) -> Result<(), IOError> {
+        if self.stubs.is_empty() {
+            return Ok(());
+        }
+        let mut missing: Vec<(&S::VertexId, &StubOrigin)> = self.stubs.iter().collect();
+        missing.sort_by_key(|(_, origin)| origin.record);
+        let mut vertices = Vec::new();
+        for (vertex, _) in missing.iter().take(MAX_SAMPLES) {
+            vertices.push(self.g.vertex_id(**vertex)?.unwrap_or("").to_string());
+        }
+        let first_edge = match missing.first() {
+            Some((_, origin)) => format!(
+                "{}: edge \"{}\" from \"{}\" to \"{}\"",
+                self.location(origin.record),
+                origin.edge.as_deref().unwrap_or(""),
+                origin.from,
+                origin.to
+            ),
+            None => String::new(),
+        };
+        Err(IOError::DanglingEdges {
+            count: self.stubs.len(),
+            vertices,
+            first_edge,
+        })
+    }
+}
+
+/// One entry of an `outE`/`inE` list, its endpoints as ids.
+struct EdgeEntry {
+    id: Option<CompactString>,
+    label: CompactString,
+    from: CompactString,
+    to: CompactString,
+    /// Read from an `outE` list (else `inE`).
+    out: bool,
+    record: usize,
 }
 
 // ---------------------------------------------------------------------------------------------

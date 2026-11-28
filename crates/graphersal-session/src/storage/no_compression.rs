@@ -144,6 +144,17 @@ impl GraphStorage for NoCompression {
     ) -> Result<Fv, GraphError> {
         GraphStorage::insert_vertex(&mut self.0, id, labels, properties)
     }
+    fn insert_vertex_stub(&mut self, id: CompactString) -> Result<Fv, GraphError> {
+        GraphStorage::insert_vertex_stub(&mut self.0, id)
+    }
+    fn complete_vertex_stub(
+        &mut self,
+        vertex: Fv,
+        labels: Vec<CompactString>,
+        properties: PropertyMap,
+    ) -> Result<(), GraphError> {
+        GraphStorage::complete_vertex_stub(&mut self.0, vertex, labels, properties)
+    }
     fn add_vertex_label(&mut self, node: Fv, label: CompactString) -> Result<bool, GraphError> {
         GraphStorage::add_vertex_label(&mut self.0, node, label)
     }

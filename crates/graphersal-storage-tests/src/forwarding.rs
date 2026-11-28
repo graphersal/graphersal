@@ -299,6 +299,17 @@ impl GraphStorage for Forwarding {
     ) -> Result<ForwardVertexId, GraphError> {
         GraphStorage::insert_vertex(&mut self.0, id, labels, properties).map(ForwardVertexId)
     }
+    fn insert_vertex_stub(&mut self, id: CompactString) -> Result<ForwardVertexId, GraphError> {
+        GraphStorage::insert_vertex_stub(&mut self.0, id).map(ForwardVertexId)
+    }
+    fn complete_vertex_stub(
+        &mut self,
+        vertex: ForwardVertexId,
+        labels: Vec<CompactString>,
+        properties: PropertyMap,
+    ) -> Result<(), GraphError> {
+        GraphStorage::complete_vertex_stub(&mut self.0, vertex.0, labels, properties)
+    }
     fn add_vertex_label(
         &mut self,
         node: ForwardVertexId,

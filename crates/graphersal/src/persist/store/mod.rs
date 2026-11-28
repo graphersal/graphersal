@@ -668,6 +668,9 @@ impl Store {
             &options,
             ("create", None),
         )?;
+        // Freed before the open loads the graph back from the new snapshot: never two copies
+        // of the graph at once (an import written into a new store peaked at two graphs).
+        drop(graph);
         Self::open_at(dir, options)
     }
 

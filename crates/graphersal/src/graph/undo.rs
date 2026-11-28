@@ -279,6 +279,10 @@ pub(crate) enum UndoEntry {
         id: CompactString,
         old: Option<CompactString>,
     },
+    /// A stub vertex was completed (`GraphStorage::complete_vertex_stub`): undone, it is an
+    /// empty stub again. Capture reports the stub's `AddVertex` with the completed state and
+    /// nothing for the completion itself.
+    CompletedStub { id: CompactString },
     /// The stored schema was replaced.
     Schema(Box<GraphSchema>),
     /// A catalog definition was stored, replaced or removed; `old` is what was there before
@@ -607,7 +611,8 @@ impl TraversalGraph {
                 | UndoEntry::VertexProperty { .. }
                 | UndoEntry::EdgeProperty { .. }
                 | UndoEntry::VertexLabels { .. }
-                | UndoEntry::EdgeLabel { .. } => changes.data = true,
+                | UndoEntry::EdgeLabel { .. }
+                | UndoEntry::CompletedStub { .. } => changes.data = true,
             }
             if changes.data && changes.schema && changes.definitions {
                 break;
@@ -866,6 +871,13 @@ impl TraversalGraph {
                 self.compression_normalize_edge(handle);
                 self.pindex_edge(handle, true, None);
             }
+            UndoEntry::CompletedStub { id } => match self.index.get_node(&self.graph, &id) {
+                Some(handle) => {
+                    self.replace_vertex_state_raw(handle, Vec::new(), PropertyMap::default());
+                    self.stubs.insert(handle.index().slot());
+                }
+                None => tracing::error!(%id, "undo: completed stub not found"),
+            },
             UndoEntry::Schema(old) => {
                 *self.schema.write() = *old;
                 self.refresh_vector_rules();
@@ -1206,6 +1218,44 @@ impl TraversalGraph {
         handle
     }
 
+    /// Replaces the labels and the properties of a live vertex and keeps every index exact (the
+    /// label index, the label counts, the property indexes, the compression coding): no
+    /// validation, nothing recorded. Completes a stub and undoes that completion.
+    pub(crate) fn replace_vertex_state_raw(
+        &mut self,
+        node: VertexHandle,
+        labels: Vec<CompactString>,
+        mut properties: PropertyMap,
+    ) {
+        if self.vertex_weight(node).is_none() {
+            tracing::error!("replace vertex state: vertex not found");
+            return;
+        }
+        self.pindex_vertex(node, false, None);
+        self.shapes.adopt(&mut properties);
+        let label_set = self.labels.intern_set(&labels);
+        self.compression_code_row(
+            crate::graph::schema::ElementKind::Vertex,
+            crate::graph::compression::LoadLabels::Vertex(label_set),
+            &labels,
+            &mut properties,
+        );
+        let Some(vertex) = self.vertex_weight_mut(node) else {
+            return;
+        };
+        let current_set = std::mem::replace(&mut vertex.1, label_set);
+        vertex.2 = properties;
+        let current = self.labels.set(current_set).to_vec();
+        self.statistics.vertex_relabeled(&current, &labels);
+        for label in current.iter().filter(|l| !labels.contains(l)) {
+            self.index.remove_node_label(label, node);
+        }
+        for label in labels.into_iter().filter(|l| !current.contains(l)) {
+            self.index.insert_node_label(label, node);
+        }
+        self.pindex_vertex(node, true, None);
+    }
+
     /// Stores an edge between two live vertices and indexes it: no validation, no sequence
     /// change, nothing recorded. The id must be free.
     pub(crate) fn insert_edge_raw(
@@ -1329,6 +1379,9 @@ impl TraversalGraph {
             }
         }
         self.pindex_vertex(node, false, None);
+        if !self.stubs.is_empty() {
+            self.stubs.remove(&index.slot());
+        }
         let (id, labels, properties, _) = self.graph.remove_node(index)?;
         let labels = self.labels.set(labels).to_vec();
         self.statistics.vertex_removed(&labels);

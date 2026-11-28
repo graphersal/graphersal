@@ -149,22 +149,24 @@ fn graph_files_load_by_their_extension_with_the_import_warnings() {
     assert_eq!(info_gsnap["name"], "modern.gsnap");
     assert_eq!(info_gsnap["kind"], "file");
     assert_eq!(info_gsnap["vertexCount"], 6);
-    // GraphSON without its first vertex line: the edges to it dangle and are skipped.
+    // GraphSON with its first vertex line twice: the second one is skipped and reported (a
+    // dangling edge fails the load since 0.10.0, so it no longer serves as the warning).
     let text = session.save_graphson().expect("GraphSON")["text"]
         .as_str()
         .expect("the text")
         .to_string();
-    let rest: Vec<&str> = text.lines().skip(1).collect();
+    let mut lines: Vec<&str> = text.lines().collect();
+    lines.push(lines[0]);
     let graphson = dir.join("modern.json");
-    std::fs::write(&graphson, rest.join("\n")).expect("written");
+    std::fs::write(&graphson, lines.join("\n")).expect("written");
     let launched_json = launched(ServedSource::File(graphson)).expect("the launch");
     assert!(
         !launched_json.warnings.is_empty(),
-        "the skipped edges are reported"
+        "the skipped duplicate is reported"
     );
     let info_json = info(&context_of(&launched_json));
     assert_eq!(info_json["name"], "modern.json");
-    assert_eq!(info_json["vertexCount"], 5);
+    assert_eq!(info_json["vertexCount"], 6);
     // A file that cannot be read.
     let Err(err) = launched(ServedSource::File(dir.join("missing.json"))) else {
         panic!("refused");
