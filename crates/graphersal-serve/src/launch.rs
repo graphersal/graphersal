@@ -254,20 +254,22 @@ fn load(session: &mut Session, source: ServedSource) -> Result<Vec<String>, Setu
         .collect())
 }
 
-/// Loads the graph file `path` into `session` by its extension; answers the graph info.
+/// Loads the graph file `path` into `session` by its extension; answers the graph info. The
+/// file is read as it is parsed, never held in memory as a whole.
 fn load_file(session: &mut Session, path: &Path) -> Result<Value, SetupError> {
-    let bytes = std::fs::read(path)
+    let file = std::fs::File::open(path)
         .map_err(|err| format!("Error: cannot read '{}': {err}", path.display()))?;
+    let reader = std::io::BufReader::with_capacity(128 * 1024, file);
     let name = path
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_else(|| path.display().to_string());
     let info = if GraphSource::is_snapshot_path(path) {
-        session.load_snapshot(&bytes, &name)
+        session.load_snapshot_reader(reader, &name)
     } else if GraphSource::is_graphson_path(path) {
-        session.load_graphson(&bytes, &name, None)
+        session.load_graphson_reader(reader, &name, None)
     } else {
-        session.load_graphml(&bytes, &name, None)
+        session.load_graphml_reader(reader, &name, None)
     };
     Ok(info.map_err(String::from)?)
 }
