@@ -222,7 +222,9 @@ impl Observed {
 #[derive(Debug, Default)]
 pub struct SchemaInferer {
     vertices: IndexMap<String, ObservedObject>,
-    edges: IndexMap<String, (ObservedObject, Vec<EdgeConnection>)>,
+    /// Per edge label: its properties and its connections (endpoint primary-label pairs, in
+    /// the order first seen; a set, so a label with many pairs stays linear).
+    edges: IndexMap<String, (ObservedObject, indexmap::IndexSet<(String, String)>)>,
 }
 
 impl SchemaInferer {
@@ -262,12 +264,11 @@ impl SchemaInferer {
         };
         let (observed, connections) = self.edges.entry(label.to_string()).or_default();
         observed.observe_map(properties.iter().map(|(k, v)| (k.as_str(), v)));
-        if let (Some(from), Some(to)) = (source_labels.first(), target_labels.first())
-            && !connections
-                .iter()
-                .any(|c| c.from == from.as_str() && c.to == to.as_str())
-        {
-            connections.push(EdgeConnection::new(from.as_str(), to.as_str()));
+        if let (Some(from), Some(to)) = (source_labels.first(), target_labels.first()) {
+            let pair = (from.as_str(), to.as_str());
+            if !connections.contains(&pair as &dyn ConnectionKey) {
+                connections.insert((from.to_string(), to.to_string()));
+            }
         }
     }
 
@@ -281,7 +282,10 @@ impl SchemaInferer {
         }
         for (label, (observed, connections)) in self.edges {
             let mut edge = EdgeSchema::new(observed.into_schema());
-            edge.connections = connections;
+            edge.connections = connections
+                .into_iter()
+                .map(|(from, to)| EdgeConnection::new(from.as_str(), to.as_str()))
+                .collect();
             schema.edges.insert(label, edge);
         }
         schema
@@ -312,5 +316,43 @@ impl SchemaInferer {
             );
         }
         Ok(inferer.finish())
+    }
+}
+
+/// A connection pair looked up by borrowed labels: no `String`s are allocated for a pair the
+/// inferer has seen already.
+trait ConnectionKey {
+    fn key(&self) -> (&str, &str);
+}
+
+impl ConnectionKey for (String, String) {
+    fn key(&self) -> (&str, &str) {
+        (self.0.as_str(), self.1.as_str())
+    }
+}
+
+impl ConnectionKey for (&str, &str) {
+    fn key(&self) -> (&str, &str) {
+        (self.0, self.1)
+    }
+}
+
+impl<'a> std::borrow::Borrow<dyn ConnectionKey + 'a> for (String, String) {
+    fn borrow(&self) -> &(dyn ConnectionKey + 'a) {
+        self
+    }
+}
+
+impl PartialEq for dyn ConnectionKey + '_ {
+    fn eq(&self, other: &Self) -> bool {
+        self.key() == other.key()
+    }
+}
+
+impl Eq for dyn ConnectionKey + '_ {}
+
+impl std::hash::Hash for dyn ConnectionKey + '_ {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.key().hash(state);
     }
 }

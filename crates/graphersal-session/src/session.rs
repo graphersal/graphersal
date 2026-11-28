@@ -1822,10 +1822,12 @@ impl Session {
 
     /// "Save graph": `{text, schema, warnings}`. `text` is the graph as GraphML (which carries
     /// no schema), `schema` the stored schema as JSON text in the schema format, or `null`
-    /// when the graph stores none. The result is checked by loading it back the way the
-    /// playground does (the schema first, then the GraphML): a warning names a property whose
+    /// when the graph stores none. The warnings say what loading the files back the way the
+    /// playground does (the schema first, then the GraphML) would give: a property whose
     /// logical type does not survive (an undeclared `uuid`, `array` or `object` comes back as a
-    /// string, a key with different types on different labels), or says why loading fails.
+    /// string, a key with different types on different labels), or why loading fails. They are
+    /// worked out without loading anything ([`graphersal::io::ReloadPreview`]): no second
+    /// graph, no parse of the text.
     pub fn save_graphml(&self) -> Result<Value, SessionError> {
         let mut buf = Vec::new();
         self.graph
@@ -1834,16 +1836,7 @@ impl Session {
         let text = String::from_utf8(buf).map_err(|err| err.to_string())?;
         let stored = self.graph.get_schema()?;
         let schema_json = stored.as_ref().map(GraphSchema::to_json_pretty);
-        let warnings = match import_with_schema(text.as_bytes(), stored) {
-            Err(err) => vec![format!(
-                "Loading the saved files back fails: {}",
-                first_line(&err.to_string())
-            )],
-            Ok(loaded) => type_drift(
-                &self.graph.inferred_schema()?,
-                &loaded.read().infer_schema()?,
-            ),
-        };
+        let warnings = self.reload_warnings(false)?;
         Ok(json!({"text": text, "schema": schema_json, "warnings": warnings}))
     }
 }
@@ -1852,7 +1845,8 @@ impl Session {
     /// "Save graph" as GraphSON: `{text, schema, warnings}`. `text` is the graph as GraphSON 3.0
     /// in the line form (which keeps `uuid`, `array` and `object` values typed and carries no
     /// schema), `schema` the stored schema JSON text or `null`. A warning says why loading the
-    /// files back (schema first) would fail.
+    /// files back (schema first) would fail, or which property type would change (worked out
+    /// without loading anything, as [`Self::save_graphml`] does).
     pub fn save_graphson(&self) -> Result<Value, SessionError> {
         let mut buf = Vec::new();
         self.graph
@@ -1861,21 +1855,27 @@ impl Session {
         let text = String::from_utf8(buf).map_err(|err| err.to_string())?;
         let stored = self.graph.get_schema()?;
         let schema_json = stored.as_ref().map(GraphSchema::to_json_pretty);
-        let warnings = match import_graphson_with_schema(text.as_bytes(), stored) {
-            Err(err) => vec![format!(
-                "Loading the saved files back fails: {}",
-                first_line(&err.to_string())
-            )],
-            Ok((loaded, report)) => {
-                let mut warnings = report_warnings(&report);
-                warnings.extend(type_drift(
-                    &self.graph.inferred_schema()?,
-                    &loaded.read().infer_schema()?,
-                ));
-                warnings
-            }
-        };
+        let warnings = self.reload_warnings(true)?;
         Ok(json!({"text": text, "schema": schema_json, "warnings": warnings}))
+    }
+
+    /// The warnings of a save as GraphML (`graphson: false`) or GraphSON: why loading the files
+    /// back would fail, else the properties whose type would change (at most ten).
+    fn reload_warnings(&self, graphson: bool) -> Result<Vec<String>, SessionError> {
+        let preview = self
+            .graph
+            .reload_preview(graphson)
+            .map_err(|err| format_diagnostic(&err))?;
+        Ok(match preview {
+            graphersal::io::ReloadPreview::Loads(loaded) => {
+                type_drift(&self.graph.inferred_schema()?, &loaded)
+            }
+            graphersal::io::ReloadPreview::Fails(err) => vec![format!(
+                "Loading the saved files back fails: {}",
+                first_line(&format_diagnostic(&err))
+            )],
+            _ => Vec::new(),
+        })
     }
 }
 
@@ -3173,6 +3173,131 @@ mod tests {
         let warnings = saved["warnings"].as_array().unwrap();
         assert_eq!(warnings.len(), 1, "{saved}");
         assert!(warnings[0].as_str().unwrap().contains("'tags'"));
+    }
+
+    /// The warnings "Save graph" gave before they were worked out statically: the saved text
+    /// loaded back into a new graph with the stored schema, its inferred schema compared. The
+    /// oracle of `the_save_warnings_equal_a_real_load_of_the_saved_files`.
+    fn round_trip_warnings(session: &Session, graphson: bool) -> Vec<String> {
+        let saved = if graphson {
+            session.save_graphson()
+        } else {
+            session.save_graphml()
+        }
+        .unwrap();
+        let text = saved["text"].as_str().unwrap().as_bytes().to_vec();
+        let stored = session.graph.get_schema().unwrap();
+        let loaded = if graphson {
+            import_graphson_with_schema(text.as_slice(), stored)
+                .map(|(graph, report)| (graph, report_warnings(&report)))
+        } else {
+            import_with_schema(text.as_slice(), stored).map(|graph| (graph, Vec::new()))
+        };
+        match loaded {
+            Err(err) => vec![format!(
+                "Loading the saved files back fails: {}",
+                first_line(&err.to_string())
+            )],
+            Ok((graph, mut warnings)) => {
+                warnings.extend(type_drift(
+                    &session.graph.inferred_schema().unwrap(),
+                    &graph.read().infer_schema().unwrap(),
+                ));
+                warnings
+            }
+        }
+    }
+
+    /// The save warnings, worked out without loading anything, equal what a real load of the
+    /// saved files gives, for GraphML and GraphSON, over graphs that exercise every rule: types
+    /// GraphML writes as text (`uuid`, containers, temporal values, vectors), key types promoted
+    /// across labels (`long` + `double`, `long` + `string`) and mixed in one label, nulls,
+    /// unlabeled elements, multi-label vertices, open and closed schemas that declare the types,
+    /// and a declared type the saved text cannot load into.
+    #[test]
+    fn the_save_warnings_equal_a_real_load_of_the_saved_files() {
+        // (name, schema, script, (GraphML warns, GraphSON warns))
+        #[allow(clippy::type_complexity)]
+        let cases: &[(&str, Option<&str>, &str, (bool, bool))] = &[
+            ("plain modern", None, "", (false, false)),
+            (
+                "text types undeclared",
+                None,
+                r#"g.v(1).property("uid", UUID.fromString("550e8400-e29b-41d4-a716-446655440000")).property("tags", ["a", "b"]).property("config", #{cpu: 2}).property("born", date("2020-01-02")).property("at", datetime("2020-01-02T03:04:05Z")).property("emb", vector([1.0, 2.0])).next()"#,
+                (true, true),
+            ),
+            (
+                "text types declared",
+                Some(TYPED_SCHEMA),
+                r#"g.v(1).property("uid", UUID.fromString("550e8400-e29b-41d4-a716-446655440000")).property("tags", ["a", "b"]).property("config", #{cpu: 2}).next()"#,
+                (false, false),
+            ),
+            (
+                "promoted and mixed keys, nulls",
+                None,
+                r#"g.v(1).property("w", 1).next(); g.v(3).property("w", 0.5).next(); g.v(2).property("k", 7).next(); g.v(5).property("k", "seven").next(); g.v(4).property("mix", 1).next(); g.v(6).property("mix", true).next(); g.e(7).property("weight", 3).next(); g.v(1).property("n", ()).next()"#,
+                (true, false),
+            ),
+            (
+                "unlabeled and multi-label vertices",
+                None,
+                r#"g.add_v().property("x", 1).next(); g.v(1).add_label("admin").next(); g.add_e("rel").from(__.v(1)).to(__.v(2)).next()"#,
+                (false, false),
+            ),
+            (
+                "an unlabeled vertex that loads back as 'vertex', which the schema requires more of",
+                Some(
+                    r#"{"mode": "open", "vertices": {"vertex": {"schema": {"type": "object", "properties": {"name": {"type": "string"}}, "required": ["name"]}}}}"#,
+                ),
+                r#"g.add_v().next()"#,
+                (false, true),
+            ),
+            (
+                "a declared integer the GraphML text cannot load into",
+                Some(
+                    r#"{"mode": "open", "vertices": {"person": {"schema": {"type": "object", "properties": {"k": {"type": ["integer", "null"]}}}}}}"#,
+                ),
+                r#"g.v(1).property("k", 7).next(); g.v(3).property("k", "seven").next()"#,
+                (true, false),
+            ),
+        ];
+        for (name, schema, script, expected) in cases {
+            let mut s = modern();
+            if !script.is_empty() {
+                let r = run(&mut s, script);
+                assert_eq!(r["ok"], true, "{name}: {r}");
+            }
+            if let Some(schema) = schema {
+                s.set_schema(schema, None)
+                    .unwrap_or_else(|err| panic!("{name}: {err}"));
+            }
+            for graphson in [false, true] {
+                let saved = if graphson {
+                    s.save_graphson()
+                } else {
+                    s.save_graphml()
+                }
+                .unwrap();
+                let warnings: Vec<String> = saved["warnings"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|w| w.as_str().unwrap().to_string())
+                    .collect();
+                let format = if graphson { "GraphSON" } else { "GraphML" };
+                assert_eq!(
+                    warnings,
+                    round_trip_warnings(&s, graphson),
+                    "{name}, {format}"
+                );
+                let warns = if graphson { expected.1 } else { expected.0 };
+                assert_eq!(
+                    !warnings.is_empty(),
+                    warns,
+                    "{name}, {format}: {warnings:?}"
+                );
+            }
+        }
     }
 
     /// The schema of a declared `uuid`/`array`/`object` property for `person`.

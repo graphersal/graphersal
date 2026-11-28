@@ -3681,7 +3681,7 @@ impl TraversalGraph {
     /// order (labels, values, vector rules, schema coercion and validation, compression,
     /// unique indexes); answers what to store. `me` is the slot of the vertex being completed
     /// (a stub), `None` for a new one.
-    fn checked_vertex(
+    pub(crate) fn checked_vertex(
         &mut self,
         labels: Vec<CompactString>,
         mut properties: PropertyMap,
