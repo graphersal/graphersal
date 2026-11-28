@@ -14,7 +14,23 @@ let restored = Store::create_from_packed("from-gsnap", file, StoreOptions::new()
 ```
 
 The directory must be missing or empty. A new store has one snapshot (commit 0, the initial
-graph) and an empty WAL, and is open read-write when `create` returns. A path ending in
+graph) and an empty WAL, and is open read-write when `create` returns. `create_with` frees the
+given graph before it opens the store (the open loads the graph back from the new snapshot), so
+the two copies never take memory at once.
+
+A host that only writes the store, such as an import of a graph file into a new store, uses the
+closed form `Store::create_with_dir(dir, graph, options)` (`Store::create_layer_with_dir` for a
+layer): the snapshot is written by the streaming encoder, the graph is freed and nothing is
+loaded back; `Store::open` opens it later as a cleanly closed store.
+
+```rust,no_run
+use graphersal::io::GraphSONImport;
+use graphersal::persist::{Store, StoreOptions};
+
+let (graph, _report) = GraphSONImport::new().load_file("graph.jsonl")?;
+Store::create_with_dir("graph-data", graph.into_inner(), StoreOptions::new())?;
+# Ok::<(), Box<dyn std::error::Error>>(())
+``` A path ending in
 `.gstore` (or `Store::create_file`) makes a [single-file store](single_file_store.md).
 `StoreOptions::with_chunk_bytes` sets the snapshot chunk size, which is fixed for the store's
 life ([Checkpoints](store_checkpoints.md#the-chunk-size)).

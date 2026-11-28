@@ -210,6 +210,32 @@ fn create_layer_with_writes_the_given_layer_over_its_own_base_only() {
 
 /// Kill after every commit (a crash image of the files, durability per commit): each image
 /// recovers exactly the layer committed so far; a recovered image keeps committing.
+/// The closed form `create_layer_with_dir` writes the same store without opening it; the store
+/// opens over its base with the layer exactly, and another base is refused before writing.
+#[test]
+fn create_layer_with_dir_writes_the_layer_without_opening_it() {
+    let base = layer_base();
+    let layer = oracle(&base, history().len());
+    let expected = state(&layer);
+    let dir = MemDir::new();
+    LayerStore::create_layer_with_dir(&dir, &base, layer, options()).unwrap();
+    let store = LayerStore::open_layer(&dir, &base, options()).unwrap();
+    assert_eq!(state(&store.graph().read()), expected);
+    assert_eq!(store.open_report().commits_replayed, 0);
+    assert!(store.open_report().clean_close, "a clean store");
+    drop(store);
+
+    let other = layer_base();
+    let empty = MemDir::new();
+    let err = LayerStore::create_layer_with_dir(&empty, &base, oracle(&other, 1), options())
+        .expect_err("another base");
+    assert!(
+        matches!(err, PersistError::LayerBaseMismatch { .. }),
+        "{err}"
+    );
+    assert!(empty.file_names().is_empty(), "nothing written");
+}
+
 #[test]
 fn a_crash_after_every_commit_recovers_the_committed_layer() {
     let base = layer_base();

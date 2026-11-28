@@ -34,6 +34,28 @@ fn last_wal(dir: &MemDir) -> String {
         .unwrap()
 }
 
+/// `create_with_dir` writes the store `create_with` writes without opening it (nothing is
+/// loaded back): it opens later as a cleanly closed store holding the graph, and a directory
+/// that is not empty is refused without a change.
+#[test]
+fn create_with_dir_writes_the_graph_without_opening_the_store() {
+    let dir = MemDir::named("memory:closed-create");
+    let expected = dump(&varied_graph());
+    Store::create_with_dir(&dir, varied_graph(), StoreOptions::new()).unwrap();
+    assert!(
+        !dir.file_names().iter().any(|n| n.starts_with("wal/")),
+        "never opened"
+    );
+    let store = Store::open(&dir, StoreOptions::new()).unwrap();
+    assert!(store.open_report().clean_close);
+    assert_eq!(dump(&store.graph().read()), expected);
+    add_person(&store, "ann");
+    store.close().unwrap();
+    let before = dir.file_names();
+    assert!(Store::create_with_dir(&dir, varied_graph(), StoreOptions::new()).is_err());
+    assert_eq!(dir.file_names(), before, "a refused create changes nothing");
+}
+
 #[test]
 fn a_store_in_memory_does_everything_a_directory_store_does() {
     let dir = MemDir::named("memory:main");
