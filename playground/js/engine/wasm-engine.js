@@ -43,16 +43,19 @@ export function graphFileFormat(name) {
  * schema set after it (`point.schema`) is applied on top. The catalog (`point.catalog`, its JSON text: saved
  * queries, compression rules, every kind) comes last and replaces the catalog the graph brought
  * (a snapshot carries one).
- * @param {{type:'sample', kind:string, schema:string|null, catalog?:string|null} | {type:'graphml'|'graphson'|'snapshot', bytes:Uint8Array, name:string, schema:string|null, catalog?:string|null}} point
+ * `source` is a File or Blob (posted by reference and read in chunks by the worker; a File the
+ * user picked stays a reference to the file on disk); `bytes` (a Uint8Array) is read the same way.
+ * @param {{type:'sample', kind:string, schema:string|null, catalog?:string|null} | {type:'graphml'|'graphson'|'snapshot', source?:Blob, bytes?:Uint8Array, name:string, schema:string|null, catalog?:string|null}} point
  * @returns {Array<[string, ...any]>}
  */
 export function restoreCalls(point) {
   const schema = point.schema ? [['setSchema', point.schema]] : [];
   const catalog = point.catalog ? [['loadCatalog', point.catalog, true]] : [];
   if (point.type === 'sample') return [['loadSample', point.kind], ...schema, ...catalog];
-  if (point.type === 'snapshot') return [['loadSnapshot', point.bytes, point.name], ...schema, ...catalog];
+  const data = point.source ?? point.bytes;
+  if (point.type === 'snapshot') return [['loadSnapshot', data, point.name], ...schema, ...catalog];
   const load = point.type === 'graphson' ? 'loadGraphson' : 'loadGraphml';
-  return [[load, point.bytes, point.name, point.schema || null], ...catalog];
+  return [[load, data, point.name, point.schema || null], ...catalog];
 }
 
 const WASM_URL = new URL('../../pkg/graphersal_wasm_bg.wasm', import.meta.url);
@@ -87,7 +90,7 @@ export class WasmEngine extends Engine {
     this.nextId = 1;
     this.meta = null; // {version, memoryTracked, samples}
     this.graph = null; // GraphInfo of the loaded graph
-    this.restorePoint = null; // {type: 'sample', kind, schema} | {type: 'graphml'|'graphson', bytes, name, kind, schema}
+    this.restorePoint = null; // {type: 'sample', kind, schema} | {type: 'graphml'|'graphson'|'snapshot', source (File|Blob), name, kind, schema}
     this.schemaJson = null; // the current graph's schema as last loaded or saved (JSON text), or null
     this.catalogJson = null; // the catalog as last loaded, edited or saved (catalog JSON text), or null
     this.startup = null;
@@ -139,7 +142,8 @@ export class WasmEngine extends Engine {
     return new Promise((resolve, reject) => {
       const id = this.nextId++;
       this.pending.set(id, { resolve, reject });
-      // Bytes are copied, not transferred: the restore point keeps its own copy.
+      // A File or Blob is posted by reference (its bytes are not copied): the worker reads it
+      // in chunks, and the restore point keeps the same reference.
       this.worker.postMessage({ id, method, args });
     });
   }
@@ -311,21 +315,22 @@ export class WasmEngine extends Engine {
       if (schemaFile && format === 'snapshot') {
         throw new Error('A snapshot (.gsnap) brings its own schema: load it without a schema file');
       }
-      const bytes = new Uint8Array(await file.arrayBuffer());
+      // The File itself goes to the worker (a reference to the file on disk, read in chunks
+      // there): the page never holds the file's bytes, and neither does the module.
       if (format === 'snapshot') {
         // A snapshot brings its own schema.
-        this.graph = await this.call('loadSnapshot', bytes, file.name);
+        this.graph = await this.call('loadSnapshot', file, file.name);
         this.schemaJson = null;
         this.catalogJson = null;
-        this.restorePoint = { type: 'snapshot', bytes, name: file.name, kind: 'file', schema: null, catalog: null };
+        this.restorePoint = { type: 'snapshot', source: file, name: file.name, kind: 'file', schema: null, catalog: null };
         return this.graph;
       }
       // The new graph gets the schema file's schema or none (never the previous graph's); the
       // engine carries the catalog over.
       const schema = schemaFile ? await schemaFile.text() : null;
-      this.graph = await this.call(format === 'graphson' ? 'loadGraphson' : 'loadGraphml', bytes, file.name, schema);
+      this.graph = await this.call(format === 'graphson' ? 'loadGraphson' : 'loadGraphml', file, file.name, schema);
       this.schemaJson = schema;
-      this.restorePoint = { type: format, bytes, name: file.name, kind: 'file', schema, catalog: this.catalogJson };
+      this.restorePoint = { type: format, source: file, name: file.name, kind: 'file', schema, catalog: this.catalogJson };
     } else {
       this.graph = await this.call('loadSample', kind);
       this.schemaJson = null;
@@ -715,7 +720,8 @@ export class WasmEngine extends Engine {
       this.catalogJson = null;
       this.restorePoint = {
         type: 'snapshot',
-        bytes,
+        // A Blob: the browser keeps it outside the page's heap and the module's memory.
+        source: new Blob([bytes]),
         name: this.graph ? this.graph.name : 'saved graph',
         kind: this.graph ? this.graph.kind : 'file',
         schema: null,
@@ -731,7 +737,7 @@ export class WasmEngine extends Engine {
     this.restorePoint = {
       catalog,
       type: format === 'graphml' ? 'graphml' : 'graphson',
-      bytes: new TextEncoder().encode(saved.text),
+      source: new Blob([saved.text]),
       name: this.graph ? this.graph.name : 'saved graph',
       kind: this.graph ? this.graph.kind : 'file',
       schema: saved.schema,

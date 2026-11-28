@@ -14,6 +14,9 @@ use graphersal_session::views;
 use serde_json::Value;
 use wasm_bindgen::prelude::*;
 
+mod chunks;
+pub use chunks::ChunkSource;
+
 pub use graphersal_session::{ForkInto, RunOptions, Session, StoreError};
 
 // Exact per-step memory figures for `profile_types: ["memory"]` (`"source": "tracked"`): the
@@ -165,6 +168,52 @@ impl Playground {
             .load_graphson(bytes, name, schema.as_deref())
             .map(|v| to_text(&v))
             .map_err(|e| JsError::new(&e.to_string()))
+    }
+
+    /// [`Self::load_graphml`] reading the file in chunks from `source` (a `File` or `Blob` the
+    /// worker wraps): never copied into the module's memory as a whole.
+    #[wasm_bindgen(js_name = loadGraphmlSource)]
+    pub fn load_graphml_source(
+        &mut self,
+        source: ChunkSource,
+        name: &str,
+        schema: Option<String>,
+    ) -> Result<String, JsError> {
+        json_text(self.session.load_graphml_reader(
+            chunks::ChunkReader::buffered(source),
+            name,
+            schema.as_deref(),
+        ))
+    }
+
+    /// [`Self::load_graphson`] reading the file in chunks from `source` (a `File` or `Blob` the
+    /// worker wraps): never copied into the module's memory as a whole.
+    #[wasm_bindgen(js_name = loadGraphsonSource)]
+    pub fn load_graphson_source(
+        &mut self,
+        source: ChunkSource,
+        name: &str,
+        schema: Option<String>,
+    ) -> Result<String, JsError> {
+        json_text(self.session.load_graphson_reader(
+            chunks::ChunkReader::buffered(source),
+            name,
+            schema.as_deref(),
+        ))
+    }
+
+    /// [`Self::load_snapshot_bytes`] reading the file in chunks from `source` (a `File` or
+    /// `Blob` the worker wraps): never copied into the module's memory as a whole.
+    #[wasm_bindgen(js_name = loadSnapshotSource)]
+    pub fn load_snapshot_source(
+        &mut self,
+        source: ChunkSource,
+        name: &str,
+    ) -> Result<String, JsError> {
+        json_text(
+            self.session
+                .load_snapshot_reader(chunks::ChunkReader::buffered(source), name),
+        )
     }
 
     /// Replaces the graph by one read from a packed snapshot (`.gsnap`, the lossless binary

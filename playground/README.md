@@ -825,7 +825,7 @@ async; the engine answers from its Web Worker, so a long query never blocks the 
 |---|---|
 | `info()` | `{name, version, memoryTracked}` |
 | `listSampleGraphs()` | `[{kind, title, description, available}]` (`empty`, `modern`, `large`, `tree`) |
-| `loadGraph({kind, file?, schemaFile?})` | `{name, kind, vertexCount, edgeCount, schemaMode, warnings}`: a graph file starts WITHOUT the previous graph's schema; the optional `schemaFile` (JSON, not with a `.gsnap`) is set on the new empty graph first and the data imported against it as one unit (wasm `loadGraphsonBytes`/`loadGraphmlBytes(bytes, name, schema?)`) |
+| `loadGraph({kind, file?, schemaFile?})` | `{name, kind, vertexCount, edgeCount, schemaMode, warnings}`: a graph file starts WITHOUT the previous graph's schema; the optional `schemaFile` (JSON, not with a `.gsnap`) is set on the new empty graph first and the data imported against it as one unit (wasm `loadGraphsonSource`/`loadGraphmlSource`/`loadSnapshotSource(source, name, schema?)`: the worker gets the `File` itself, posted by reference, and the module reads it in 1 MiB chunks through `js/engine/chunk-source.js` (`FileReaderSync`), so neither the page nor the module's memory holds the file whole; the restore point of Stop keeps that `File`, a reference to the file on disk, or a `Blob` of a saved graph) |
 | `graphInfo()` | the same, for the loaded graph |
 | `execute(script, {profile, profile_types, max_rows, max_items, no_limit, spelling, subgraph_max_elements})` | `{ok, terminal, implicit, mutated, changes:{data, schema}, execution, display:{table, json, raw, notice, total_rows}, subgraph, preferred_view, elapsed_ms, graph}` |
 | `schema()` | `{mode, source, table, json, mermaid, graph:{nodes, edges}, truncated, total_labels}`: the stored schema (`source: "stored"`), else the inferred one (`mode`/`source: "inferred"`); `table` has one row per property path. Only the Schema panel's drawings (Graph, Mermaid) use it; the editor uses the seven methods below |
@@ -936,7 +936,7 @@ dropdown: **Save catalog (.json)** (`graphersal-catalog-YYYYMMDD-HHMMSS.json`, t
 (a compression rule compresses its values at once); a graph file loaded afterwards keeps them. One
 click, one download:
 browsers block or drop the second of two downloads started by one click. **Load from file** reads GraphSON (`.json`, `.jsonl`,
-`.graphson`; wasm `loadGraphsonBytes`) and GraphML (`.graphml`, `.xml`; wasm `loadGraphmlBytes`)
+`.graphson`; wasm `loadGraphsonSource`) and GraphML (`.graphml`, `.xml`; wasm `loadGraphmlSource`), read in chunks
 through a dialog (`components/start-page.js`, model `js/load-dialog.js`, tested in
 `tests/load-dialog.test.mjs`) with the graph file and an OPTIONAL **Schema file (JSON)**; the loaded
 graph always starts WITHOUT the previous graph's schema (the catalog is kept). With a schema file the
