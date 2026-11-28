@@ -16,19 +16,20 @@ Python package and the web playground are released with the same number:
 | `graphersal-serve` | crates.io | the hosting core of the dev server (session thread, run registry, the playground HTTP API without an HTTP library, the embedded playground UI, extension points), published because the CLI depends on it; internal, EXPERIMENTAL, no stability guarantees (a dependent pins the exact version during 0.x) |
 | `graphersal-cli` | crates.io | the `graphersal` binary: REPL, one-shot runner, `graphersal store`, the dev server |
 | `graphersal` (CLI binaries) | GitHub Release | prebuilt archives of the `graphersal` binary for four platforms, with `SHA256SUMS` and build provenance attestations |
+| web playground archive | GitHub Release | `graphersal-playground-v<version>.tar.gz`: the playground's static files with its WebAssembly engine (`playground/build.sh`), for a host that serves a playground running in the browser; in `SHA256SUMS` and the attestations |
 | `graphersal-storage-tests` | crates.io | the `GraphStorage` conformance suite, EXPERIMENTAL like the trait (pin the exact version) |
 | `graphersal` (Python) | wheels (abi3, Python 3.10+) | the PyO3 binding from `bindings/py-graphersal` |
 | web playground | static files | runs `graphersal-wasm` (not published; its JS API is internal to the playground) |
 
-## Stability in 0.9.x
+## Stability in 0.10.x
 
-The same rules hold for every minor line before 1.0 (they held for 0.1.x to 0.8.x as well); a
-minor release (0.8 to 0.9) may break them, and its release notes list every break with the upgrade step
-([Release Notes 0.9.0](../release_notes/release_notes_0.9.0.md)).
+The same rules hold for every minor line before 1.0 (they held for 0.1.x to 0.9.x as well); a
+minor release (0.9 to 0.10) may break them, and its release notes list every break with the upgrade step
+([Release Notes 0.10.0](../release_notes/release_notes_0.10.0.md)).
 
-- Stable within 0.9.x (additive changes only): the public API of `graphersal` outside the items marked
+- Stable within 0.10.x (additive changes only): the public API of `graphersal` outside the items marked
   EXPERIMENTAL, the DSL and the schema format.
-- EXPERIMENTAL (may change in any 0.9.x release): the `GraphStorage` trait and its associated types,
+- EXPERIMENTAL (may change in any 0.10.x release): the `GraphStorage` trait and its associated types,
   `PersistentStorage`, `AnyGraph`, `StoreDir`, and `graphersal-storage-tests`; pin the exact version.
 - Internal: `graphersal-session`, the wasm crate's JS API, the dev server's HTTP API and its MCP tools
   (`--server` is a development tool, bound to the loopback interface unless `--host` or a container
@@ -133,14 +134,18 @@ machine and are compared with the previous release, not per change.
      macOS arm64, Windows x86_64. Each build is smoke-tested on its runner (`--version`, a query,
      the dev server's `/api/info`) and packed as `graphersal-v<version>-<platform>.tar.gz` (Windows `.zip`)
      with `LICENSE-APACHE`, `NOTICE`, `README.md` and `THIRD-PARTY-LICENSES.html` (cargo-about, `about.toml`).
-     A final job writes `SHA256SUMS` and creates the GitHub build provenance attestations. The job
+     The job `playground` builds the web playground with its WebAssembly engine (`playground/build.sh`,
+     wasm-bindgen pinned, binaryen's `wasm-opt`), runs the playground's node tests and packs
+     `graphersal-playground-v<version>.tar.gz` (index.html, css/, js/, assets/, reset/, pkg/,
+     `LICENSE-APACHE`, `NOTICE` and the `THIRD-PARTY-LICENSES.html` of the graphersal-wasm tree).
+     A final job writes `SHA256SUMS` over the five archives and creates the GitHub build provenance attestations. The job
      `github-release` then creates a **draft** GitHub Release for the tag, titled "Graphersal <version>",
-     with the four archives and `SHA256SUMS` attached; its text is the version's release notes
+     with the four CLI archives, the playground archive and `SHA256SUMS` attached; its text is the version's release notes
      (`book/src/release_notes/release_notes_<version>.md`) with the book links made absolute on
      graphersal.dev, the soft line breaks joined and a section about the prebuilt binaries added
      (`.github/scripts/release_notes.py <version>` prints the same text locally).
-4. Check the draft on the repository's Releases page: four archives (`linux-x86_64`, `linux-aarch64`,
-   `macos-arm64`, `windows-x86_64`) plus `SHA256SUMS`; download one archive and check it
+4. Check the draft on the repository's Releases page: four CLI archives (`linux-x86_64`, `linux-aarch64`,
+   `macos-arm64`, `windows-x86_64`), the playground archive plus `SHA256SUMS`; download one archive and check it
    (`sha256sum -c SHA256SUMS --ignore-missing`, `gh attestation verify <archive> --repo graphersal/graphersal`,
    unpack it and run `graphersal --version`); read the release text, its links included. Then publish the
    draft ("Publish release", or `gh release edit v0.2.0 --draft=false`). Only a published release is visible
