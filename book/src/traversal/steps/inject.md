@@ -3,7 +3,7 @@
 
 `inject` · category: [Start](../../traversal/step_reference.md#start)
 
-Inserts the given values into the stream (on g it starts a traversal with them).
+Inserts the given values into the stream (on g it starts a traversal with them); a traversal is not a value and is refused (union() adds what a traversal yields).
 
 ## Forms
 

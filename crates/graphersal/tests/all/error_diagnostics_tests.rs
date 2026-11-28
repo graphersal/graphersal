@@ -13009,3 +13009,112 @@ fn token_id_traversal_without_a_usable_id_help_shows_the_traversal_form() {
         );
     }
 }
+
+/// A traversal given where a step takes a VALUE (a constant, an injected value, a sack or
+/// side-effect seed, a map value, ...) is refused; the help names the value form and a step that
+/// runs the traversal instead, and every suggested query runs.
+#[cfg(feature = "script")]
+#[test]
+fn the_help_of_a_traversal_given_as_a_value_names_the_working_forms() {
+    use crate::script_host::{eval, eval_value};
+
+    let graph = std::sync::Arc::new(GraphSource::tinkerpop_modern());
+    for (query, fix) in [
+        (
+            r#"g.v().constant(__.out().count()).to_list()"#,
+            r#"g.v("1").map(__.out().count())"#,
+        ),
+        (
+            r#"g.inject(__.out()).to_list()"#,
+            r#"g.v("1").union(__.identity(), __.out())"#,
+        ),
+        (
+            r#"g.with_sack(__.values("age")).v().sack().to_list()"#,
+            r#"g.with_sack(0).v().sack(Operator.assign).by("age").sack()"#,
+        ),
+        (
+            r#"g.with_side_effect("a", __.values("name")).v().to_list()"#,
+            r#"g.v().has_label("software").aggregate("a").cap("a")"#,
+        ),
+        (
+            r#"g.v().values("age").fold(__.out(), Operator.sum).to_list()"#,
+            r#"g.v().values("age").fold(0, Operator.sum)"#,
+        ),
+        (
+            r#"g.with("evaluationTimeout", __.out()).v().count().next()"#,
+            r#"g.with("evaluationTimeout", 500).v().count()"#,
+        ),
+        (
+            r#"g.v("1").property(#{nick: __.out()}).to_list()"#,
+            r#"g.v("1").property("friends", __.out("knows").count())"#,
+        ),
+        (
+            r#"g.merge_v(#{name: __.out()}).to_list()"#,
+            r#"g.v("2").merge_v(__.project("name").by("name"))"#,
+        ),
+        (
+            r#"g.v("1").property_json(#{a: __.out()}).to_list()"#,
+            r#"g.v("1").property("friends", __.out("knows").count())"#,
+        ),
+        (
+            r#"g.inject("x").as_number(GType.LONG, CastPolicy.Default(__.out())).to_list()"#,
+            r#"g.inject("x").coalesce(__.as_number(GType.LONG, CastPolicy.Skip), __.constant(0))"#,
+        ),
+        (
+            r#"let m = g.v().group_count().by("age").next(); m[__.out()]"#,
+            r#"let k = g.v("1").values("age").next(); m[k]"#,
+        ),
+        (
+            r#"g.v(__.out()).to_list()"#,
+            r#"g.v().where(__.in_("knows").has_id("1"))"#,
+        ),
+        (
+            r#"g.inject([1]).combine([__.out()]).to_list()"#,
+            r#"g.v("1").map(__.out().count())"#,
+        ),
+    ] {
+        let report = eval(graph.clone(), query)
+            .expect_err(&format!("{query} must fail"))
+            .to_string();
+        assert!(
+            report.contains(fix),
+            "{query}: the help must name {fix} in: {report}"
+        );
+    }
+    for (query, expected) in [
+        (r#"g.v("1").map(__.out().count()).next()"#, 3),
+        (
+            r#"g.v("1").union(__.identity(), __.out()).count().next()"#,
+            4,
+        ),
+        (
+            r#"g.with_sack(0).v().sack(Operator.assign).by("age").sack().sum().next()"#,
+            123,
+        ),
+        (
+            r#"g.v().has_label("software").aggregate("a").cap("a").unfold().count().next()"#,
+            2,
+        ),
+        (r#"g.v().values("age").fold(0, Operator.sum).next()"#, 123),
+        (r#"g.with("evaluationTimeout", 500).v().count().next()"#, 6),
+        (
+            r#"g.v("2").merge_v(__.project("name").by("name")).count().next()"#,
+            1,
+        ),
+        (
+            r#"g.inject("x").coalesce(__.as_number(GType.LONG, CastPolicy.Skip), __.constant(0)).next()"#,
+            0,
+        ),
+        (
+            r#"let m = g.v().group_count().by("age").next(); let k = g.v("1").values("age").next(); m[k]"#,
+            1,
+        ),
+        (
+            r#"g.v().where(__.in_("knows").has_id("1")).count().next()"#,
+            2,
+        ),
+    ] {
+        let value = eval_value(graph.clone(), query).unwrap();
+        assert_eq!(value.as_int().unwrap(), expected, "{query}");
+    }
+}

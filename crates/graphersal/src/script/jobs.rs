@@ -329,7 +329,7 @@ impl ScriptGraphTraversalSource {
                                     .collect(),
                             }));
                         };
-                        let value = super::dynamic::value_arg(&ctx, value)?;
+                        let value = super::dynamic::value_arg(&ctx, "define_job", value)?;
                         let value = param
                             .check_value(&query_name, key.as_str(), value)
                             .map_err(|err| {

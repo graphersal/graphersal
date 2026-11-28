@@ -168,7 +168,7 @@ impl ScriptGraphTraversalSource {
         this: &mut Self,
         initial: Dynamic,
     ) -> Result<Self, Box<rhai::EvalAltResult>> {
-        let initial = value_arg(&ctx, initial)?;
+        let initial = value_arg(&ctx, "with_sack", initial)?;
         Ok(this.add_step(Step::Source(SourceStep::Sack(initial))))
     }
 
@@ -184,7 +184,7 @@ impl ScriptGraphTraversalSource {
     ) -> Result<Self, Box<rhai::EvalAltResult>> {
         match merge.read_lock::<Operator>() {
             Some(merge) => Ok(this.add_step(Step::Source(SourceStep::SackMerge(
-                value_arg(&ctx, initial)?,
+                value_arg(&ctx, "with_sack", initial)?,
                 *merge,
             )))),
             None => Err(Box::new(rhai::EvalAltResult::ErrorMismatchDataType(
@@ -226,7 +226,7 @@ impl ScriptGraphTraversalSource {
         this: &mut Self,
         arg: Dynamic,
     ) -> Result<Self, Box<rhai::EvalAltResult>> {
-        let value = value_arg(&ctx, arg)?;
+        let value = value_arg(&ctx, "inject", arg)?;
         Ok(this.add_step(Step::Inject(vec![value])))
     }
 
@@ -237,7 +237,7 @@ impl ScriptGraphTraversalSource {
         this: &mut Self,
         args: Vec<Dynamic>,
     ) -> Result<Self, Box<rhai::EvalAltResult>> {
-        let values = value_args(&ctx, args)?;
+        let values = value_args(&ctx, "inject", args)?;
         Ok(this.add_step(Step::Inject(values)))
     }
 
@@ -274,7 +274,7 @@ impl ScriptGraphTraversalSource {
         operator: Dynamic,
     ) -> Result<Self, Box<rhai::EvalAltResult>> {
         match operator.read_lock::<Operator>() {
-            Some(operator) => Ok(this.add_step(Step::FoldWith(value_arg(&ctx, seed)?, *operator))),
+            Some(operator) => Ok(this.add_step(Step::FoldWith(value_arg(&ctx, "fold", seed)?, *operator))),
             None => Err(Box::new(rhai::EvalAltResult::ErrorMismatchDataType(
                 "an Operator (fold(seed, BiFunction) is not supported: pass an Operator, for example \
                  fold(0, Operator.sum))"
@@ -545,7 +545,7 @@ impl ScriptGraphTraversalSource {
             let val = try_dynamic_to_argp(&arg)?;
             Ok(this.add_step(Step::HasValueP(val)))
         } else {
-            let val = value_arg(&ctx, arg)?;
+            let val = value_arg(&ctx, "has_value", arg)?;
             Ok(this.add_step(Step::HasValue(val)))
         }
     }
@@ -561,7 +561,7 @@ impl ScriptGraphTraversalSource {
         for value in &arg {
             refuse_traversal("has_value", "values", value)?;
         }
-        let values = value_args(&ctx, arg)?;
+        let values = value_args(&ctx, "has_value", arg)?;
         Ok(this.add_step(Step::HasValueAny(values)))
     }
 
@@ -592,7 +592,7 @@ impl ScriptGraphTraversalSource {
             let val = try_dynamic_to_argp(&arg)?;
             Ok(this.add_step(Step::HasP(prop, val)))
         } else {
-            let val = value_arg(&ctx, arg)?;
+            let val = value_arg(&ctx, "has", arg)?;
             Ok(this.add_step(Step::Has(prop, val)))
         }
     }
@@ -909,7 +909,7 @@ impl ScriptGraphTraversalSource {
         let arg = if arg.is::<ScriptGraphTraversalSource>() {
             ScriptListArg::Traversal(try_dynamic_to_gts(arg)?)
         } else {
-            ScriptListArg::Value(value_arg(ctx, arg)?)
+            ScriptListArg::Value(value_arg(ctx, kind.name(), arg)?)
         };
         Ok(this.add_step(Step::ListFunction(kind, arg)))
     }
@@ -1016,7 +1016,7 @@ impl ScriptGraphTraversalSource {
             .filter(|arg| arg.is::<ScriptGraphTraversalSource>())
             .count();
         if traversals == 0 {
-            return Ok(this.add_step(Step::ConcatStrings(value_args(&ctx, args)?)));
+            return Ok(this.add_step(Step::ConcatStrings(value_args(&ctx, "concat", args)?)));
         }
         if traversals != args.len() {
             return Err(script_error_from_script(

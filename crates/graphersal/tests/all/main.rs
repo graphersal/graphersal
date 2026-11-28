@@ -302,6 +302,7 @@ mod timeout_tests;
 mod token_classes_tests;
 mod token_predicate_tests;
 mod transaction_tests;
+mod traversal_value_argument_tests;
 mod tree_side_effect_tests;
 mod type_coercion_tests;
 mod type_system_tests;

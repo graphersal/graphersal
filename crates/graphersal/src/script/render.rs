@@ -268,7 +268,10 @@ pub(crate) fn value_literal(value: &Dynamic) -> String {
     if let Some(token) = token_literal(value) {
         return token;
     }
-    match dynamic_to_element_property(value.clone(), crate::value::depth::DEFAULT_MAX_VALUE_DEPTH) {
+    match super::dynamic::script_value_to_property(
+        value.clone(),
+        crate::value::depth::DEFAULT_MAX_VALUE_DEPTH,
+    ) {
         Ok(property) => crate::value::literal::rhai_literal(&property),
         Err(_) => debug_value(value),
     }

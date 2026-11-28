@@ -359,7 +359,11 @@ pub(super) fn register(registry: &mut Registry) {
         .register_fn(
             "Default",
             |ctx: NativeCallContext, _: ScriptCastPolicy, value: Dynamic| {
-                Ok::<_, Box<rhai::EvalAltResult>>(CastPolicy::Default(value_arg(&ctx, value)?))
+                Ok::<_, Box<rhai::EvalAltResult>>(CastPolicy::Default(value_arg(
+                    &ctx,
+                    "CastPolicy.Default",
+                    value,
+                )?))
             },
         );
 
@@ -575,7 +579,7 @@ fn register_script_map(registry: &mut Registry) {
              -> Result<Dynamic, Box<rhai::EvalAltResult>> {
                 Ok(map
                     .0
-                    .get(&value_arg(&ctx, key)?)
+                    .get(&value_arg(&ctx, "map[key]", key)?)
                     .map_or(Dynamic::UNIT, |value| {
                         element_property_to_dynamic(value.clone())
                     }))
@@ -612,7 +616,7 @@ fn register_script_map(registry: &mut Registry) {
              map: &mut ScriptMap,
              key: Dynamic|
              -> Result<bool, Box<rhai::EvalAltResult>> {
-                Ok(map.0.get(&value_arg(&ctx, key)?).is_some())
+                Ok(map.0.get(&value_arg(&ctx, "contains", key)?).is_some())
             },
         )
         .register_fn_as(&["to_map", "toMap"], |map: &mut ScriptMap| {

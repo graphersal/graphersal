@@ -9,12 +9,13 @@ use crate::value::temporal::Duration;
 /// constant (a date or time, or `null`; another value is rejected before execution).
 fn operand(
     ctx: &NativeCallContext,
+    step: &str,
     arg: Dynamic,
 ) -> Result<ScriptListArg, Box<rhai::EvalAltResult>> {
     if arg.is::<ScriptGraphTraversalSource>() {
         Ok(ScriptListArg::Traversal(try_dynamic_to_gts(arg)?))
     } else {
-        Ok(ScriptListArg::Value(value_arg(ctx, arg)?))
+        Ok(ScriptListArg::Value(value_arg(ctx, step, arg)?))
     }
 }
 
@@ -67,7 +68,7 @@ impl ScriptGraphTraversalSource {
         this: &mut Self,
         other: Dynamic,
     ) -> Result<Self, Box<rhai::EvalAltResult>> {
-        let other = operand(&ctx, other)?;
+        let other = operand(&ctx, "date_diff", other)?;
         Ok(this.add_step(Step::DateDiff(other, None, None)))
     }
 
@@ -78,7 +79,7 @@ impl ScriptGraphTraversalSource {
         other: Dynamic,
         unit: DT,
     ) -> Result<Self, Box<rhai::EvalAltResult>> {
-        let other = operand(&ctx, other)?;
+        let other = operand(&ctx, "date_diff", other)?;
         Ok(this.add_step(Step::DateDiff(other, Some(unit), None)))
     }
 
@@ -91,7 +92,7 @@ impl ScriptGraphTraversalSource {
         unit: DT,
         zone_name: &str,
     ) -> Result<Self, Box<rhai::EvalAltResult>> {
-        let other = operand(&ctx, other)?;
+        let other = operand(&ctx, "date_diff", other)?;
         Ok(this.add_step(Step::DateDiff(other, Some(unit), zone(zone_name))))
     }
 
@@ -101,7 +102,7 @@ impl ScriptGraphTraversalSource {
         this: &mut Self,
         other: Dynamic,
     ) -> Result<Self, Box<rhai::EvalAltResult>> {
-        let other = operand(&ctx, other)?;
+        let other = operand(&ctx, "age", other)?;
         Ok(this.add_step(Step::Age(other, None)))
     }
 
@@ -113,7 +114,7 @@ impl ScriptGraphTraversalSource {
         other: Dynamic,
         zone_name: &str,
     ) -> Result<Self, Box<rhai::EvalAltResult>> {
-        let other = operand(&ctx, other)?;
+        let other = operand(&ctx, "age", other)?;
         Ok(this.add_step(Step::Age(other, zone(zone_name))))
     }
 

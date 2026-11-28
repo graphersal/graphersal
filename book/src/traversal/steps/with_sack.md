@@ -3,7 +3,7 @@
 
 `with_sack` · `withSack` · category: [Sack and side effects](../../traversal/step_reference.md#sack-and-side-effects)
 
-Gives every traverser an initial sack value, optionally with a merge Operator for when traversers merge.
+Gives every traverser an initial sack value (a value, never a traversal), optionally with a merge Operator for when traversers merge.
 
 ## Forms
 

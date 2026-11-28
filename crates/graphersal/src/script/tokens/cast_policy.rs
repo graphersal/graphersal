@@ -24,7 +24,11 @@ pub(crate) mod CastPolicyModule {
         ctx: NativeCallContext,
         value: Dynamic,
     ) -> Result<CastPolicy, Box<rhai::EvalAltResult>> {
-        Ok(CastPolicy::Default(value_arg(&ctx, value)?))
+        Ok(CastPolicy::Default(value_arg(
+            &ctx,
+            "CastPolicy.Default",
+            value,
+        )?))
     }
 
     /// Printing

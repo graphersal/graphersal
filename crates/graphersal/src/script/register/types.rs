@@ -168,6 +168,9 @@ pub(super) fn register_schema(registry: &mut Registry) {
             "subgraph_labels",
             |ctx: NativeCallContext, s: &mut rhai::Map, labels: Vec<Dynamic>| {
                 let schema = loaded(&ctx, s)?;
+                for label in &labels {
+                    refuse_traversal("subgraph_labels", "labels (strings)", label)?;
+                }
                 let label_strings = vec_dynamic_to_string(labels);
                 Ok::<_, Box<rhai::EvalAltResult>>(ScriptGraphSource::private_graph_in(
                     &ctx,

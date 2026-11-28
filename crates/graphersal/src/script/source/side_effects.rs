@@ -40,7 +40,7 @@ impl ScriptGraphTraversalSource {
                 ))));
             }
         }
-        let value = value_arg(&ctx, arg)?;
+        let value = value_arg(&ctx, "with_side_effect", arg)?;
         Ok(this.add_step(Step::Source(SourceStep::SideEffect(
             CompactString::new(prop),
             value,
@@ -59,7 +59,7 @@ impl ScriptGraphTraversalSource {
         match operator.read_lock::<Operator>() {
             Some(operator) => Ok(this.add_step(Step::Source(SourceStep::SideEffectReduced(
                 CompactString::new(prop),
-                value_arg(&ctx, initial)?,
+                value_arg(&ctx, "with_side_effect", initial)?,
                 *operator,
             )))),
             None => Err(Box::new(rhai::EvalAltResult::ErrorMismatchDataType(
@@ -263,7 +263,7 @@ impl ScriptGraphTraversalSource {
                 let value = try_dynamic_to_gts(arg)?;
                 return Ok(this.add_step(Step::PropertyKeyTraversalBy(key, value)));
             }
-            let value = value_arg(&ctx, arg)?;
+            let value = value_arg(&ctx, "property", arg)?;
             return Ok(this.add_step(Step::PropertyKeyTraversal(key, value)));
         }
         let prop = property_write_key("property", prop)?;
@@ -273,7 +273,7 @@ impl ScriptGraphTraversalSource {
             let gts = try_dynamic_to_gts(arg)?;
             Ok(this.add_step(Step::PropertyTraversal(prop, gts)))
         } else {
-            let val = value_arg(&ctx, arg)?;
+            let val = value_arg(&ctx, "property", arg)?;
             Ok(this.add_step(Step::Property(prop, val)))
         }
     }
@@ -291,7 +291,7 @@ impl ScriptGraphTraversalSource {
             let gts = try_dynamic_to_gts(arg)?;
             Ok(this.add_step(Step::PropertyCardinalityTraversal(cardinality, prop, gts)))
         } else {
-            let val = value_arg(&ctx, arg)?;
+            let val = value_arg(&ctx, "property", arg)?;
             Ok(this.add_step(Step::PropertyCardinality(cardinality, prop, val)))
         }
     }
@@ -303,7 +303,7 @@ impl ScriptGraphTraversalSource {
         this: &mut Self,
         map: rhai::Map,
     ) -> Result<Self, Box<rhai::EvalAltResult>> {
-        let entries = property_entries_of(map, access::value_depth_of(&ctx))?;
+        let entries = property_entries_of("property", map, access::value_depth_of(&ctx))?;
         Ok(this.add_step(Step::PropertyMap(None, entries)))
     }
 
@@ -319,7 +319,7 @@ impl ScriptGraphTraversalSource {
         cardinality: Cardinality,
         map: rhai::Map,
     ) -> Result<Self, Box<rhai::EvalAltResult>> {
-        let entries = property_entries_of(map, access::value_depth_of(&ctx))?;
+        let entries = property_entries_of("property", map, access::value_depth_of(&ctx))?;
         Ok(this.add_step(Step::PropertyMap(Some(cardinality), entries)))
     }
 
@@ -350,7 +350,7 @@ impl ScriptGraphTraversalSource {
         this: &mut Self,
         arg: Dynamic,
     ) -> Result<Self, Box<rhai::EvalAltResult>> {
-        let arg = script_merge_arg(arg, access::value_depth_of(&ctx))?;
+        let arg = script_merge_arg("merge_v", arg, access::value_depth_of(&ctx))?;
         Ok(this.add_step(Step::MergeV(arg)).stamped(&ctx))
     }
 
@@ -376,7 +376,7 @@ impl ScriptGraphTraversalSource {
         this: &mut Self,
         arg: Dynamic,
     ) -> Result<Self, Box<rhai::EvalAltResult>> {
-        let arg = script_merge_arg(arg, access::value_depth_of(&ctx))?;
+        let arg = script_merge_arg("merge_e", arg, access::value_depth_of(&ctx))?;
         Ok(this.add_step(Step::MergeE(arg)).stamped(&ctx))
     }
 
@@ -388,7 +388,7 @@ impl ScriptGraphTraversalSource {
         arg: Dynamic,
         cardinality: Cardinality,
     ) -> Result<Self, Box<rhai::EvalAltResult>> {
-        let arg = script_merge_arg(arg, access::value_depth_of(&ctx))?;
+        let arg = script_merge_arg("option", arg, access::value_depth_of(&ctx))?;
         Ok(this.add_step(Step::MergeOption(token, arg, Some(cardinality))))
     }
 
@@ -417,7 +417,7 @@ impl ScriptGraphTraversalSource {
             let gts = try_dynamic_to_gts(arg)?;
             return Ok(this.add_step(Step::PropertyTokenTraversal(key, gts)));
         }
-        let value = value_arg(&ctx, arg)?;
+        let value = value_arg(&ctx, "property", arg)?;
         Ok(this.add_step(Step::PropertyToken(key, value)))
     }
 

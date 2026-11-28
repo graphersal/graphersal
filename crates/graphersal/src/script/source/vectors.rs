@@ -28,7 +28,7 @@ fn query_arg(
         return Ok(ScriptVectorQuery::Text(text.to_string()));
     }
     if arg.is_array() {
-        let ElementProperty::Array(items) = value_arg(ctx, arg)? else {
+        let ElementProperty::Array(items) = value_arg(ctx, step, arg)? else {
             return Err(vector_failure(
                 step,
                 VectorError::NotAVector {

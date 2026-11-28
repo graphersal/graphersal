@@ -3,7 +3,7 @@
 
 `with_side_effect` · `withSideEffect` · category: [Sack and side effects](../../traversal/step_reference.md#sack-and-side-effects)
 
-Starts the traversal with a named side effect holding the given value (optionally with a reducing Operator).
+Starts the traversal with a named side effect holding the given value, never a traversal (optionally with a reducing Operator).
 
 ## Forms
 

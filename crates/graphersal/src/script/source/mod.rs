@@ -302,7 +302,7 @@ impl ScriptGraphTraversalSource {
         key: String,
         value: rhai::Dynamic,
     ) -> Result<Self, Box<rhai::EvalAltResult>> {
-        let value = value_arg(&ctx, value)?;
+        let value = value_arg(&ctx, "with", value)?;
         Ok(this.with_value(key, value))
     }
 

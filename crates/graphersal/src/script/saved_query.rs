@@ -730,7 +730,7 @@ fn run_returned_writes(
         if source.anonymous || !source.plan_writes() {
             return Ok(Dynamic::from(source));
         }
-        let results = value_args(ctx, source.to_list()?)?;
+        let results = value_args(ctx, "query", source.to_list()?)?;
         let reading = ScriptGraphTraversalSource {
             g: source.g.clone(),
             steps: Vec::new(),
@@ -821,7 +821,7 @@ fn params_of(
         let Some(declaration) = declared.get(parameter.as_str()) else {
             continue;
         };
-        let value = value_arg(ctx, declaration.clone())?;
+        let value = value_arg(ctx, "define_query", declaration.clone())?;
         let param = QueryParam::from_value(parameter, &value)
             .map_err(|err| graph_fail(crate::error::GraphError::from(err)))?;
         params.push((parameter.clone(), param));
@@ -1610,7 +1610,7 @@ impl ScriptGraphTraversalSource {
                             "a {type_name} is not a data value; arguments are values only"
                         )));
                     }
-                    let value = value_arg(ctx, value)?;
+                    let value = value_arg(ctx, "query", value)?;
                     param
                         .check_value(name, parameter, value)
                         .map_err(|err| invalid(err.to_string()))?
