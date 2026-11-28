@@ -354,6 +354,52 @@ pub fn duplicate_vertex_id_is_rejected<S: GraphStorage>(storage: &mut S) {
     assert_consistent(storage);
 }
 
+/// A stub (`insert_vertex_stub`) takes its id at once and can carry edges; completed
+/// (`complete_vertex_stub`), it holds exactly the labels and properties given, in the label
+/// index and the label counts, with its edges kept. A stub id must be free.
+pub fn a_completed_stub_holds_what_insert_vertex_stores<S: GraphStorage>(storage: &mut S) {
+    let a = vertex(storage, Some("a"), &["p"], PropertyMap::default());
+    let stub = storage
+        .insert_vertex_stub("b".into())
+        .expect("a stub is stored");
+    assert_eq!(storage.get_vertex_by_id("b").unwrap(), Some(stub));
+    let err = storage
+        .insert_vertex_stub("a".into())
+        .expect_err("a stub id must be free");
+    assert!(
+        matches!(err, GraphError::VertexIdUniqueConstraint { .. }),
+        "got {err:?}"
+    );
+    let e = edge(
+        storage,
+        Some("e1"),
+        Some("l"),
+        a,
+        stub,
+        PropertyMap::default(),
+    );
+    let mut properties = PropertyMap::default();
+    properties.insert("name", ElementProperty::from("bob"));
+    properties.insert("age", ElementProperty::from(3i64));
+    storage
+        .complete_vertex_stub(stub, label_vec(&["p", "q"]), properties.clone())
+        .expect("the stub is completed");
+    assert_eq!(
+        storage.vertex_labels(stub).unwrap(),
+        label_vec(&["p", "q"]).as_slice()
+    );
+    let stored = storage
+        .vertex_properties(stub)
+        .unwrap()
+        .expect("the completed stub has properties");
+    assert_eq!(stored.len(), 2);
+    assert_eq!(stored.get("name"), Some(&ElementProperty::from("bob")));
+    assert_eq!(stored.get("age"), Some(&ElementProperty::from(3i64)));
+    assert!(name_set(storage, "q").contains(&stub));
+    assert_eq!(storage.edge_endpoints(e).unwrap(), Some((a, stub)));
+    assert_consistent(storage);
+}
+
 /// Edge ids are preserved and unique, a duplicate fails with `EdgeIdUniqueConstraint`, and an
 /// explicit numeric id advances the auto sequence like it does for vertices.
 pub fn edge_ids_are_preserved_unique_and_bump_the_sequence<S: GraphStorage>(storage: &mut S) {

@@ -140,9 +140,9 @@ impl Playground {
 
     /// Replaces the graph by one imported from GraphSON text (line or wrapped form); returns the
     /// graph info JSON, whose `warnings` list what the import skipped (dates, unsupported types,
-    /// dangling edges). Like [`Self::load_graphml`], the new graph starts without the current
-    /// graph's schema and the optional `schema` (JSON text) is set first. The current graph
-    /// stays when the load fails.
+    /// duplicate vertices or edges; an edge to a missing vertex fails the load). Like
+    /// [`Self::load_graphml`], the new graph starts without the current graph's schema and the
+    /// optional `schema` (JSON text) is set first. The current graph stays when the load fails.
     #[wasm_bindgen(js_name = loadGraphson)]
     pub fn load_graphson(
         &mut self,

@@ -1456,12 +1456,12 @@ impl RuleLog for TraversalGraph {
                     id,
                     key,
                 },
-                UndoEntry::AddedVertex { id } | UndoEntry::VertexLabels { id, .. } => {
-                    RuleEntry::Element {
-                        kind: ElementKind::Vertex,
-                        id,
-                    }
-                }
+                UndoEntry::AddedVertex { id }
+                | UndoEntry::VertexLabels { id, .. }
+                | UndoEntry::CompletedStub { id } => RuleEntry::Element {
+                    kind: ElementKind::Vertex,
+                    id,
+                },
                 UndoEntry::AddedEdge { id } | UndoEntry::EdgeLabel { id, .. } => {
                     RuleEntry::Element {
                         kind: ElementKind::Edge,

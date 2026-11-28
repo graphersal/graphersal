@@ -201,6 +201,9 @@ pub struct TraversalGraph {
     /// `Some` during a journal replay: the compression rule changes whose pass waits (`(what was
     /// stored before, name)` each), run in one walk (`TraversalGraph::defer_rule_passes`).
     pub(crate) deferred_rule_passes: Option<Vec<(Option<Definition>, CompactString)>>,
+    /// The slots of the stub vertices (`GraphStorage::insert_vertex_stub`) not completed yet:
+    /// empty outside a file import, since an import completes every stub or fails.
+    pub(crate) stubs: std::collections::HashSet<u32>,
 }
 
 /// Whether an element is a vertex or an edge.
@@ -246,6 +249,7 @@ impl TraversalGraph {
             vector_rules: None,
             rules_off: 0,
             deferred_rule_passes: None,
+            stubs: std::collections::HashSet::new(),
         }
     }
 

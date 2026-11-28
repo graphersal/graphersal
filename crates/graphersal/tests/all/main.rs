@@ -130,6 +130,7 @@ mod has_traversal_tests;
 mod id_arguments_tests;
 mod id_lookup_tests;
 mod import_shape_tests;
+mod import_stub_tests;
 mod index_tests;
 mod inject_tests;
 mod integration_tests;

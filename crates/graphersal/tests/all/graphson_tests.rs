@@ -740,18 +740,16 @@ fn edges_from_in_only_out_only_and_without_ids() {
 
 #[test]
 fn dangling_duplicate_and_disagreeing_edges_are_reported() {
+    // Duplicates and disagreeing copies are skipped and reported; the first copy is kept.
     let text = concat!(
-        r#"{"id":"a","outE":{"l":[{"id":"e1","inV":"zz"},{"id":"e2","inV":"b"},{"id":"e2","inV":"a"}]}}"#,
+        r#"{"id":"a","outE":{"l":[{"id":"e2","inV":"b"},{"id":"e2","inV":"a"}]}}"#,
         "\n",
         r#"{"id":"b","inE":{"other":[{"id":"e2","outV":"a"}]},"outE":{"l":[{"inV":"a"}],"bad":5}}"#,
     );
     let (graph, report) = load_str(text);
     assert_eq!(report.edges, 2);
     assert_eq!(graph.read().edge_count(), 2);
-    assert_eq!(
-        note(&report, |k| *k == ImportNoteKind::SkippedDanglingEdge),
-        Some(1)
-    );
+    assert_eq!(snapshot(&graph).1["e2"].0.as_deref(), Some("l"));
     assert_eq!(
         note(&report, |k| *k == ImportNoteKind::SkippedDuplicateEdge),
         Some(1)
@@ -764,13 +762,39 @@ fn dangling_duplicate_and_disagreeing_edges_are_reported() {
         note(&report, |k| *k == ImportNoteKind::SkippedMalformedEntry),
         Some(1)
     );
-    let sample = &report
-        .notes
-        .iter()
-        .find(|n| n.kind == ImportNoteKind::SkippedDanglingEdge)
-        .unwrap()
-        .samples[0];
-    assert_eq!(sample, r#"line 1: edge "e1" from "a" to "zz""#);
+    // An edge to a vertex that is neither in the file nor in the target graph fails the
+    // import (user decision 2026-11-28): nothing of the file is kept.
+    let dangling = concat!(
+        r#"{"id":"a","outE":{"l":[{"id":"e1","inV":"zz"},{"id":"e2","inV":"b"}]}}"#,
+        "\n",
+        r#"{"id":"b"}"#,
+    );
+    let err = GraphSONImport::new()
+        .load(std::io::Cursor::new(dangling))
+        .expect_err("a dangling edge fails the import");
+    match &err {
+        IOError::DanglingEdges {
+            count,
+            vertices,
+            first_edge,
+            ..
+        } => {
+            assert_eq!(*count, 1);
+            assert_eq!(vertices, &["zz"]);
+            assert_eq!(first_edge, r#"line 1: edge "e1" from "a" to "zz""#);
+        }
+        other => panic!("expected DanglingEdges, got {other:?}"),
+    }
+    let mut live = GraphSource::tinkerpop_modern();
+    assert!(matches!(
+        live.import_graphson_reader(dangling.as_bytes()),
+        Err(IOError::DanglingEdges { .. })
+    ));
+    assert_eq!(
+        (live.read().vertex_count(), live.read().edge_count()),
+        (6, 6),
+        "the failed live import is rolled back"
+    );
 }
 
 #[test]

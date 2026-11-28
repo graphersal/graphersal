@@ -928,7 +928,7 @@ impl GraphSource {
     /// Loads a graph from a GraphSON file (line or wrapped form), outside units like
     /// [`Self::from_graphml`].
     ///
-    /// Skipped data (dates, unsupported types, dangling edges, ...) is not an error; it is logged
+    /// Skipped data (dates, unsupported types, duplicate vertices or edges, ...) is not an error; it is logged
     /// as a `tracing` warning. Use [`GraphSONImport::load`](crate::io::GraphSONImport::load) to get
     /// the [`ImportReport`](crate::io::ImportReport) itself.
     #[cfg(feature = "io")]

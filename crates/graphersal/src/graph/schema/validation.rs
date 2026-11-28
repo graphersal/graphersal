@@ -109,6 +109,35 @@ impl SchemaValidator {
         Self::check_properties(&declarations, "edge", properties, schema.mode)
     }
 
+    /// [`Self::validate_edge`] without the endpoint topology: the check of an edge with a stub
+    /// endpoint (`GraphStorage::insert_vertex_stub`), whose labels are not known yet;
+    /// [`Self::check_connection`] runs once the stub is completed.
+    pub(crate) fn validate_edge_without_topology(
+        schema: &GraphSchema,
+        label: Option<&str>,
+        properties: &mut PropertyMap,
+    ) -> Result<(), SchemaError> {
+        let Some(declarations) = Self::edge_declarations(schema, label)? else {
+            return Ok(());
+        };
+        Self::coerce_properties(&declarations, "edge", properties)?;
+        Self::check_properties(&declarations, "edge", properties, schema.mode)
+    }
+
+    /// The endpoint topology part of [`Self::validate_edge`] alone: the check of an existing
+    /// edge once its stub endpoint is completed.
+    pub(crate) fn check_connection(
+        schema: &GraphSchema,
+        label: Option<&str>,
+        source_labels: &[CompactString],
+        target_labels: &[CompactString],
+    ) -> Result<(), SchemaError> {
+        if Self::edge_declarations(schema, label)?.is_none() {
+            return Ok(());
+        }
+        Self::check_topology(schema, label, source_labels, target_labels)
+    }
+
     /// Validates the stored properties of an existing edge under `label`, without coercing
     /// anything, and — in `Closed` mode — its endpoint topology: the check of a label change
     /// (`GraphStorage::set_edge_label`). Stored data is checked exactly as it is (see

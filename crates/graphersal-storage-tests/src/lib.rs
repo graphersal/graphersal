@@ -82,6 +82,7 @@ macro_rules! conformance {
             auto_vertex_ids_are_unique
             explicit_numeric_vertex_id_bumps_the_sequence
             duplicate_vertex_id_is_rejected
+            a_completed_stub_holds_what_insert_vertex_stores
             edge_ids_are_preserved_unique_and_bump_the_sequence
             lookups_after_drop_find_nothing
             vertex_labels_are_an_ordered_set
@@ -148,6 +149,7 @@ macro_rules! conformance_core {
             auto_vertex_ids_are_unique
             explicit_numeric_vertex_id_bumps_the_sequence
             duplicate_vertex_id_is_rejected
+            a_completed_stub_holds_what_insert_vertex_stores
             edge_ids_are_preserved_unique_and_bump_the_sequence
             lookups_after_drop_find_nothing
             vertex_labels_are_an_ordered_set
