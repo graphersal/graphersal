@@ -648,30 +648,52 @@ impl Store {
     }
 
     /// Creates a store whose first snapshot is `graph` (its data, schema, lineage id, commit
-    /// position and auto-id sequences) and opens it.
+    /// position and auto-id sequences) and opens it. The graph is freed before the open loads
+    /// it back from the new snapshot, so the two never take memory at once; a caller that
+    /// only writes the store uses [`Store::create_with_dir`], which loads nothing back.
     pub fn create_with(
         dir: impl IntoStoreDir,
         graph: TraversalGraph,
         options: StoreOptions,
     ) -> Result<Store, PersistError> {
         let dir = DirPath::root(dir.into_store_dir());
+        Self::write_new(&dir, graph, &options)?;
+        Self::open_at(dir, options)
+    }
+
+    /// Creates a store whose first snapshot is `graph` as [`Store::create_with`] does, WITHOUT
+    /// opening it (the closed-store form, like [`Store::create_from_packed_dir`]): the snapshot
+    /// is written by the streaming encoder and the graph is freed, so a graph imported from a
+    /// file and written as a new store needs no second copy in memory. Open the store later
+    /// with [`Store::open`]; it is a store closed cleanly with no journal yet. Nothing is left
+    /// in `dir` (which must not exist or be empty) when it fails.
+    pub fn create_with_dir(
+        dir: impl IntoStoreDir,
+        graph: TraversalGraph,
+        options: StoreOptions,
+    ) -> Result<(), PersistError> {
+        Self::write_new(&DirPath::root(dir.into_store_dir()), graph, &options)
+    }
+
+    /// Writes a new store whose first snapshot is `graph` and frees the graph.
+    fn write_new(
+        dir: &DirPath,
+        graph: TraversalGraph,
+        options: &StoreOptions,
+    ) -> Result<(), PersistError> {
         let lineage = vec![LineageEntry {
             graph_id: graph.graph_id(),
             branched_at: 0,
             time: now(),
         }];
         StoreCore::create_lineage(
-            &dir,
+            dir,
             &graph,
             lineage,
             WriteOptions::new(),
-            &options,
+            options,
             ("create", None),
-        )?;
-        // Freed before the open loads the graph back from the new snapshot: never two copies
-        // of the graph at once (an import written into a new store peaked at two graphs).
-        drop(graph);
-        Self::open_at(dir, options)
+        )
     }
 
     /// Creates a store from a packed snapshot (`.gsnap`): its sections become the first
@@ -2083,6 +2105,33 @@ impl Store<crate::graph::LayeredGraph> {
         layer: crate::graph::LayeredGraph,
         options: StoreOptions,
     ) -> Result<Self, PersistError> {
+        let dir = DirPath::root(dir.into_store_dir());
+        let maker = Self::write_new_layer(&dir, base, layer, &options)?;
+        Self::from_core(StoreCore::open_at(dir, options, &maker)?)
+    }
+
+    /// Creates a layer store whose first snapshot is `layer` as [`Store::create_layer_with`]
+    /// does, WITHOUT opening it (the closed-store form): the layer is written and freed, nothing
+    /// is loaded back. Open it later with [`Store::open_layer`] over the same base. The same
+    /// refusals as [`Store::create_layer_with`].
+    pub fn create_layer_with_dir(
+        dir: impl IntoStoreDir,
+        base: &crate::graph::LayerBase,
+        layer: crate::graph::LayeredGraph,
+        options: StoreOptions,
+    ) -> Result<(), PersistError> {
+        let dir = DirPath::root(dir.into_store_dir());
+        Self::write_new_layer(&dir, base, layer, &options).map(|_| ())
+    }
+
+    /// Writes a new layer store whose first snapshot is `layer` (checked against `base` first)
+    /// and frees the layer; answers the maker that opens it.
+    fn write_new_layer(
+        dir: &DirPath,
+        base: &crate::graph::LayerBase,
+        layer: crate::graph::LayeredGraph,
+        options: &StoreOptions,
+    ) -> Result<graph::LayerGraphs, PersistError> {
         let maker = graph::LayerGraphs(base.clone());
         maker.check()?;
         let given = base_identity(base)?;
@@ -2093,22 +2142,20 @@ impl Store<crate::graph::LayeredGraph> {
                 given: Box::new(given),
             });
         }
-        let dir = DirPath::root(dir.into_store_dir());
         let lineage = vec![LineageEntry {
             graph_id: layer.graph_id(),
             branched_at: 0,
             time: now(),
         }];
         StoreCore::create_lineage(
-            &dir,
+            dir,
             &layer,
             lineage,
             WriteOptions::new(),
-            &options,
+            options,
             ("create", None),
         )?;
-        drop(layer);
-        Self::from_core(StoreCore::open_at(dir, options, &maker)?)
+        Ok(maker)
     }
 
     /// Opens the layer store in `dir` read-write over `base`, as [`Store::open`] opens a plain
