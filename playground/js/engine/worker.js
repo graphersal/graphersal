@@ -8,15 +8,24 @@
 
 import init, { Playground } from '../../pkg/graphersal_wasm.js';
 import { packGraphView } from '../graph-data.js';
+import { chunkSource, isBlob } from './chunk-source.js';
 
 let playground = null;
 
 const JSON_METHODS = {
   loadSample: (kind) => playground.loadSample(kind),
   // `schema`: the optional schema file's JSON text, set on the new graph before the import.
-  loadGraphml: (bytes, name, schema) => playground.loadGraphmlBytes(bytes, name, schema ?? undefined),
-  loadGraphson: (bytes, name, schema) => playground.loadGraphsonBytes(bytes, name, schema ?? undefined),
-  loadSnapshot: (bytes, name) => playground.loadSnapshotBytes(bytes, name),
+  // `data`: a File or Blob (read in chunks, never copied whole into the module's memory) or
+  // the bytes of a file.
+  loadGraphml: (data, name, schema) => (isBlob(data)
+    ? playground.loadGraphmlSource(chunkSource(data), name, schema ?? undefined)
+    : playground.loadGraphmlBytes(data, name, schema ?? undefined)),
+  loadGraphson: (data, name, schema) => (isBlob(data)
+    ? playground.loadGraphsonSource(chunkSource(data), name, schema ?? undefined)
+    : playground.loadGraphsonBytes(data, name, schema ?? undefined)),
+  loadSnapshot: (data, name) => (isBlob(data)
+    ? playground.loadSnapshotSource(chunkSource(data), name)
+    : playground.loadSnapshotBytes(data, name)),
   info: () => playground.info(),
   execute: (script, options) => playground.execute(script, JSON.stringify(options || {})),
   schema: () => playground.schema(),

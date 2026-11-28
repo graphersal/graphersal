@@ -891,3 +891,73 @@ fn a_layer_starts_and_drops_in_the_browser_build() {
     assert_eq!(dropped["ok"], true, "{dropped}");
     assert!(dropped["info"].get("layer").is_none(), "{dropped}");
 }
+
+#[wasm_bindgen::prelude::wasm_bindgen(inline_js = "
+export function bytes_source(bytes, chunk, failAt) {
+  const copy = bytes.slice();
+  return {
+    size: copy.length,
+    read(offset, length) {
+      if (failAt >= 0 && offset >= failAt) throw 'the file is gone';
+      return copy.slice(offset, offset + Math.min(length, chunk));
+    },
+  };
+}")]
+extern "C" {
+    /// A `ChunkSource` over a copy of `bytes` answering at most `chunk` bytes per read and
+    /// throwing from offset `fail_at` on (negative: never), like the worker's over a File.
+    fn bytes_source(bytes: &[u8], chunk: u32, fail_at: f64) -> graphersal_wasm::ChunkSource;
+}
+
+/// Files read in chunks (the worker's `File`/`Blob` path) load what their bytes load: GraphSON
+/// with edges before their vertices, GraphML and a `.gsnap`, also with chunks far smaller than a
+/// line; a file that can no longer be read fails the load with the reader's message and keeps
+/// the current graph.
+#[wasm_bindgen_test]
+fn files_read_in_chunks_load_like_their_bytes() {
+    let graphson = concat!(
+        r#"{"id":"a","label":"person","outE":{"knows":[{"id":"e1","inV":"b"}]}}"#,
+        "\n",
+        r#"{"id":"b","label":"person","properties":{"name":[{"value":"bob"}]},"inE":{"knows":[{"id":"e1","outV":"a"}]}}"#,
+        "\n",
+    );
+    for chunk in [7, 1 << 20] {
+        let mut p = Playground::new();
+        let info = json(
+            &p.load_graphson_source(
+                bytes_source(graphson.as_bytes(), chunk, -1.0),
+                "g.json",
+                None,
+            )
+            .unwrap(),
+        );
+        assert_eq!(
+            (info["vertexCount"].clone(), info["edgeCount"].clone()),
+            (2.into(), 1.into())
+        );
+    }
+    let saved = json(&modern().save_graphml().unwrap());
+    let text = saved["text"].as_str().unwrap();
+    let mut p = Playground::new();
+    let info = json(
+        &p.load_graphml_source(bytes_source(text.as_bytes(), 1000, -1.0), "g.xml", None)
+            .unwrap(),
+    );
+    assert_eq!(info["edgeCount"], 6);
+    let snapshot = modern().save_snapshot().unwrap();
+    let info = json(
+        &p.load_snapshot_source(bytes_source(&snapshot, 4096, -1.0), "g.gsnap")
+            .unwrap(),
+    );
+    assert_eq!(info["vertexCount"], 6);
+    assert_eq!(info["name"], "g.gsnap");
+    let err = p
+        .load_graphson_source(bytes_source(graphson.as_bytes(), 16, 32.0), "g.json", None)
+        .expect_err("a file that cannot be read fails");
+    let _ = err;
+    assert_eq!(
+        json(&p.info().unwrap())["name"],
+        "g.gsnap",
+        "the current graph stays"
+    );
+}
