@@ -94,12 +94,13 @@ jobs:
           pattern: binaries-*
           path: dist
           merge-multiple: true
-      - name: Four archives and SHA256SUMS
+      - name: Four CLI archives, the playground archive and SHA256SUMS
         run: |
           set -euo pipefail
           cd dist
           ls -l
           test "$(find . -maxdepth 1 \( -name 'graphersal-v*-*.tar.gz' -o -name 'graphersal-v*-*.zip' \) | wc -l)" -eq 4
+          test "$(find . -maxdepth 1 -name 'graphersal-playground-v*.tar.gz' | wc -l)" -eq 1
           sha256sum -c SHA256SUMS
       - name: Create the draft release
         env:
@@ -111,4 +112,4 @@ jobs:
           python3 .github/scripts/release_notes.py "$version" > "$RUNNER_TEMP/notes.md"
           gh release create "$tag" --draft --verify-tag \
             --title "Graphersal $version" --notes-file "$RUNNER_TEMP/notes.md" \
-            dist/graphersal-v* dist/SHA256SUMS
+            dist/graphersal-v* dist/graphersal-playground-v* dist/SHA256SUMS

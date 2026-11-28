@@ -33,6 +33,9 @@ BINARIES = (
     "for benchmarks ([Performance of the prebuilt Linux binaries]"
     "(https://graphersal.dev/getting_started/installation.html"
     "#performance-of-the-prebuilt-linux-binaries)).\n\n"
+    "`graphersal-playground-v<version>.tar.gz` holds the web playground with its WebAssembly "
+    "engine: static files a web server serves as they are (the page runs the engine in the "
+    "browser; `.wasm` must be served as `application/wasm`).\n\n"
 )
 
 # `](target)` of an inline link or image, with an optional title: `](target "title")`.

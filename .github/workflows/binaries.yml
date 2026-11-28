@@ -7,7 +7,12 @@ name: CLI binaries
 # Each build is smoke-tested on its runner (`--version`, a query, the dev server's /api/info) and
 # packed as `graphersal-v<version>-<platform>.tar.gz` (Windows: `.zip`) holding the binary,
 # LICENSE-APACHE, NOTICE, README.md and THIRD-PARTY-LICENSES.html (cargo-about, about.toml),
-# uploaded as the artifact `binaries-<platform>`; the `checksums` job adds `SHA256SUMS`
+# uploaded as the artifact `binaries-<platform>`. The `playground` job builds the static web
+# playground with its WebAssembly engine (`playground/build.sh`) and packs it as
+# `graphersal-playground-v<version>.tar.gz` (index.html, css/, js/, assets/, reset/, pkg/, the
+# licences and THIRD-PARTY-LICENSES.html of the graphersal-wasm tree), the files a host serves
+# for a playground that runs the engine in the browser (artifact `binaries-playground`). The
+# `checksums` job adds `SHA256SUMS`
 # (artifact `binaries-checksums`) and, with `attest`, GitHub build provenance attestations.
 # No dependency cache: a release binary is built from a clean tree.
 # Manual only (Actions minutes are limited; two of the builds run on macOS):
@@ -54,10 +59,21 @@ jobs:
           cargo about generate --locked --config about.toml \
             --manifest-path crates/graphersal-cli/Cargo.toml about.hbs > THIRD-PARTY-LICENSES.html
           test -s THIRD-PARTY-LICENSES.html
+      - name: THIRD-PARTY-LICENSES.html of the graphersal-wasm dependency tree (the playground)
+        run: |
+          set -euo pipefail
+          mkdir -p wasm
+          cargo about generate --locked --config about.toml \
+            --manifest-path crates/graphersal-wasm/Cargo.toml about.hbs > wasm/THIRD-PARTY-LICENSES.html
+          test -s wasm/THIRD-PARTY-LICENSES.html
       - uses: actions/upload-artifact@v4
         with:
           name: third-party-licenses
           path: THIRD-PARTY-LICENSES.html
+      - uses: actions/upload-artifact@v4
+        with:
+          name: third-party-licenses-wasm
+          path: wasm/THIRD-PARTY-LICENSES.html
 
   build:
     name: graphersal (${{ matrix.platform }})
@@ -159,9 +175,66 @@ jobs:
           path: dist/*
           if-no-files-found: error
 
+  playground:
+    name: web playground (WebAssembly)
+    needs: licenses
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+      # Prebuilt wasm-bindgen; its version must equal the `wasm-bindgen` crate pinned in the root
+      # Cargo.toml (playground/build.sh checks it). binaryen's wasm-opt shrinks the module.
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: wasm-bindgen@0.2.129
+      - name: binaryen (wasm-opt)
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq binaryen
+      - name: Version
+        id: version
+        run: |
+          set -euo pipefail
+          version="$(sed -n '/^\[workspace.package\]/,/^\[/s/^version = "\(.*\)"$/\1/p' Cargo.toml)"
+          test -n "$version"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+      - name: Build the playground engine
+        run: playground/build.sh
+      - name: Smoke test
+        run: |
+          set -euo pipefail
+          test -s playground/pkg/graphersal_wasm_bg.wasm
+          test -s playground/pkg/graphersal_wasm.js
+          node --test playground/tests/*.test.mjs
+          for f in playground/js/*.js playground/js/*/*.js; do node --check "$f"; done
+      - uses: actions/download-artifact@v4
+        with:
+          name: third-party-licenses-wasm
+          path: licenses
+      - name: Archive
+        run: |
+          set -euo pipefail
+          name="graphersal-playground-v${{ steps.version.outputs.version }}"
+          mkdir -p "dist/$name"
+          cp -R playground/index.html playground/css playground/js playground/assets \
+            playground/reset playground/pkg "dist/$name/"
+          cp LICENSE-APACHE NOTICE licenses/THIRD-PARTY-LICENSES.html "dist/$name/"
+          cd dist
+          tar -czf "$name.tar.gz" "$name"
+          rm -r "$name"
+          ls -l
+      - uses: actions/upload-artifact@v4
+        with:
+          name: binaries-playground
+          path: dist/*
+          if-no-files-found: error
+
   checksums:
     name: SHA256SUMS
-    needs: build
+    needs: [build, playground]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4
@@ -169,13 +242,14 @@ jobs:
           pattern: binaries-*
           path: dist
           merge-multiple: true
-      - name: Four archives and their SHA256SUMS
+      - name: Four CLI archives, the playground archive and their SHA256SUMS
         run: |
           set -euo pipefail
           cd dist
           ls -l
           test "$(find . -maxdepth 1 \( -name 'graphersal-v*-*.tar.gz' -o -name 'graphersal-v*-*.zip' \) | wc -l)" -eq 4
-          sha256sum graphersal-v* > SHA256SUMS
+          test "$(find . -maxdepth 1 -name 'graphersal-playground-v*.tar.gz' | wc -l)" -eq 1
+          sha256sum graphersal-v* graphersal-playground-v* > SHA256SUMS
           cat SHA256SUMS
       - uses: actions/upload-artifact@v4
         with:
@@ -202,7 +276,9 @@ jobs:
           merge-multiple: true
       - uses: actions/attest-build-provenance@v2
         with:
-          subject-path: dist/graphersal-v*
+          subject-path: |
+            dist/graphersal-v*
+            dist/graphersal-playground-v*
 
   compare-musl:
     name: glibc vs musl timings (linux-x86_64)
