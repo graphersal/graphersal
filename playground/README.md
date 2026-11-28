@@ -948,10 +948,13 @@ graph file is not `.json` itself (`droppedFiles`). What a GraphSON import skips 
 types, duplicate vertices or edges) comes back in the graph info's `warnings` and is shown as a notice. **Load
 schema** (start page, next to "Load from file") applies a schema file to the current graph only.
 GraphSON keeps every value type by itself; GraphML gets the declared types (`uuid`, `array`,
-`object`) back from the schema. Save checks the files by loading them back the way Load from file
-does (schema first, then the data) and warns about what does not survive (for GraphML: properties
-whose type comes back as a string without a declaration, an undeclared `uuid`, `array`/`object`
-values, a key with different types on different labels).
+`object`) back from the schema. Save warns about what loading the files back the way Load from
+file does (schema first, then the data) would not keep (for GraphML: properties whose type comes
+back as a string without a declaration, an undeclared `uuid`, `array`/`object` values, a key with
+different types on different labels; for GraphSON: vectors without a declaration, unlabeled
+elements that come back as `vertex`/`edge`), or why that load would fail. The warnings are worked
+out in one pass over the graph without loading anything (`graphersal::io::ReloadPreview`): no
+second graph, no parse of the saved text; a session test compares them with a real load.
 
 **The Catalog** (the top bar's **Catalog ▾**, `components/catalog.js`; models `js/compression.js`
 and `js/indexes.js`, tested in `tests/compression.test.mjs` and `tests/indexes.test.mjs`): one

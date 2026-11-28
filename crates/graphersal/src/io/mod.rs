@@ -15,6 +15,31 @@ pub mod graphson;
 pub use graphml::{GraphMLExport, GraphMLImport};
 pub use graphson::{GraphSONExport, GraphSONImport, ImportNote, ImportNoteKind, ImportReport};
 
+/// What saving a graph in a file format and loading that file into a new graph with the graph's
+/// stored schema (set first, as the playground's "Load from file" does) would give, worked out
+/// without writing or reading the file ([`GraphMLExport::reload_preview`],
+/// [`GraphSONExport::reload_preview`]): each element goes through what the export writes and
+/// what the import makes of it (the key types, the value text, the lifting of declared types,
+/// the schema's checks), but no text is written and no second graph is built.
+#[derive(Debug)]
+#[non_exhaustive]
+pub enum ReloadPreview {
+    /// The load succeeds; the schema inferred from the graph it builds (mode `none`), to compare
+    /// with the original graph's inferred schema.
+    Loads(crate::graph::schema::GraphSchema),
+    /// The load fails with this error (the first element it fails on, in the file's order).
+    Fails(IOError),
+}
+
+/// A new empty graph with `g`'s stored schema: the target a saved file is loaded into.
+fn reload_target<S: GraphStorage>(g: &S) -> Result<crate::graph::TraversalGraph, IOError> {
+    let mut target = crate::graph::TraversalGraph::new();
+    if let Some(schema) = g.get_schema()? {
+        target.set_schema(schema)?;
+    }
+    Ok(target)
+}
+
 /// Trait providing high-level graph import convenience methods.
 ///
 /// # Examples

@@ -683,6 +683,63 @@ impl GraphMLExport {
         self
     }
 
+    /// What exporting `g` as GraphML and importing the document into a new graph with `g`'s
+    /// stored schema would give ([`super::ReloadPreview`]), without writing the document or
+    /// building the graph: per element the export's key types and value text, the import's
+    /// parsing of that text, the lifting of declared types and the checks of `insert_vertex` /
+    /// `insert_edge`, then the schema of the result. One pass over the data plus the key pass of
+    /// an export; the memory of one element at a time. `Err`: the graph cannot be read, or the
+    /// export itself would fail (a non-finite float).
+    pub fn reload_preview<S: GraphStorage>(&self, g: &S) -> Result<super::ReloadPreview, IOError> {
+        let (node_keys, edge_keys) = graphml_keys(g)?;
+        let mut target = super::reload_target(g)?;
+        let mut inferer = crate::graph::schema::SchemaInferer::new();
+        let empty = PropertyMap::default();
+        for vertex in g.vertices()? {
+            let labels = g.vertex_labels(vertex)?.to_vec();
+            let properties = g.vertex_properties(vertex)?.unwrap_or(&empty);
+            let mut data = reloaded_map(properties, &node_keys)?;
+            let loaded =
+                lift_declared_properties(&target, GraphNodeType::Vertex, &labels, &mut data)
+                    .and_then(|()| {
+                        target
+                            .checked_vertex(labels.clone(), data, None)
+                            .map_err(IOError::Graph)
+                    });
+            match loaded {
+                Ok((labels, data)) => inferer.observe_vertex(&labels, &data),
+                Err(err) => return Ok(super::ReloadPreview::Fails(err)),
+            }
+        }
+        for edge in g.edges()? {
+            let Some((from, to)) = g.edge_endpoints(edge)? else {
+                continue;
+            };
+            let label = g.edge_label(edge)?.map(CompactString::new);
+            let properties = g.edge_properties(edge)?.unwrap_or(&empty);
+            let mut data = reloaded_map(properties, &edge_keys)?;
+            let (source, target_labels) = (g.vertex_labels(from)?, g.vertex_labels(to)?);
+            let loaded =
+                lift_declared_properties(&target, GraphNodeType::Edge, label.as_slice(), &mut data)
+                    .and_then(|()| {
+                        let schema = target.schema.read();
+                        crate::graph::schema::SchemaValidator::validate_edge(
+                            &schema,
+                            label.as_deref(),
+                            source,
+                            target_labels,
+                            &mut data,
+                        )
+                        .map_err(|err| IOError::Graph(err.into()))
+                    });
+            if let Err(err) = loaded {
+                return Ok(super::ReloadPreview::Fails(err));
+            }
+            inferer.observe_edge(label.as_deref(), source, target_labels, &data);
+        }
+        Ok(super::ReloadPreview::Loads(inferer.finish()))
+    }
+
     /// Exports `graph` as GraphML to the file at `path`.
     pub fn export_file<S: GraphStorage>(&self, graph: &S, path: &str) -> Result<(), IOError> {
         let f = File::create(path).map_err(|err| IOError::FileRead {
@@ -699,118 +756,7 @@ impl GraphMLExport {
         g: &S,
         writer: W,
     ) -> Result<(), IOError> {
-        // Step 1: one pass over the data to build the node/edge keys. Per label, a key whose
-        // values all have one type gets that type's attr.type, mixed types get `string`; the
-        // labels' types are then promoted into one key type.
-        let empty = PropertyMap::default();
-        let mut node_types: IndexMap<CompactString, IndexMap<CompactString, Option<AttrType>>> =
-            IndexMap::new();
-        for vertex in g.vertices()? {
-            let labels = g.vertex_labels(vertex)?;
-            let properties = g.vertex_properties(vertex)?.unwrap_or(&empty);
-            if labels.is_empty() {
-                observe_key_types(
-                    node_types.entry(CompactString::new("")).or_default(),
-                    properties,
-                );
-            }
-            for label in labels {
-                observe_key_types(node_types.entry(label.clone()).or_default(), properties);
-            }
-        }
-        let mut edge_types: IndexMap<CompactString, IndexMap<CompactString, Option<AttrType>>> =
-            IndexMap::new();
-        for edge in g.edges()? {
-            let label = CompactString::new(g.edge_label(edge)?.unwrap_or(""));
-            observe_key_types(
-                edge_types.entry(label).or_default(),
-                g.edge_properties(edge)?.unwrap_or(&empty),
-            );
-        }
-
-        let mut node_keys: IndexMap<CompactString, KeyInfo> = IndexMap::new();
-        let mut edge_keys: IndexMap<CompactString, KeyInfo> = IndexMap::new();
-
-        // Check if any vertex has a label
-        let has_node_labels = !node_types.is_empty();
-        if has_node_labels {
-            node_keys.insert(
-                CompactString::new("labelV"),
-                KeyInfo {
-                    id: CompactString::new("labelV"),
-                    element: GraphmlElementKind::Node,
-                    attr_name: CompactString::new("labelV"),
-                    attr_type: AttrType::String,
-                    desc: None,
-                },
-            );
-        }
-
-        for keys in node_types.values() {
-            for (prop_name, attr_type) in keys {
-                let attr_type = attr_type.unwrap_or(AttrType::String);
-                if let Some(existing) = node_keys.get_mut(prop_name.as_str()) {
-                    existing.attr_type = promote_type(existing.attr_type, attr_type);
-                } else {
-                    node_keys.insert(
-                        prop_name.clone(),
-                        KeyInfo {
-                            id: prop_name.clone(),
-                            element: GraphmlElementKind::Node,
-                            attr_name: prop_name.clone(),
-                            attr_type,
-                            desc: None,
-                        },
-                    );
-                }
-            }
-        }
-
-        // Check if any edge has a label
-        let has_edge_labels = !edge_types.is_empty();
-        if has_edge_labels {
-            let key_id = if node_keys.contains_key("labelE") {
-                CompactString::new("e_labelE")
-            } else {
-                CompactString::new("labelE")
-            };
-            edge_keys.insert(
-                CompactString::new("labelE"),
-                KeyInfo {
-                    id: key_id,
-                    element: GraphmlElementKind::Edge,
-                    attr_name: CompactString::new("labelE"),
-                    attr_type: AttrType::String,
-                    desc: None,
-                },
-            );
-        }
-
-        for keys in edge_types.values() {
-            for (prop_name, attr_type) in keys {
-                let attr_type = attr_type.unwrap_or(AttrType::String);
-                if let Some(existing) = edge_keys.get_mut(prop_name.as_str()) {
-                    existing.attr_type = promote_type(existing.attr_type, attr_type);
-                } else {
-                    let key_id = if node_keys.contains_key(prop_name.as_str()) {
-                        CompactString::from(format!("e_{prop_name}"))
-                    } else {
-                        prop_name.clone()
-                    };
-                    edge_keys.insert(
-                        prop_name.clone(),
-                        KeyInfo {
-                            id: key_id,
-                            element: GraphmlElementKind::Edge,
-                            attr_name: prop_name.clone(),
-                            attr_type,
-                            desc: None,
-                        },
-                    );
-                }
-            }
-        }
-        // Step 2: Streaming XML Write in a single pass
+        let (node_keys, edge_keys) = graphml_keys(g)?;
         let mut xml = if self.beautify {
             Writer::new_with_indent(writer, b' ', 2)
         } else {
@@ -1064,6 +1010,156 @@ impl GraphMLExport {
 
         Ok(())
     }
+}
+
+/// The `<key>`s of a document `g` is exported as (node keys, edge keys by property name): one
+/// pass over the data. Per label, a key whose values all have one type gets that type's
+/// `attr.type`, mixed types get `string`; the labels' types are then promoted into one key type.
+/// The export writes them; [`GraphMLExport::reload_preview`] reads the same.
+#[allow(clippy::type_complexity)]
+fn graphml_keys<S: GraphStorage>(
+    g: &S,
+) -> Result<
+    (
+        IndexMap<CompactString, KeyInfo>,
+        IndexMap<CompactString, KeyInfo>,
+    ),
+    IOError,
+> {
+    let empty = PropertyMap::default();
+    let mut node_types: IndexMap<CompactString, IndexMap<CompactString, Option<AttrType>>> =
+        IndexMap::new();
+    for vertex in g.vertices()? {
+        let labels = g.vertex_labels(vertex)?;
+        let properties = g.vertex_properties(vertex)?.unwrap_or(&empty);
+        if labels.is_empty() {
+            observe_key_types(
+                node_types.entry(CompactString::new("")).or_default(),
+                properties,
+            );
+        }
+        for label in labels {
+            observe_key_types(node_types.entry(label.clone()).or_default(), properties);
+        }
+    }
+    let mut edge_types: IndexMap<CompactString, IndexMap<CompactString, Option<AttrType>>> =
+        IndexMap::new();
+    for edge in g.edges()? {
+        let label = CompactString::new(g.edge_label(edge)?.unwrap_or(""));
+        observe_key_types(
+            edge_types.entry(label).or_default(),
+            g.edge_properties(edge)?.unwrap_or(&empty),
+        );
+    }
+
+    let mut node_keys: IndexMap<CompactString, KeyInfo> = IndexMap::new();
+    let mut edge_keys: IndexMap<CompactString, KeyInfo> = IndexMap::new();
+
+    // Check if any vertex has a label
+    let has_node_labels = !node_types.is_empty();
+    if has_node_labels {
+        node_keys.insert(
+            CompactString::new("labelV"),
+            KeyInfo {
+                id: CompactString::new("labelV"),
+                element: GraphmlElementKind::Node,
+                attr_name: CompactString::new("labelV"),
+                attr_type: AttrType::String,
+                desc: None,
+            },
+        );
+    }
+
+    for keys in node_types.values() {
+        for (prop_name, attr_type) in keys {
+            let attr_type = attr_type.unwrap_or(AttrType::String);
+            if let Some(existing) = node_keys.get_mut(prop_name.as_str()) {
+                existing.attr_type = promote_type(existing.attr_type, attr_type);
+            } else {
+                node_keys.insert(
+                    prop_name.clone(),
+                    KeyInfo {
+                        id: prop_name.clone(),
+                        element: GraphmlElementKind::Node,
+                        attr_name: prop_name.clone(),
+                        attr_type,
+                        desc: None,
+                    },
+                );
+            }
+        }
+    }
+
+    // Check if any edge has a label
+    let has_edge_labels = !edge_types.is_empty();
+    if has_edge_labels {
+        let key_id = if node_keys.contains_key("labelE") {
+            CompactString::new("e_labelE")
+        } else {
+            CompactString::new("labelE")
+        };
+        edge_keys.insert(
+            CompactString::new("labelE"),
+            KeyInfo {
+                id: key_id,
+                element: GraphmlElementKind::Edge,
+                attr_name: CompactString::new("labelE"),
+                attr_type: AttrType::String,
+                desc: None,
+            },
+        );
+    }
+
+    for keys in edge_types.values() {
+        for (prop_name, attr_type) in keys {
+            let attr_type = attr_type.unwrap_or(AttrType::String);
+            if let Some(existing) = edge_keys.get_mut(prop_name.as_str()) {
+                existing.attr_type = promote_type(existing.attr_type, attr_type);
+            } else {
+                let key_id = if node_keys.contains_key(prop_name.as_str()) {
+                    CompactString::from(format!("e_{prop_name}"))
+                } else {
+                    prop_name.clone()
+                };
+                edge_keys.insert(
+                    prop_name.clone(),
+                    KeyInfo {
+                        id: key_id,
+                        element: GraphmlElementKind::Edge,
+                        attr_name: prop_name.clone(),
+                        attr_type,
+                        desc: None,
+                    },
+                );
+            }
+        }
+    }
+    // Step 2: Streaming XML Write in a single pass
+    Ok((node_keys, edge_keys))
+}
+
+/// The properties an element's `<data>` would load back as: each value's physical text (a
+/// `null` is no `<data>`, so the key is absent) parsed by its key's `attr.type`, as the import
+/// parses it.
+fn reloaded_map(
+    properties: &PropertyMap,
+    keys: &IndexMap<CompactString, KeyInfo>,
+) -> Result<PropertyMap, IOError> {
+    let mut data = PropertyMap::default();
+    for (key, value) in properties {
+        let Some(text) = physical_text(key, value)? else {
+            continue;
+        };
+        let attr_type = keys
+            .get(key.as_str())
+            .map(|info| info.attr_type)
+            .unwrap_or(AttrType::String);
+        let id = keys
+            .get(key.as_str())
+            .map_or(key.as_str(), |info| info.id.as_str());
+        data.insert(key.clone(), parse_attr_value(id, key, &attr_type, &text)?);
+    }
+    Ok(data)
 }
 
 /// Maps a type onto the GraphML `attr.type` of its physical encoding.

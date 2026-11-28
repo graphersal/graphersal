@@ -334,6 +334,13 @@ pub trait AnyGraph: Send + Sync + 'static + sealed::Sealed {
     #[cfg(feature = "io")]
     fn export_graphson(&self, writer: &mut dyn std::io::Write) -> Result<(), IOError>;
 
+    /// What saving the graph as GraphML (`graphson: false`) or GraphSON (`true`) and loading the
+    /// file into a new graph with its stored schema would give, without writing the file
+    /// ([`GraphMLExport::reload_preview`](crate::io::GraphMLExport::reload_preview),
+    /// [`GraphSONExport::reload_preview`](crate::io::GraphSONExport::reload_preview)).
+    #[cfg(feature = "io")]
+    fn reload_preview(&self, graphson: bool) -> Result<crate::io::ReloadPreview, IOError>;
+
     // ---- persist --------------------------------------------------------------------------
 
     /// Writes the graph as a packed snapshot to `writer`
@@ -651,6 +658,16 @@ where
     #[cfg(feature = "io")]
     fn export_graphson(&self, writer: &mut dyn std::io::Write) -> Result<(), IOError> {
         crate::io::GraphSONExport::new().export_writer(&*self.read_checked()?, writer)
+    }
+
+    #[cfg(feature = "io")]
+    fn reload_preview(&self, graphson: bool) -> Result<crate::io::ReloadPreview, IOError> {
+        let graph = self.read_checked()?;
+        if graphson {
+            crate::io::GraphSONExport::new().reload_preview(&*graph)
+        } else {
+            crate::io::GraphMLExport::new().reload_preview(&*graph)
+        }
     }
 
     #[cfg(feature = "persist")]

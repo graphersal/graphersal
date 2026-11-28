@@ -1723,6 +1723,51 @@ struct EdgeEntry {
 // Export
 // ---------------------------------------------------------------------------------------------
 
+/// The properties as the import reads back their exported GraphSON, or `None` when that is
+/// the map itself: a vector, written as a `g:List` of `g:Float`, reads back as a list of floats
+/// (inside lists and objects too).
+fn reloaded_map(properties: &PropertyMap) -> Option<PropertyMap> {
+    if !properties.iter().any(|(_, value)| holds_vector(value)) {
+        return None;
+    }
+    let mut map = PropertyMap::default();
+    for (key, value) in properties {
+        map.insert(key.clone(), reloaded_value(value));
+    }
+    Some(map)
+}
+
+fn holds_vector(value: &ElementProperty) -> bool {
+    match value {
+        ElementProperty::Vector(_) => true,
+        ElementProperty::Array(items) => items.iter().any(holds_vector),
+        ElementProperty::Object(map) => map.iter().any(|(_, v)| holds_vector(v)),
+        _ => false,
+    }
+}
+
+fn reloaded_value(value: &ElementProperty) -> ElementProperty {
+    match value {
+        ElementProperty::Vector(vector) => ElementProperty::Array(
+            vector
+                .iter_f32()
+                .map(|v| ElementProperty::from(crate::value::vector::tagged::short_f64(v)))
+                .collect(),
+        ),
+        ElementProperty::Array(items) => {
+            ElementProperty::Array(items.iter().map(reloaded_value).collect())
+        }
+        ElementProperty::Object(map) if map.iter().any(|(_, v)| holds_vector(v)) => {
+            let mut out = PropertyMap::default();
+            for (key, v) in map.iter() {
+                out.insert(key.clone(), reloaded_value(v));
+            }
+            ElementProperty::Object(Box::new(out))
+        }
+        other => other.clone(),
+    }
+}
+
 /// GraphSON exporter: writes a graph as GraphSON 3.0 in the line form. Build it with
 /// [`GraphSONExport::new`].
 ///
@@ -1748,6 +1793,76 @@ impl GraphSONExport {
     /// A new exporter with the default options.
     pub fn new() -> Self {
         Self {}
+    }
+
+    /// What exporting `g` as GraphSON and importing the text into a new graph with `g`'s stored
+    /// schema would give ([`super::ReloadPreview`]), without writing the text or building the
+    /// graph. GraphSON keeps every value with its type, so an element loads back as it is,
+    /// except an unlabeled vertex or edge, which is written with TinkerPop's default label
+    /// ([`DEFAULT_VERTEX_LABEL`], [`DEFAULT_EDGE_LABEL`]), and a vector, which is written as a
+    /// `g:List` of `g:Float` and reads back as a list (a vector again only where the schema
+    /// declares one); with a stored schema each element gets the checks of `insert_vertex` /
+    /// `insert_edge` under the labels it loads with. One pass over the data. `Err`: the graph
+    /// cannot be read.
+    pub fn reload_preview<S: GraphStorage>(&self, g: &S) -> Result<super::ReloadPreview, IOError> {
+        let mut target = super::reload_target(g)?;
+        let checked = target
+            .get_schema()?
+            .is_some_and(|schema| !matches!(schema.mode, crate::graph::schema::SchemaMode::None));
+        let mut inferer = crate::graph::schema::SchemaInferer::new();
+        let empty = PropertyMap::default();
+        let default_vertex = [CompactString::new(DEFAULT_VERTEX_LABEL)];
+        let loaded_labels = |labels: &[CompactString]| -> Vec<CompactString> {
+            if labels.is_empty() {
+                default_vertex.to_vec()
+            } else {
+                labels.to_vec()
+            }
+        };
+        for vertex in g.vertices()? {
+            let labels = loaded_labels(g.vertex_labels(vertex)?);
+            let properties = g.vertex_properties(vertex)?.unwrap_or(&empty);
+            let reloaded = reloaded_map(properties);
+            let mut data = reloaded.as_ref().unwrap_or(properties);
+            let checked_data;
+            if checked {
+                match target.checked_vertex(labels.clone(), data.clone(), None) {
+                    Ok((_, coerced)) => {
+                        checked_data = coerced;
+                        data = &checked_data;
+                    }
+                    Err(err) => return Ok(super::ReloadPreview::Fails(IOError::Graph(err))),
+                }
+            }
+            inferer.observe_vertex(&labels, data);
+        }
+        for edge in g.edges()? {
+            let Some((from, to)) = g.edge_endpoints(edge)? else {
+                continue;
+            };
+            let label = g.edge_label(edge)?.unwrap_or(DEFAULT_EDGE_LABEL);
+            let source = loaded_labels(g.vertex_labels(from)?);
+            let target_labels = loaded_labels(g.vertex_labels(to)?);
+            let properties = g.edge_properties(edge)?.unwrap_or(&empty);
+            let mut data = reloaded_map(properties);
+            if checked {
+                let mut coerced = data.take().unwrap_or_else(|| properties.clone());
+                let schema = target.schema.read();
+                if let Err(err) = crate::graph::schema::SchemaValidator::validate_edge(
+                    &schema,
+                    Some(label),
+                    &source,
+                    &target_labels,
+                    &mut coerced,
+                ) {
+                    return Ok(super::ReloadPreview::Fails(IOError::Graph(err.into())));
+                }
+                data = Some(coerced);
+            }
+            let data = data.as_ref().unwrap_or(properties);
+            inferer.observe_edge(Some(label), &source, &target_labels, data);
+        }
+        Ok(super::ReloadPreview::Loads(inferer.finish()))
     }
 
     /// Exports `graph` as GraphSON to the file at `path`.
