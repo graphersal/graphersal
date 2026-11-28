@@ -4771,3 +4771,62 @@ mod reserved_param_names {
         }
     }
 }
+
+/// `property(T.id, __...)` after `add_v()` evaluates the traversal per traverser instead of
+/// storing the text of the traversal as the id.
+#[cfg(feature = "script")]
+mod property_token_traversals {
+    use crate::script_host::eval_value;
+    use graphersal::prelude::*;
+    use std::sync::Arc;
+
+    #[test]
+    fn ids_and_properties_come_from_the_injected_maps() {
+        let graph = Arc::new(Graph::new(TraversalGraph::new()));
+        let ids = eval_value(
+            graph.clone(),
+            r#"let vs = [#{id: "p0", name: "a"}, #{id: "p1", name: "b"}];
+               g.inject(vs).unfold().as("m").add_v("person")
+                .property(T.id, __.select("m").select("id"))
+                .property("name", __.select("m").select("name")).iterate();
+               g.v().order().by(T.id).project("id", "name").by(T.id).by("name").to_list()"#,
+        )
+        .unwrap();
+        assert_eq!(
+            ids.to_string(),
+            r#"[#{"id": "p0", "name": "a"}, #{"id": "p1", "name": "b"}]"#
+        );
+    }
+
+    #[test]
+    fn a_duplicate_id_from_the_traversal_fails_and_rolls_back() {
+        let graph = Arc::new(Graph::new(TraversalGraph::new()));
+        let err = eval_value(
+            graph.clone(),
+            r#"g.inject([#{id: "p0"}, #{id: "p0"}]).unfold().as("m").add_v("person")
+                .property(T.id, __.select("m").select("id")).iterate()"#,
+        )
+        .expect_err("p0 twice");
+        assert!(err.to_string().contains("'p0' already exists"), "{err}");
+        let count = eval_value(graph, "g.v().count().next()").unwrap();
+        assert_eq!(count.as_int().unwrap(), 0);
+    }
+
+    #[test]
+    fn the_profile_shows_the_id_traversal_and_its_path_need() {
+        let graph = Arc::new(Graph::new(TraversalGraph::new()));
+        let plan = eval_value(
+            graph,
+            r#"g.inject([#{id: "p0"}]).unfold().as("m").add_v("person")
+                .property(T.id, __.select("m").select("id")).profile().to_table()"#,
+        )
+        .unwrap()
+        .to_string();
+        // The id traversal reads the label: the path analysis records it at `as("m")`.
+        assert!(plan.contains(r#"as("m") [path: labels(m)]"#), "{plan}");
+        assert!(
+            plan.contains(r#"add_v("person").property(T.id, __.select("m").select("id"))"#),
+            "{plan}"
+        );
+    }
+}

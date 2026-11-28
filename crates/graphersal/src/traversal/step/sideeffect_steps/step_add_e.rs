@@ -88,7 +88,7 @@ struct StepAddE<'g, S: GraphStorage + 'g> {
     from: Option<Vec<Endpoint<'g, S>>>,
     to: Option<Vec<Endpoint<'g, S>>>,
     /// The user-supplied id from a folded `property(T.id, v)`; `None` lets storage assign one.
-    id: Option<CompactString>,
+    id: Option<AddElementId<'g, S>>,
     /// The properties every created edge gets, folded in by the `add_property_fold` rule; empty
     /// when the rule did not fire. Built once per step, cloned per created edge.
     properties: PropertyMap,
@@ -147,18 +147,14 @@ impl<'g, S: GraphStorage + 'g> fmt::Display for StepAddE<'g, S> {
             render_endpoints("to", &self.to)
         )?;
         if let Some(id) = &self.id {
-            write!(
-                f,
-                ".property(T.id, {})",
-                crate::value::literal::rhai_string(id)
-            )?;
+            write!(f, "{id}")?;
         }
         Ok(())
     }
 }
 
-impl<'g, S: GraphStorage + 'g> AddElementStep for StepAddE<'g, S> {
-    fn set_id(&mut self, id: CompactString) {
+impl<'g, S: GraphStorage + 'g> AddElementStep<'g, S> for StepAddE<'g, S> {
+    fn set_id(&mut self, id: AddElementId<'g, S>) {
         self.id = Some(id);
     }
 
@@ -458,6 +454,10 @@ impl<'g, S: GraphStorage + 'g> GraphStepSideEffectMut<'g, S> for StepAddE<'g, S>
         let (path, bulk, sack) = (parent.path, parent.bulk, parent.sack);
 
         let label = self.resolve_label(context, parent)?;
+        let id = match &self.id {
+            None => None,
+            Some(id) => Some(id.resolve(context, parent)?),
+        };
         let mut result: Vec<Traverser<S>> = vec![];
 
         let (from_ids, to_ids): (Vec<S::VertexId>, Vec<S::VertexId>) = match (&self.from, &self.to)
@@ -503,7 +503,7 @@ impl<'g, S: GraphStorage + 'g> GraphStepSideEffectMut<'g, S> for StepAddE<'g, S>
         for index_from in &from_ids {
             for index_to in &to_ids {
                 let index = context.storage.add_edge_with(
-                    self.id.clone(),
+                    id.clone(),
                     label.clone().map(Into::into),
                     *index_from,
                     *index_to,
@@ -549,7 +549,7 @@ impl<'g, S: GraphStorage + 'g> GraphStepSideEffectMut<'g, S> for StepAddE<'g, S>
             })
     }
 
-    fn as_add_element_mut(&mut self) -> Option<&mut dyn AddElementStep> {
+    fn as_add_element_mut(&mut self) -> Option<&mut dyn AddElementStep<'g, S>> {
         Some(self)
     }
 
@@ -597,7 +597,8 @@ impl<'g, S: GraphStorage + 'g> GraphStepSideEffectMut<'g, S> for StepAddE<'g, S>
 }
 
 impl<'g, S: GraphStorage + 'g> StepAddE<'g, S> {
-    /// Every child traversal this step holds: the label and the endpoints.
+    /// Every child traversal this step holds: the label, the endpoints, then the id traversal
+    /// of a folded `property(T.id, traversal)`.
     fn children_mut(&mut self) -> Vec<&mut AnonymousTraversal<'g, S>> {
         let mut children = Vec::new();
         if let AddLabel::Traversal(child) = &mut self.label {
@@ -610,6 +611,7 @@ impl<'g, S: GraphStorage + 'g> StepAddE<'g, S> {
                 }
             }
         }
+        children.extend(self.id.as_mut().and_then(AddElementId::child_mut));
         children
     }
 }

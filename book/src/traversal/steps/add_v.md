@@ -18,4 +18,12 @@ The result must be a string; no result or another value is a cast error, and the
 rolled back. Directly following `property(key, constant)` calls fold into the step as for the
 other forms.
 
+The id of the new vertex comes from a following `property(T.id, v)`, where `v` may be a traversal
+run on the incoming traverser, so each vertex gets its own id
+(see [property](property.md#propertytid--and-propertytlabel-)):
+
+```rhai,graph=empty
+g.inject("p0", "p1").addV("person").property(T.id, __.identity()).id().toList()   // ["p0", "p1"]
+```
+
 Rust: `add_v(label)`, `add_v_by(traversal)`.

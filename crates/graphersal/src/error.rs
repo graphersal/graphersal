@@ -5607,6 +5607,11 @@ impl TraverserError {
             TraverserError::QueryExecution { query, .. } if query == "property(map)" => {
                 Some(property_map_help())
             }
+            TraverserError::QueryExecution { query, .. }
+                if query == crate::traversal::step::TOKEN_ID_TRAVERSAL_QUERY =>
+            {
+                Some(token_id_traversal_help())
+            }
             TraverserError::QueryExecution { .. } => {
                 Some("Review traversal query steps and conditions.".to_string())
             }
@@ -9383,6 +9388,18 @@ fn unsupported_cardinality_help(step: &str, on_edge: bool) -> String {
          value: g.v(\"1\").property(\"tags\", [\"a\", \"b\"])."
             .to_string()
     }
+}
+
+/// Advice for a `property(T.id, traversal)` whose traversal gave no usable id.
+fn token_id_traversal_help() -> String {
+    "property(T.id, traversal) runs the traversal on each traverser reaching add_v()/add_e() \
+     and uses its first result as the id of the new element: it must give a string or an \
+     integer, for example g.inject(#{id: \"p1\"}).as(\"m\").add_v(\"person\").property(T.id, \
+     __.select(\"m\").select(\"id\")). Make sure every traverser reaching add_v()/add_e() \
+     yields one, convert another value with as_string(), for example \
+     property(T.id, __.select(\"m\").select(\"id\").as_string()), or leave out \
+     property(T.id, ..) to let the graph assign the id."
+        .to_string()
 }
 
 /// Advice for [`TraverserError::TokenPropertyOutsideAdd`].

@@ -381,6 +381,9 @@ pub(super) enum Step {
     PropertyMap(Option<Cardinality>, Vec<PropertyEntry>),
     /// `property(T.id, v)` / `property(T.label, v)`, folded into the preceding `addV()`/`addE()`.
     PropertyToken(PropertyTokenKey, ElementProperty),
+    /// `property(T.id, traversal)` / `property(T.label, traversal)`: the value is the first
+    /// result of the traversal, run on the traverser reaching the `addV()`/`addE()`.
+    PropertyTokenTraversal(PropertyTokenKey, ScriptGraphTraversalSource),
     /// `mergeV(..)`: `()`, a map, or a traversal (`mergeV()` is `mergeV(__.identity())`).
     MergeV(ScriptMergeArg),
     /// `mergeE(..)`: `()`, a map, or a traversal (`mergeE()` is `mergeE(__.identity())`).

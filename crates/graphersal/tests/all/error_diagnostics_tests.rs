@@ -12966,3 +12966,46 @@ fn layer_diff_options_help_names_the_keys_and_values() {
     .unwrap();
     assert_eq!(fixed.to_string(), "false");
 }
+
+/// A `property(T.id, traversal)` without a usable result names the step and shows the
+/// traversal form with a conversion.
+#[test]
+fn token_id_traversal_without_a_usable_id_help_shows_the_traversal_form() {
+    let mut graph = TraversalGraph::new();
+    for (missing, found) in [
+        (true, "returned no result"),
+        (false, "returned 1.5 (a float64)"),
+    ] {
+        let id = if missing {
+            __::identity().limit(0)
+        } else {
+            __::constant(1.5)
+        };
+        let err = graph
+            .traversal_mut()
+            .inject(vec![1])
+            .add_v("n")
+            .property_id_by(id)
+            .next()
+            .expect_err("no usable id");
+        let report = format_diagnostic(&err);
+        assert!(report.contains(found), "{report}");
+        assert!(
+            report.contains("add_v(\"n\").property(T.id, __."),
+            "{report}"
+        );
+        assert!(
+            report.contains(
+                "property(T.id, traversal) runs the traversal on each traverser reaching \
+                 add_v()/add_e() and uses its first result as the id of the new element: it \
+                 must give a string or an integer, for example \
+                 g.inject(#{id: \"p1\"}).as(\"m\").add_v(\"person\").property(T.id, \
+                 __.select(\"m\").select(\"id\")). Make sure every traverser reaching \
+                 add_v()/add_e() yields one, convert another value with as_string(), for \
+                 example property(T.id, __.select(\"m\").select(\"id\").as_string()), or leave \
+                 out property(T.id, ..) to let the graph assign the id."
+            ),
+            "{report}"
+        );
+    }
+}

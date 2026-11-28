@@ -11,7 +11,7 @@
 //!
 //! | Metric | Score | Best |
 //! |---|---|---|
-//! | cosine | `dot / (|a| |b|)`, clamped to -1..=1; `0.0` when either vector is zero | highest |
+//! | cosine | `dot / (\|a\| \|b\|)`, clamped to -1..=1; `0.0` when either vector is zero | highest |
 //! | dot | the dot product | highest |
 //! | l2 | the Euclidean distance | smallest |
 //! | hamming | the number of differing bits (bit vectors only) | smallest |

@@ -308,7 +308,35 @@ impl<'g, S: GraphStorage + 'g> GraphTraversalSource<'g, S> {
     /// assert_eq!(graph.traversal().v("p1").count().next().unwrap(), Some(ElementProperty::from(1)));
     /// ```
     pub fn property_id<T: Into<ElementProperty>>(mut self, value: T) -> Self {
-        attach_token(&mut self.steps, AddToken::Id, value.into());
+        attach_token(
+            &mut self.steps,
+            AddToken::Id,
+            TokenValue::Constant(value.into()),
+        );
+        self
+    }
+
+    /// `property(T.id, traversal)`: [`Self::property_id`] with the id taken from the first
+    /// result of `id`, run on each traverser reaching the `add_v()`/`add_e()` (on a `null` seed
+    /// when the add step starts the traversal), so every created element gets its own id. The
+    /// result is converted like the constant; no result or another value fails the traversal
+    /// naming `property(T.id, ..)`.
+    ///
+    /// ```rust
+    /// use graphersal::prelude::*;
+    ///
+    /// let mut graph = TraversalGraph::new();
+    /// graph
+    ///     .traversal_mut()
+    ///     .inject(vec!["p0", "p1"])
+    ///     .add_v("person")
+    ///     .property_id_by(__::identity())
+    ///     .iterate()
+    ///     .unwrap();
+    /// assert_eq!(graph.traversal().v("p1").count().next().unwrap(), Some(ElementProperty::from(1)));
+    /// ```
+    pub fn property_id_by(mut self, id: AnonymousTraversal<'g, S>) -> Self {
+        attach_token(&mut self.steps, AddToken::Id, TokenValue::Traversal(id));
         self
     }
 
@@ -316,7 +344,25 @@ impl<'g, S: GraphStorage + 'g> GraphTraversalSource<'g, S> {
     /// (only other `property()` steps may come in between). After `add_e()` or anywhere else the
     /// traversal fails with [`TraverserError::TokenPropertyOutsideAdd`] when it executes.
     pub fn property_label<T: Into<ElementProperty>>(mut self, label: T) -> Self {
-        attach_token(&mut self.steps, AddToken::Label, label.into());
+        attach_token(
+            &mut self.steps,
+            AddToken::Label,
+            TokenValue::Constant(label.into()),
+        );
+        self
+    }
+
+    /// `property(T.label, traversal)`: the vertex the preceding `add_v()` creates takes its
+    /// label from the first result of `label`, run on the traverser reaching `add_v()`, as
+    /// with [`Self::add_v_by`] (the step becomes `add_v(traversal)`). After `add_e()`,
+    /// `add_v(traversal)` or anywhere else the traversal fails with
+    /// [`TraverserError::TokenPropertyOutsideAdd`] when it executes.
+    pub fn property_label_by(mut self, label: AnonymousTraversal<'g, S>) -> Self {
+        attach_token(
+            &mut self.steps,
+            AddToken::Label,
+            TokenValue::Traversal(label),
+        );
         self
     }
 }
@@ -352,13 +398,37 @@ impl<'g, S: GraphStorage + 'g> AnonymousTraversal<'g, S> {
 
     /// `property(T.id, v)`; see [`GraphTraversalSource::property_id`].
     pub fn property_id<T: Into<ElementProperty>>(mut self, value: T) -> Self {
-        attach_token(&mut self.steps, AddToken::Id, value.into());
+        attach_token(
+            &mut self.steps,
+            AddToken::Id,
+            TokenValue::Constant(value.into()),
+        );
+        self
+    }
+
+    /// `property(T.id, traversal)`; see [`GraphTraversalSource::property_id_by`].
+    pub fn property_id_by(mut self, id: AnonymousTraversal<'g, S>) -> Self {
+        attach_token(&mut self.steps, AddToken::Id, TokenValue::Traversal(id));
         self
     }
 
     /// `property(T.label, v)`; see [`GraphTraversalSource::property_label`].
     pub fn property_label<T: Into<ElementProperty>>(mut self, label: T) -> Self {
-        attach_token(&mut self.steps, AddToken::Label, label.into());
+        attach_token(
+            &mut self.steps,
+            AddToken::Label,
+            TokenValue::Constant(label.into()),
+        );
+        self
+    }
+
+    /// `property(T.label, traversal)`; see [`GraphTraversalSource::property_label_by`].
+    pub fn property_label_by(mut self, label: AnonymousTraversal<'g, S>) -> Self {
+        attach_token(
+            &mut self.steps,
+            AddToken::Label,
+            TokenValue::Traversal(label),
+        );
         self
     }
 }
@@ -379,53 +449,35 @@ impl AddToken {
     }
 }
 
+/// The value of `property(T.id|T.label, v)`: a constant, or a child traversal run per traverser
+/// on the traverser reaching the add step.
+enum TokenValue<'g, S: GraphStorage + 'g> {
+    Constant(ElementProperty),
+    Traversal(AnonymousTraversal<'g, S>),
+}
+
 /// Folds `property(T.id|T.label, value)` into the `add_v()`/`add_e()` it follows, walking back
-/// over `property()` steps, modulators (`from()`/`to()`) and `as()` labels. Otherwise (no add
-/// step, an invalid value, or `T.label` after `add_e()`) pushes a [`StepTokenPropertyRejected`]
-/// that fails when the traversal executes, since builders cannot fail.
+/// over `property()` steps, modulators (`from()`/`to()`) and `as()` labels. A traversal id is
+/// kept by the add step and evaluated per traverser; a traversal label turns `add_v(..)` into
+/// `add_v(traversal)`. Otherwise (no add step, an invalid value, `T.label` after `add_e()` or
+/// `add_v(traversal)`) pushes a [`StepTokenPropertyRejected`] that fails when the traversal
+/// executes, since builders cannot fail.
 fn attach_token<'g, S: GraphStorage + 'g>(
     steps: &mut Vec<GraphStep<'g, S>>,
     token: AddToken,
-    value: ElementProperty,
+    value: TokenValue<'g, S>,
 ) {
     let rendered = format!(
         "property({}, {})",
         token.spelling(),
-        crate::value::literal::rhai_literal(&value)
-    );
-    let converted = match (token, &value) {
-        (_, ElementProperty::String(text)) if !text.is_empty() => Ok(text.clone()),
-        (AddToken::Id, ElementProperty::Number(number)) => match number.as_i64() {
-            Some(int) => Ok(compact_str::format_compact!("{int}")),
-            None => Err(TokenRejection::Value(value.clone())),
-        },
-        _ => Err(TokenRejection::Value(value.clone())),
-    };
-    let rejection = match converted {
-        Err(rejection) => rejection,
-        Ok(text) => {
-            let target = steps.iter_mut().rev().find_map(|step| match step {
-                GraphStep::Modulator(_, _) | GraphStep::As(_, _) => None,
-                GraphStep::SideEffectMut("property", _) => None,
-                GraphStep::SideEffectMut(_, step) => Some(step.as_add_element_mut()),
-                _ => Some(None),
-            });
-            match target.flatten() {
-                Some(add) => match token {
-                    AddToken::Id => {
-                        add.set_id(text);
-                        return;
-                    }
-                    AddToken::Label => {
-                        if add.set_label(text) {
-                            return;
-                        }
-                        TokenRejection::OutsideAdd
-                    }
-                },
-                None => TokenRejection::OutsideAdd,
-            }
+        match &value {
+            TokenValue::Constant(value) => crate::value::literal::rhai_literal(value),
+            TokenValue::Traversal(traversal) => traversal.to_string(),
         }
+    );
+    let rejection = match fold_token(steps, token, value) {
+        Ok(()) => return,
+        Err(rejection) => rejection,
     };
     steps.push(GraphStep::SideEffectMut(
         "property",
@@ -435,6 +487,71 @@ fn attach_token<'g, S: GraphStorage + 'g>(
             rejection,
         }),
     ));
+}
+
+/// The folding of [`attach_token`]; `Err` is why the token could not fold.
+fn fold_token<'g, S: GraphStorage + 'g>(
+    steps: &mut [GraphStep<'g, S>],
+    token: AddToken,
+    value: TokenValue<'g, S>,
+) -> Result<(), TokenRejection> {
+    let value = match value {
+        TokenValue::Constant(value) => {
+            let text = match (token, &value) {
+                (_, ElementProperty::String(text)) if !text.is_empty() => text.clone(),
+                (AddToken::Id, ElementProperty::Number(number)) => match number.as_i64() {
+                    Some(int) => compact_str::format_compact!("{int}"),
+                    None => return Err(TokenRejection::Value(value)),
+                },
+                _ => return Err(TokenRejection::Value(value)),
+            };
+            TokenValue::<'g, S>::Constant(ElementProperty::String(text))
+        }
+        traversal @ TokenValue::Traversal(_) => traversal,
+    };
+    // The add step: the nearest step back that is not a `property()`, a modulator or a label.
+    let at = steps.iter().rposition(|step| {
+        !matches!(
+            step,
+            GraphStep::Modulator(_, _)
+                | GraphStep::As(_, _)
+                | GraphStep::SideEffectMut("property", _)
+        )
+    });
+    let Some(GraphStep::SideEffectMut(_, step)) = at.and_then(|at| steps.get_mut(at)) else {
+        return Err(TokenRejection::OutsideAdd);
+    };
+    let Some(add) = step.as_add_element_mut() else {
+        return Err(TokenRejection::OutsideAdd);
+    };
+    match (token, value) {
+        (AddToken::Id, TokenValue::Constant(ElementProperty::String(text))) => {
+            add.set_id(AddElementId::Constant(text));
+            Ok(())
+        }
+        (AddToken::Id, TokenValue::Traversal(traversal)) => {
+            add.set_id(AddElementId::Traversal(traversal));
+            Ok(())
+        }
+        (AddToken::Label, TokenValue::Constant(ElementProperty::String(text))) => {
+            if add.set_label(text) {
+                Ok(())
+            } else {
+                Err(TokenRejection::OutsideAdd)
+            }
+        }
+        (AddToken::Label, TokenValue::Traversal(traversal)) => {
+            match add.with_label_traversal(traversal) {
+                Some(replacement) => {
+                    *step = replacement;
+                    Ok(())
+                }
+                None => Err(TokenRejection::OutsideAdd),
+            }
+        }
+        // Only strings come out of the conversion above.
+        (_, TokenValue::Constant(other)) => Err(TokenRejection::Value(other)),
+    }
 }
 
 /// Why a `property(T.id|T.label, v)` could not be folded into an add step.

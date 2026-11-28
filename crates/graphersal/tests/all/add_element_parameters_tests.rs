@@ -323,3 +323,319 @@ fn rhai_token_forms_with_parameters() {
     );
     assert_eq!(script_int(&graph, r#"g.v("p1").count().next()"#), 1);
 }
+
+/// The ids of every vertex, sorted.
+fn vertex_ids(graph: &TraversalGraph) -> Vec<String> {
+    let mut ids: Vec<String> = graph
+        .traversal()
+        .v(None)
+        .id()
+        .to_list()
+        .unwrap()
+        .into_iter()
+        .map(|id| id.as_string().unwrap().to_string())
+        .collect();
+    ids.sort();
+    ids
+}
+
+#[test]
+fn id_traversal_runs_per_traverser_reaching_add_v() {
+    let mut graph = TraversalGraph::new();
+    graph
+        .traversal_mut()
+        .inject(vec!["p0", "p1"])
+        .as_("m")
+        .add_v("person")
+        .property("name", "x")
+        .property_id_by(__::select("m"))
+        .iterate()
+        .unwrap();
+    assert_eq!(vertex_ids(&graph), ["p0", "p1"]);
+    assert_eq!(
+        graph
+            .traversal()
+            .v("p1")
+            .has("name", "x")
+            .count()
+            .next()
+            .unwrap(),
+        one()
+    );
+}
+
+#[test]
+fn id_traversal_on_add_v_start_step_and_add_v_by() {
+    let mut graph = TraversalGraph::new();
+    // The start form runs the traversal on a `null` seed.
+    graph
+        .traversal_mut()
+        .add_v("person")
+        .property_id_by(__::constant("s1"))
+        .iterate()
+        .unwrap();
+    // `add_v(traversal)` keeps both children: the label and the id.
+    graph
+        .traversal_mut()
+        .inject(vec!["thing"])
+        .add_v_by(__::identity())
+        .property_id_by(__::constant("t1"))
+        .iterate()
+        .unwrap();
+    assert_eq!(vertex_ids(&graph), ["s1", "t1"]);
+    assert_eq!(
+        graph
+            .traversal()
+            .v("t1")
+            .has_label("thing")
+            .count()
+            .next()
+            .unwrap(),
+        one()
+    );
+}
+
+#[test]
+fn integer_id_from_a_traversal_becomes_its_decimal_string() {
+    let mut graph = TraversalGraph::new();
+    graph
+        .traversal_mut()
+        .inject(vec![41_i64, 42])
+        .add_v("n")
+        .property_id_by(__::identity())
+        .iterate()
+        .unwrap();
+    assert_eq!(vertex_ids(&graph), ["41", "42"]);
+}
+
+#[test]
+fn id_traversal_after_add_e() {
+    let mut graph = TraversalGraph::tinkerpop_modern();
+    graph
+        .traversal_mut()
+        .v(vec!["1", "2"])
+        .as_("a")
+        .add_e("likes")
+        .to("3")
+        .property_id_by(__::select("a").id().concat(vec!["-likes"]))
+        .iterate()
+        .unwrap();
+    let mut ids: Vec<String> = graph
+        .traversal()
+        .e(None)
+        .has_label("likes")
+        .id()
+        .to_list()
+        .unwrap()
+        .into_iter()
+        .map(|id| id.as_string().unwrap().to_string())
+        .collect();
+    ids.sort();
+    assert_eq!(ids, ["1-likes", "2-likes"]);
+}
+
+#[test]
+fn id_traversal_without_a_usable_result_fails_naming_the_step() {
+    let mut graph = TraversalGraph::new();
+    let err = graph
+        .traversal_mut()
+        .inject(vec![1])
+        .add_v("n")
+        .property_id_by(__::identity().limit(0))
+        .iterate()
+        .expect_err("no result");
+    let message = err.root_cause().to_string();
+    assert!(
+        message.contains("property(T.id, __.identity().limit(0)) returned no result"),
+        "{message}"
+    );
+    for bad in [
+        ElementProperty::from(1.5),
+        ElementProperty::Boolean(true),
+        ElementProperty::Null,
+    ] {
+        let err = graph
+            .traversal_mut()
+            .inject(vec![1])
+            .add_v("n")
+            .property_id_by(__::constant(bad.clone()))
+            .iterate()
+            .expect_err("invalid id");
+        let message = err.root_cause().to_string();
+        assert!(
+            message.contains("an id is a string or an integer"),
+            "{bad:?}: {message}"
+        );
+    }
+    // Every failure was rolled back.
+    assert_eq!(
+        graph.traversal().v(None).count().next().unwrap(),
+        Some(0.into())
+    );
+}
+
+#[test]
+fn duplicate_id_from_a_traversal_fails() {
+    let mut graph = TraversalGraph::new();
+    let err = graph
+        .traversal_mut()
+        .inject(vec!["a", "a"])
+        .add_v("n")
+        .property_id_by(__::identity())
+        .iterate()
+        .expect_err("the second vertex reuses id a");
+    assert!(
+        matches!(
+            err.root_cause(),
+            TraverserError::Graph(GraphError::VertexIdUniqueConstraint { .. })
+        ),
+        "{err:?}"
+    );
+    assert_eq!(
+        graph.traversal().v(None).count().next().unwrap(),
+        Some(0.into())
+    );
+}
+
+#[test]
+fn id_traversal_is_profiled_and_reads_the_path() {
+    let mut graph = TraversalGraph::new();
+    let metrics = graph
+        .traversal_mut()
+        .inject(vec!["p0"])
+        .as_("m")
+        .add_v("person")
+        .property_id_by(__::select("m"))
+        .profile()
+        .unwrap();
+    let plan = metrics.to_string();
+    // The id traversal reads the label: the path analysis records it at `as("m")`.
+    assert!(plan.contains("as(\"m\") [path: labels(m)]"), "{plan}");
+    assert!(
+        plan.contains("add_v(\"person\").property(T.id, __.select(\"m\"))"),
+        "{plan}"
+    );
+    assert!(plan.contains("\\> select(\"m\")"), "{plan}");
+    assert_eq!(vertex_ids(&graph), ["p0"]);
+}
+
+#[test]
+fn id_traversal_outside_an_add_step_is_refused() {
+    let mut graph = TraversalGraph::tinkerpop_modern();
+    let err = graph
+        .traversal_mut()
+        .v("1")
+        .property_id_by(__::constant("x"))
+        .next()
+        .expect_err("not after addV");
+    assert!(
+        matches!(
+            err.root_cause(),
+            TraverserError::TokenPropertyOutsideAdd { .. }
+        ),
+        "{err:?}"
+    );
+}
+
+#[test]
+fn label_traversal_after_add_v_sets_the_label_per_traverser() {
+    let mut graph = TraversalGraph::new();
+    graph
+        .traversal_mut()
+        .inject(vec!["a", "b"])
+        .as_("m")
+        .add_v("x")
+        .property("k", 1)
+        .property_label_by(__::select("m"))
+        .property_id_by(__::select("m"))
+        .iterate()
+        .unwrap();
+    for id in ["a", "b"] {
+        assert_eq!(
+            graph
+                .traversal()
+                .v(id)
+                .has_label(id)
+                .has("k", 1)
+                .count()
+                .next()
+                .unwrap(),
+            one()
+        );
+    }
+    assert_eq!(
+        graph
+            .traversal()
+            .v(None)
+            .has_label("x")
+            .count()
+            .next()
+            .unwrap(),
+        Some(0.into())
+    );
+    // After add_e() the label comes from add_e(label): refused as with a constant.
+    let mut graph = TraversalGraph::tinkerpop_modern();
+    let err = graph
+        .traversal_mut()
+        .v("1")
+        .add_e("likes")
+        .to("2")
+        .property_label_by(__::constant("x"))
+        .next()
+        .expect_err("T.label after addE");
+    assert!(
+        matches!(
+            err.root_cause(),
+            TraverserError::TokenPropertyOutsideAdd { .. }
+        ),
+        "{err:?}"
+    );
+}
+
+#[cfg(feature = "script")]
+#[test]
+fn rhai_token_forms_with_traversals() {
+    let graph = empty();
+    assert_eq!(
+        script_int(
+            &graph,
+            r#"g.inject(1, 2).add_v("n").property(T.id, __.identity()).iterate(); g.v(["1", "2"]).count().next()"#
+        ),
+        2
+    );
+    assert_eq!(
+        script_int(
+            &graph,
+            r#"g.v("1").as("a").add_e("e").to("2").property(T.id, __.select("a").id().concat("-e")).iterate(); g.e("1-e").count().next()"#
+        ),
+        1
+    );
+    assert_eq!(
+        script_int(
+            &graph,
+            r#"g.inject("tag").add_v("x").property(T.label, __.identity()).iterate(); g.v().has_label("tag").count().next()"#
+        ),
+        1
+    );
+    let err = eval_value(
+        graph.clone(),
+        r#"g.inject(1).add_v("n").property(T.id, __.constant(1.5)).iterate()"#,
+    )
+    .expect_err("a float id");
+    assert!(
+        err.to_string()
+            .contains("property(T.id, __.constant(1.5)) returned 1.5 (a float64)"),
+        "{err}"
+    );
+    let err = eval_value(
+        graph.clone(),
+        r#"g.v("1").add_e("e").to("2").property(T.label, __.constant("x")).iterate()"#,
+    )
+    .expect_err("T.label after addE");
+    assert!(err.to_string().contains("property(T.label, ..)"), "{err}");
+    // Nothing was stringified into an id.
+    assert_eq!(
+        script_int(&graph, r#"g.v("GraphTraversalSource").count().next()"#),
+        0
+    );
+}

@@ -277,6 +277,25 @@ fn wave_four_forms_number_their_children() {
 }
 
 #[test]
+fn add_steps_number_their_id_traversal_after_their_own_children() {
+    // add_v(label): the id traversal is the only child.
+    let q = r#"g.inject("x1").add_v("person").property(T.id, __.identity())"#;
+    assert_eq!(name_at(q, "1.0.0"), "identity()");
+    // add_v(traversal): the label first, then the id.
+    let q = r#"g.inject("x1").add_v(__.constant("person")).property(T.id, __.identity())"#;
+    assert!(name_at(q, "1.0.0").starts_with("constant("));
+    assert_eq!(name_at(q, "1.1.0"), "identity()");
+    // add_e(): the endpoints first, then the id.
+    let q = r#"g.V("1").add_e("likes").to(__.V("2")).property(T.id, __.constant("e9"))"#;
+    assert_eq!(name_at(q, "1.0.0"), r#"v("2")"#);
+    assert!(name_at(q, "1.1.0").starts_with("constant("));
+    assert_eq!(
+        failing_id(r#"g.inject(1).add_v("p").property(T.id, __.fail("stop"))"#),
+        "1.0.0"
+    );
+}
+
+#[test]
 fn nested_children_extend_the_id() {
     let q = r#"g.V().where(__.out().where(__.in("created")))"#;
     assert_eq!(name_at(q, "1.0.0"), "out()");

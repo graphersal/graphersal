@@ -1,14 +1,13 @@
 use crate::graph::GraphStorage;
 use crate::*;
 
-#[derive(Default, Clone)]
-struct StepAddV {
+struct StepAddV<'g, S: GraphStorage + 'g> {
     /// The vertex's initial label set, in the order given. `None` means no labels (was
     /// `add_v()`/`add_v(None)`); `Some(vec![])` never occurs — an empty list argument still yields
     /// `None` here, matching `add_v()`'s no-label call.
     args: Option<Vec<String>>,
     /// The user-supplied id from a folded `property(T.id, v)`; `None` lets storage assign one.
-    id: Option<CompactString>,
+    id: Option<AddElementId<'g, S>>,
     /// The properties the vertex is created with, folded in by the `add_property_fold` rule;
     /// empty when the rule did not fire. Built once per step, cloned per created vertex.
     properties: PropertyMap,
@@ -17,7 +16,18 @@ struct StepAddV {
     create_time: Option<crate::value::temporal::DateTime>,
 }
 
-impl fmt::Display for StepAddV {
+impl<'g, S: GraphStorage + 'g> Clone for StepAddV<'g, S> {
+    fn clone(&self) -> Self {
+        Self {
+            args: self.args.clone(),
+            id: self.id.clone(),
+            properties: self.properties.clone(),
+            create_time: self.create_time,
+        }
+    }
+}
+
+impl<'g, S: GraphStorage + 'g> fmt::Display for StepAddV<'g, S> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "add_v({}", display_option_vec_string(&self.args))?;
         if !self.properties.is_empty() {
@@ -31,18 +41,14 @@ impl fmt::Display for StepAddV {
         }
         write!(f, ")")?;
         if let Some(id) = &self.id {
-            write!(
-                f,
-                ".property(T.id, {})",
-                crate::value::literal::rhai_string(id)
-            )?;
+            write!(f, "{id}")?;
         }
         Ok(())
     }
 }
 
-impl AddElementStep for StepAddV {
-    fn set_id(&mut self, id: CompactString) {
+impl<'g, S: GraphStorage + 'g> AddElementStep<'g, S> for StepAddV<'g, S> {
+    fn set_id(&mut self, id: AddElementId<'g, S>) {
         self.id = Some(id);
     }
 
@@ -51,32 +57,48 @@ impl AddElementStep for StepAddV {
         true
     }
 
+    /// `add_v(..).property(T.label, traversal)` becomes `add_v(traversal)` with the same id,
+    /// properties and creation time.
+    fn with_label_traversal(
+        &mut self,
+        label: AnonymousTraversal<'g, S>,
+    ) -> Option<Box<dyn GraphStepSideEffectMut<'g, S> + 'g>> {
+        Some(Box::new(StepAddVBy {
+            label,
+            id: self.id.take(),
+            properties: std::mem::take(&mut self.properties),
+            create_time: self.create_time,
+        }))
+    }
+
     fn fold_property(&mut self, key: CompactString, value: ElementProperty) {
         self.properties.insert(key, value);
     }
 }
 
+fn add_v_step<'g, S: GraphStorage + 'g, T: Into<ArgStrings>>(args: T) -> GraphStep<'g, S> {
+    let args = match args.into() {
+        ArgStrings::None => None,
+        ArgStrings::String(v) => Some(vec![v]),
+        // A list is the intended way to create a multi-label vertex (D8) — no longer an
+        // error shape.
+        ArgStrings::List(v) => Some(v),
+    };
+    GraphStep::SideEffectMut(
+        "add_v",
+        Box::new(StepAddV {
+            args,
+            id: None,
+            properties: PropertyMap::default(),
+            create_time: None,
+        }),
+    )
+}
+
 impl<'g, S: GraphStorage + 'g> GraphTraversalSource<'g, S> {
     /// Adds a vertex with the given label; chain property() to set its properties.
     pub fn add_v<T: Into<ArgStrings>>(self, args: T) -> Self {
-        let args = match args.into() {
-            ArgStrings::None => None,
-            ArgStrings::String(v) => Some(vec![v]),
-            // A list is the intended way to create a multi-label vertex (D8) — no longer an
-            // error shape.
-            ArgStrings::List(v) => Some(v),
-        };
-
-        let step = GraphStep::SideEffectMut(
-            "add_v",
-            Box::new(StepAddV {
-                args,
-                id: None,
-                properties: PropertyMap::default(),
-                create_time: None,
-            }),
-        );
-        self.push_step(step)
+        self.push_step(add_v_step(args))
     }
 }
 
@@ -93,25 +115,27 @@ impl __ {
 impl<'g, S: GraphStorage + 'g> AnonymousTraversal<'g, S> {
     /// Adds a vertex with the given label; chain property() to set its properties.
     pub fn add_v<T: Into<ArgStrings>>(self, args: T) -> Self {
-        let args = match args.into() {
-            ArgStrings::None => None,
-            ArgStrings::String(v) => Some(vec![v]),
-            ArgStrings::List(v) => Some(v),
-        };
-        let step = GraphStep::SideEffectMut(
-            "add_v",
-            Box::new(StepAddV {
-                args,
-                id: None,
-                properties: PropertyMap::default(),
-                create_time: None,
-            }),
-        );
-        self.push_step(step)
+        self.push_step(add_v_step(args))
     }
 }
 
-impl<'g, S: GraphStorage + 'g> GraphStepSideEffectMut<'g, S> for StepAddV {
+/// The traverser a child traversal of an add step runs on: the incoming one, or a seed holding
+/// `null` for the start form (`g.add_v(..)`).
+fn parent_or_seed<'a, S: GraphStorage>(
+    context: &TraverserContext<'_, S>,
+    source: &'a Option<Traverser<S>>,
+    seed: &'a mut Option<Traverser<S>>,
+) -> &'a Traverser<S> {
+    match source {
+        Some(traverser) => traverser,
+        None => seed.insert(Traverser::start(
+            context,
+            TraverserValue::Computed(ElementProperty::Null, None),
+        )),
+    }
+}
+
+impl<'g, S: GraphStorage + 'g> GraphStepSideEffectMut<'g, S> for StepAddV<'g, S> {
     fn property_access(
         &self,
         visit: &mut dyn FnMut(Option<&str>, crate::graph::workload::AccessKind),
@@ -134,6 +158,14 @@ impl<'g, S: GraphStorage + 'g> GraphStepSideEffectMut<'g, S> for StepAddV {
         context: &mut TraverserContext<'_, S>,
         source: Option<Traverser<S>>,
     ) -> TraverserResult<Vec<Traverser<S>>> {
+        let id = match &self.id {
+            None => None,
+            Some(id) => {
+                let mut seed = None;
+                let parent = parent_or_seed(context, &source, &mut seed);
+                Some(id.resolve(context, parent)?)
+            }
+        };
         let labels = self
             .args
             .clone()
@@ -142,12 +174,10 @@ impl<'g, S: GraphStorage + 'g> GraphStepSideEffectMut<'g, S> for StepAddV {
             .map(CompactString::from)
             .collect();
         let create = context.create_context_or(self.create_time)?;
-        let node_index = context.storage.add_vertex_with(
-            self.id.clone(),
-            labels,
-            self.properties.clone(),
-            &create,
-        )?;
+        let node_index =
+            context
+                .storage
+                .add_vertex_with(id, labels, self.properties.clone(), &create)?;
         match source {
             // Derived from the incoming traverser (TinkerPop `split`): its path, bulk and sack.
             Some(source) => Ok(vec![source.split(TraverserValue::Vertex(node_index))]),
@@ -158,7 +188,32 @@ impl<'g, S: GraphStorage + 'g> GraphStepSideEffectMut<'g, S> for StepAddV {
         }
     }
 
-    fn as_add_element_mut(&mut self) -> Option<&mut dyn AddElementStep> {
+    fn child_traversals_mut(&mut self) -> Vec<&mut AnonymousTraversal<'g, S>> {
+        self.id
+            .as_mut()
+            .and_then(AddElementId::child_mut)
+            .into_iter()
+            .collect()
+    }
+
+    fn analyze_nested_paths(
+        &mut self,
+        analysis: &crate::traversal::optimizer::path_analysis::PathAnalysis,
+        _downstream: &crate::traversal::optimizer::path_analysis::PathRequirement,
+    ) -> crate::traversal::optimizer::path_analysis::PathRequirement {
+        // The id traversal runs on the incoming traverser; only its first result is used.
+        self.child_traversals_mut().into_iter().fold(
+            crate::traversal::optimizer::path_analysis::PathRequirement::None,
+            |need, child| {
+                need.union(child.analyze_paths(
+                    analysis,
+                    crate::traversal::optimizer::path_analysis::PathRequirement::None,
+                ))
+            },
+        )
+    }
+
+    fn as_add_element_mut(&mut self) -> Option<&mut dyn AddElementStep<'g, S>> {
         Some(self)
     }
 
@@ -174,7 +229,7 @@ impl<'g, S: GraphStorage + 'g> GraphStepSideEffectMut<'g, S> for StepAddV {
 struct StepAddVBy<'g, S: GraphStorage + 'g> {
     label: AnonymousTraversal<'g, S>,
     /// The user-supplied id from a folded `property(T.id, v)`.
-    id: Option<CompactString>,
+    id: Option<AddElementId<'g, S>>,
     /// The properties folded in by the `add_property_fold` rule.
     properties: PropertyMap,
     /// The time of `defaultFunction` `now`/`today` the script DSL pinned for this step (the
@@ -206,18 +261,14 @@ impl<'g, S: GraphStorage + 'g> fmt::Display for StepAddVBy<'g, S> {
         }
         write!(f, ")")?;
         if let Some(id) = &self.id {
-            write!(
-                f,
-                ".property(T.id, {})",
-                crate::value::literal::rhai_string(id)
-            )?;
+            write!(f, "{id}")?;
         }
         Ok(())
     }
 }
 
-impl<'g, S: GraphStorage + 'g> AddElementStep for StepAddVBy<'g, S> {
-    fn set_id(&mut self, id: CompactString) {
+impl<'g, S: GraphStorage + 'g> AddElementStep<'g, S> for StepAddVBy<'g, S> {
+    fn set_id(&mut self, id: AddElementId<'g, S>) {
         self.id = Some(id);
     }
 
@@ -300,17 +351,8 @@ impl<'g, S: GraphStorage + 'g> GraphStepSideEffectMut<'g, S> for StepAddVBy<'g, 
         context: &mut TraverserContext<'_, S>,
         source: Option<Traverser<S>>,
     ) -> TraverserResult<Vec<Traverser<S>>> {
-        let seed;
-        let parent: &Traverser<S> = match &source {
-            Some(traverser) => traverser,
-            None => {
-                seed = Traverser::start(
-                    context,
-                    TraverserValue::Computed(ElementProperty::Null, None),
-                );
-                &seed
-            }
-        };
+        let mut seed = None;
+        let parent = parent_or_seed(context, &source, &mut seed);
         let label = match self.label.first(context, parent)? {
             Some(found) => match found.value.into_node_property(context.storage)? {
                 ElementProperty::String(text) => text,
@@ -328,13 +370,15 @@ impl<'g, S: GraphStorage + 'g> GraphStepSideEffectMut<'g, S> for StepAddVBy<'g, 
                 )));
             }
         };
+        let id = match &self.id {
+            None => None,
+            Some(id) => Some(id.resolve(context, parent)?),
+        };
         let create = context.create_context_or(self.create_time)?;
-        let node_index = context.storage.add_vertex_with(
-            self.id.clone(),
-            vec![label],
-            self.properties.clone(),
-            &create,
-        )?;
+        let node_index =
+            context
+                .storage
+                .add_vertex_with(id, vec![label], self.properties.clone(), &create)?;
         match source {
             // Derived from the incoming traverser: its path, bulk and sack.
             Some(source) => Ok(vec![source.split(TraverserValue::Vertex(node_index))]),
@@ -346,8 +390,12 @@ impl<'g, S: GraphStorage + 'g> GraphStepSideEffectMut<'g, S> for StepAddVBy<'g, 
         }
     }
 
+    /// The label traversal first (the step's argument), then the id traversal of a folded
+    /// `property(T.id, traversal)`.
     fn child_traversals_mut(&mut self) -> Vec<&mut AnonymousTraversal<'g, S>> {
-        vec![&mut self.label]
+        let mut children = vec![&mut self.label];
+        children.extend(self.id.as_mut().and_then(AddElementId::child_mut));
+        children
     }
 
     fn analyze_nested_paths(
@@ -355,14 +403,20 @@ impl<'g, S: GraphStorage + 'g> GraphStepSideEffectMut<'g, S> for StepAddVBy<'g, 
         analysis: &crate::traversal::optimizer::path_analysis::PathAnalysis,
         _downstream: &crate::traversal::optimizer::path_analysis::PathRequirement,
     ) -> crate::traversal::optimizer::path_analysis::PathRequirement {
-        // The label traversal runs on the incoming traverser; only its first result is used.
-        self.label.analyze_paths(
-            analysis,
+        // The label and id traversals run on the incoming traverser; only their first result
+        // is used.
+        self.child_traversals_mut().into_iter().fold(
             crate::traversal::optimizer::path_analysis::PathRequirement::None,
+            |need, child| {
+                need.union(child.analyze_paths(
+                    analysis,
+                    crate::traversal::optimizer::path_analysis::PathRequirement::None,
+                ))
+            },
         )
     }
 
-    fn as_add_element_mut(&mut self) -> Option<&mut dyn AddElementStep> {
+    fn as_add_element_mut(&mut self) -> Option<&mut dyn AddElementStep<'g, S>> {
         Some(self)
     }
 

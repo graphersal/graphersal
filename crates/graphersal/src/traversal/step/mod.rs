@@ -1199,7 +1199,7 @@ pub(crate) trait GraphStepSideEffectMut<'g, S: GraphStorage + 'g>:
     /// The element-creating step (`addV()`/`addE()`) behind this step, so a following
     /// `property(T.id|T.label, v)` can fold into it (TinkerPop folds `property()` calls that
     /// directly follow an add step into it). Every other step keeps the default `None`.
-    fn as_add_element_mut(&mut self) -> Option<&mut dyn AddElementStep> {
+    fn as_add_element_mut(&mut self) -> Option<&mut dyn AddElementStep<'g, S>> {
         None
     }
     /// For a plain `property(name, constant)` step: the key and the constant value, so the
@@ -1232,13 +1232,110 @@ pub(crate) trait GraphStepSideEffectMut<'g, S: GraphStorage + 'g>:
     fn clone_box(&self) -> Box<dyn GraphStepSideEffectMut<'g, S> + 'g>;
 }
 
+/// The user-supplied id of the element an add step creates, from a folded `property(T.id, v)`:
+/// a constant, or a child traversal run on the traverser reaching the add step (TinkerPop's
+/// `AddVertexStep`/`AddEdgeStep` parameters are evaluated per traverser), whose first result
+/// is converted like the constant (a string as-is, an integer as its decimal string).
+pub(crate) enum AddElementId<'g, S: GraphStorage + 'g> {
+    Constant(compact_str::CompactString),
+    Traversal(AnonymousTraversal<'g, S>),
+}
+
+impl<'g, S: GraphStorage + 'g> Clone for AddElementId<'g, S> {
+    fn clone(&self) -> Self {
+        match self {
+            AddElementId::Constant(id) => AddElementId::Constant(id.clone()),
+            AddElementId::Traversal(traversal) => AddElementId::Traversal(traversal.clone()),
+        }
+    }
+}
+
+impl<'g, S: GraphStorage + 'g> fmt::Display for AddElementId<'g, S> {
+    /// `.property(T.id, ..)` as written after the add step.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            AddElementId::Constant(id) => write!(
+                f,
+                ".property(T.id, {})",
+                crate::value::literal::rhai_string(id)
+            ),
+            AddElementId::Traversal(traversal) => write!(f, ".property(T.id, {traversal})"),
+        }
+    }
+}
+
+impl<'g, S: GraphStorage + 'g> AddElementId<'g, S> {
+    /// The child traversal, if the id comes from one.
+    pub(crate) fn child_mut(&mut self) -> Option<&mut AnonymousTraversal<'g, S>> {
+        match self {
+            AddElementId::Constant(_) => None,
+            AddElementId::Traversal(traversal) => Some(traversal),
+        }
+    }
+
+    /// The id for the element created for `parent`: the constant, or the first result of the
+    /// traversal run on `parent`, which must be a string or an integer (no result or another
+    /// value fails naming `property(T.id, ..)`).
+    pub(crate) fn resolve(
+        &self,
+        context: &mut TraverserContext<'_, S>,
+        parent: &Traverser<S>,
+    ) -> TraverserResult<compact_str::CompactString> {
+        let traversal = match self {
+            AddElementId::Constant(id) => return Ok(id.clone()),
+            AddElementId::Traversal(traversal) => traversal,
+        };
+        let failed = |found: String| {
+            Box::new(crate::error::TraverserError::QueryExecution {
+                query: TOKEN_ID_TRAVERSAL_QUERY.to_string(),
+                reason: format!(
+                    "the id traversal of property(T.id, {traversal}) returned {found}; an id is \
+                     a string or an integer"
+                ),
+            })
+        };
+        let Some(found) = traversal.first(context, parent)? else {
+            return Err(failed("no result".to_string()));
+        };
+        let value = found.value.into_node_property(context.storage)?;
+        match &value {
+            crate::ElementProperty::String(text) => return Ok(text.clone()),
+            crate::ElementProperty::Number(number) => {
+                if let Some(int) = number.as_i64() {
+                    return Ok(compact_str::format_compact!("{int}"));
+                }
+            }
+            _ => {}
+        }
+        Err(failed(format!(
+            "{} (a {})",
+            crate::value::literal::rhai_literal(&value),
+            crate::graph::schema::value_type_name(&value)
+        )))
+    }
+}
+
+/// The `query` of the [`crate::error::TraverserError::QueryExecution`] a failing
+/// `property(T.id, traversal)` raises; its `help()` arm matches it.
+pub(crate) const TOKEN_ID_TRAVERSAL_QUERY: &str = "property(T.id, traversal)";
+
 /// An element-creating step that `property(T.id, v)` / `property(T.label, v)` can fold into.
-pub(crate) trait AddElementStep {
+pub(crate) trait AddElementStep<'g, S: GraphStorage + 'g> {
     /// Sets the user-supplied id of the element this step creates.
-    fn set_id(&mut self, id: compact_str::CompactString);
+    fn set_id(&mut self, id: AddElementId<'g, S>);
     /// Replaces the label of the element this step creates; `false` when the step cannot take a
     /// label this way (`addE()`, whose label comes from `addE(label)`).
     fn set_label(&mut self, label: compact_str::CompactString) -> bool;
+    /// For `property(T.label, traversal)`: the step that replaces this one, creating the same
+    /// element with its label taken from `label` (`addV(traversal)`); `None` when the step
+    /// cannot take a label this way (`addE()`, `addV(traversal)` itself).
+    fn with_label_traversal(
+        &mut self,
+        label: AnonymousTraversal<'g, S>,
+    ) -> Option<Box<dyn GraphStepSideEffectMut<'g, S> + 'g>> {
+        let _ = label;
+        None
+    }
     /// Adds a property the element is created with (the `add_property_fold` rule). A key that
     /// is already present is overwritten, so the last `property()` of a key wins, exactly as the
     /// unfused sequence would leave it.
