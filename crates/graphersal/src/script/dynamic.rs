@@ -3,6 +3,7 @@
 //! checkers and mismatch diagnostics the step builder methods share.
 
 use super::*;
+use crate::error::VALUE_ARGUMENT;
 
 /// The options map of `glob_path(pattern, #{...})`, checked for its keys and value types when
 /// the step is built; `max_depth` is range-checked by the Rust step when it executes.
@@ -229,6 +230,12 @@ pub(super) fn ids_from_dynamic(
         levels: usize,
         max_depth: usize,
     ) -> Result<(), Box<rhai::EvalAltResult>> {
+        // A traversal is not an id: its text never matches, so the step used to find nothing.
+        refuse_traversal(
+            step_name,
+            "ids (strings, numbers, UUIDs), elements or lists of them",
+            &arg,
+        )?;
         if arg.is_array() {
             let inner = levels
                 .checked_sub(1)
@@ -240,6 +247,11 @@ pub(super) fn ids_from_dynamic(
             let map = arg.cast::<rhai::Map>();
             match map.get("id") {
                 Some(id) if !id.is_map() && !id.is_array() => {
+                    refuse_traversal(
+                        step_name,
+                        "ids (strings, numbers, UUIDs), elements or lists of them",
+                        id,
+                    )?;
                     out.push(dynamic_to_compact_string(id.clone()))
                 }
                 _ => {
@@ -521,7 +533,8 @@ pub fn script_value_to_property(
     } else {
         max_depth
     };
-    convert_bounded(value, max_depth).map_err(|TooDeep| value_too_deep(max_depth))
+    // Without refusing traversals the conversion only stops at the depth limit.
+    convert_bounded::<false>(value, max_depth).map_err(|_| value_too_deep(max_depth))
 }
 
 /// The error of a script value nested deeper than `max` levels.
@@ -542,12 +555,32 @@ fn value_too_deep_error(max: usize) -> Box<rhai::EvalAltResult> {
 }
 
 /// Converts a script value handed to the engine (a step argument, a token argument), bounded by
-/// the value-depth limit of the engine running `ctx` ([`ScriptLimits::max_value_depth`]).
+/// the value-depth limit of the engine running `ctx` ([`ScriptLimits::max_value_depth`]). `step`
+/// names the step (or function) the value is an argument of, for the error of a refused one: a
+/// traversal is never a value ([`dynamic_to_element_property`]).
 pub(super) fn value_arg(
     ctx: &NativeCallContext,
+    step: &str,
     arg: Dynamic,
 ) -> Result<ElementProperty, Box<rhai::EvalAltResult>> {
-    dynamic_to_element_property(arg, access::value_depth_of(ctx))
+    dynamic_to_element_property(step, arg, access::value_depth_of(ctx))
+}
+
+/// The error of a traversal found inside a list or map where `step` takes a value: like
+/// [`refuse_traversal`] for the argument itself.
+fn nested_traversal_error(step: &str, literal: Option<String>) -> Box<rhai::EvalAltResult> {
+    let actual = match literal {
+        Some(literal) => format!(
+            "{} ({literal}) inside a list or map",
+            crate::error::TRAVERSAL_ARGUMENT
+        ),
+        None => format!("{} inside a list or map", crate::error::TRAVERSAL_ARGUMENT),
+    };
+    script_error_from_script(crate::error::ScriptError::ArgumentMismatch {
+        step_name: step.to_string(),
+        expected: VALUE_ARGUMENT.to_string(),
+        actual,
+    })
 }
 
 /// Whether a script value is a schema in its data shape: a map whose `$schema` is the format
@@ -571,7 +604,7 @@ pub(super) fn schema_arg(
     let parsed = if arg.is_string() {
         GraphSchema::from_json(&dynamic_text(&arg))
     } else if arg.is_map() {
-        GraphSchema::from_value(&value_arg(ctx, arg)?)
+        GraphSchema::from_value(&value_arg(ctx, "schema", arg)?)
     } else {
         return Err(Box::new(rhai::EvalAltResult::ErrorMismatchDataType(
             "a schema (a map or JSON text)".to_string(),
@@ -610,7 +643,9 @@ pub(super) fn patch_arg(
             .map_err(|err| script_error(Box::new(crate::TraverserError::Schema(err))))
     } else if arg.is_map() {
         Ok(crate::graph::schema::SchemaPatch::from_value(value_arg(
-            ctx, arg,
+            ctx,
+            "patch_schema",
+            arg,
         )?))
     } else {
         Err(Box::new(rhai::EvalAltResult::ErrorMismatchDataType(
@@ -624,21 +659,32 @@ pub(super) fn patch_arg(
 /// [`value_arg`] for every item of `args`.
 pub(super) fn value_args(
     ctx: &NativeCallContext,
+    step: &str,
     args: Vec<Dynamic>,
 ) -> Result<Vec<ElementProperty>, Box<rhai::EvalAltResult>> {
     let max = access::value_depth_of(ctx);
     args.into_iter()
-        .map(|arg| dynamic_to_element_property(arg, max))
+        .map(|arg| dynamic_to_element_property(step, arg, max))
         .collect()
 }
 
 /// Converts a script value into an [`ElementProperty`], failing with the `script.max_value_depth`
 /// error when it nests deeper than `max_depth` levels.
+///
+/// A traversal is not a value: as the value itself or anywhere inside a list or map it is a
+/// `ScriptError::ArgumentMismatch` naming `step` (its text used to be stored as the string
+/// `"GraphTraversalSource"`). A step that runs a traversal argument checks for one before it
+/// converts a value.
 pub(super) fn dynamic_to_element_property(
+    step: &str,
     arg: Dynamic,
     max_depth: usize,
 ) -> Result<ElementProperty, Box<rhai::EvalAltResult>> {
-    convert_bounded(arg, max_depth).map_err(|TooDeep| value_too_deep_error(max_depth))
+    refuse_traversal(step, VALUE_ARGUMENT, &arg)?;
+    convert_bounded::<true>(arg, max_depth).map_err(|refused| match refused {
+        Refused::TooDeep => value_too_deep_error(max_depth),
+        Refused::Traversal(literal) => nested_traversal_error(step, literal),
+    })
 }
 
 /// `true` when a script value nests deeper than `levels` levels of arrays/maps. The recursion
@@ -666,12 +712,22 @@ pub(super) fn dynamic_exceeds_depth(value: &Dynamic, levels: usize) -> bool {
     false
 }
 
-/// A script value nested deeper than the limit (the conversion stopped there).
-struct TooDeep;
+/// Why [`convert_bounded`] stopped.
+enum Refused {
+    /// A script value nested deeper than the limit (the conversion stopped there).
+    TooDeep,
+    /// A traversal inside a list or map, with its DSL literal: a traversal is not a value.
+    Traversal(Option<String>),
+}
 
 /// The conversion behind [`dynamic_to_element_property`]: `levels` is how many more levels of
 /// arrays/maps may nest at this position, so the recursion never goes deeper than the limit.
-fn convert_bounded(arg: Dynamic, levels: usize) -> Result<ElementProperty, TooDeep> {
+/// `REFUSE_TRAVERSAL` stops at a traversal ([`Refused::Traversal`]); without it a traversal
+/// becomes its display text, as [`script_value_to_property`] documents for a host.
+fn convert_bounded<const REFUSE_TRAVERSAL: bool>(
+    arg: Dynamic,
+    levels: usize,
+) -> Result<ElementProperty, Refused> {
     Ok(if arg.is_string() {
         ElementProperty::String(dynamic_to_compact_string(arg))
     } else if arg.is_float() {
@@ -693,22 +749,22 @@ fn convert_bounded(arg: Dynamic, levels: usize) -> Result<ElementProperty, TooDe
             ElementProperty::Boolean(false)
         }
     } else if arg.is_array() {
-        let inner = levels.checked_sub(1).ok_or(TooDeep)?;
+        let inner = levels.checked_sub(1).ok_or(Refused::TooDeep)?;
         let arr = arg.cast::<rhai::Array>();
         ElementProperty::Array(
             arr.into_iter()
-                .map(|item| convert_bounded(item, inner))
+                .map(|item| convert_bounded::<REFUSE_TRAVERSAL>(item, inner))
                 .collect::<Result<_, _>>()?,
         )
     } else if arg.is_map() {
-        let inner = levels.checked_sub(1).ok_or(TooDeep)?;
+        let inner = levels.checked_sub(1).ok_or(Refused::TooDeep)?;
         let map = arg.cast::<rhai::Map>();
         ElementProperty::Object(Box::new(
             map.into_iter()
                 .map(|(key, value)| {
                     Ok((
                         CompactString::new(key.as_str()),
-                        convert_bounded(value, inner)?,
+                        convert_bounded::<REFUSE_TRAVERSAL>(value, inner)?,
                     ))
                 })
                 .collect::<Result<_, _>>()?,
@@ -741,9 +797,11 @@ fn convert_bounded(arg: Dynamic, levels: usize) -> Result<ElementProperty, TooDe
         // An engine map value: already a property, measured without recursion.
         let property = map.0.clone().into_property();
         if crate::value::depth::property_exceeds_depth(&property, levels) {
-            return Err(TooDeep);
+            return Err(Refused::TooDeep);
         }
         property
+    } else if REFUSE_TRAVERSAL && arg.is::<ScriptGraphTraversalSource>() {
+        return Err(Refused::Traversal(super::render::token_literal(&arg)));
     } else if let Some(token) = token_placeholder(&arg) {
         ElementProperty::String(token)
     } else {
@@ -797,6 +855,17 @@ pub(super) fn dynamic_to_json_value(
             .checked_sub(1)
             .ok_or_else(|| value_too_deep_error(max))
     };
+    // A traversal is not a value (its text used to be stored as "GraphTraversalSource").
+    if arg.is::<ScriptGraphTraversalSource>() {
+        return Err(if levels == max {
+            match refuse_traversal("property_json", "a map of values or a JSON object", &arg) {
+                Err(err) => err,
+                Ok(()) => nested_traversal_error("property_json", None),
+            }
+        } else {
+            nested_traversal_error("property_json", super::render::token_literal(&arg))
+        });
+    }
     Ok(if arg.is_unit() {
         serde_json::Value::Null
     } else if arg.is_bool() {
@@ -1279,7 +1348,11 @@ pub(super) fn has_t_mismatch(expected: &str, actual: String) -> Box<rhai::EvalAl
 /// The entries of a DSL `property(map)`: a `Cardinality.x(v)` value becomes `v` with that
 /// cardinality; every other value converts through [`dynamic_to_element_property`] (each value
 /// at most `max_depth` levels deep).
+///
+/// A traversal value is refused naming `step` and the key: the map holds values (TinkerPop's
+/// `mergeV(Map)` does not run one; `property(key, traversal)` is the form that does).
 pub(super) fn property_entries_of(
+    step: &str,
     map: rhai::Map,
     max_depth: usize,
 ) -> Result<Vec<PropertyEntry>, Box<rhai::EvalAltResult>> {
@@ -1289,9 +1362,25 @@ pub(super) fn property_entries_of(
                 Some(wrapped) => (wrapped.value.clone(), Some(wrapped.cardinality)),
                 None => (value.clone(), None),
             };
+            if value.is::<ScriptGraphTraversalSource>() {
+                let literal = super::render::token_literal(&value)
+                    .map(|literal| format!(" ({literal})"))
+                    .unwrap_or_default();
+                return Err(script_error_from_script(
+                    crate::error::ScriptError::ArgumentMismatch {
+                        step_name: step.to_string(),
+                        expected: crate::error::MAP_OF_VALUES.to_string(),
+                        actual: format!(
+                            "{}{literal} as the value of {}",
+                            crate::error::TRAVERSAL_ARGUMENT,
+                            crate::value::literal::rhai_string(key.as_str())
+                        ),
+                    },
+                ));
+            }
             Ok(PropertyEntry {
                 key: CompactString::new(key.as_str()),
-                value: dynamic_to_element_property(value, max_depth)?,
+                value: dynamic_to_element_property(step, value, max_depth)?,
                 cardinality,
             })
         })
@@ -1302,11 +1391,13 @@ pub(super) fn property_entries_of(
 /// `Cardinality.x(v)` cardinality), `()` (no entries), a traversal, or any other value (rejected
 /// by the step before execution). Values are at most `max_depth` levels deep.
 pub(super) fn script_merge_arg(
+    step: &str,
     arg: Dynamic,
     max_depth: usize,
 ) -> Result<ScriptMergeArg, Box<rhai::EvalAltResult>> {
     if arg.is_map() {
         Ok(ScriptMergeArg::Entries(property_entries_of(
+            step,
             arg.cast::<rhai::Map>(),
             max_depth,
         )?))
@@ -1316,7 +1407,7 @@ pub(super) fn script_merge_arg(
         Ok(ScriptMergeArg::Traversal(try_dynamic_to_gts(arg)?))
     } else {
         Ok(ScriptMergeArg::Value(dynamic_to_element_property(
-            arg, max_depth,
+            step, arg, max_depth,
         )?))
     }
 }

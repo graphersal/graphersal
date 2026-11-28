@@ -318,7 +318,7 @@ pub(crate) const DOCS: &[FnDoc] = docs! {
         "Joins the elements of the incoming list into one string with the given delimiter (see the book page Step - conjoin).",
         "g.inject([\"a\", \"b\", \"c\"]).conjoin(\"-\").next()" => "a-b-c";
     "traversal" "constant":
-        "Replaces every incoming value with the given constant.",
+        "Replaces every incoming value with the given constant, a value: a traversal is refused (map(traversal) replaces each value with the traversal's first result).",
         "g.v().has_label(\"software\").constant(\"app\").to_list()" => "[\"app\", \"app\"]";
     "traversal" "count":
         "Counts the traversers (bulk included); with Scope.local counts the elements of each incoming collection.",
@@ -502,7 +502,7 @@ pub(crate) const DOCS: &[FnDoc] = docs! {
         "Infers a schema map from the data: on g from the whole graph, after steps from the elements the traversal yields.",
         "g.infer_schema()[\"vertices\"].keys()" => "[\"person\", \"software\"]";
     "traversal" "inject":
-        "Inserts the given values into the stream (on g it starts a traversal with them).",
+        "Inserts the given values into the stream (on g it starts a traversal with them); a traversal is not a value and is refused (union() adds what a traversal yields).",
         "g.inject(1, 2, 3).sum().next()" => "6";
     "traversal" "intersect":
         "Keeps the elements of the incoming list that are also in the given list.",
@@ -823,10 +823,10 @@ pub(crate) const DOCS: &[FnDoc] = docs! {
         "Records full paths for this traversal (TinkerPop's withPath(); path recording is otherwise derived from the query).",
         "g.with_path().v(1).out().path().count().next()" => "3";
     "traversal" "with_sack":
-        "Gives every traverser an initial sack value, optionally with a merge Operator for when traversers merge.",
+        "Gives every traverser an initial sack value (a value, never a traversal), optionally with a merge Operator for when traversers merge.",
         "g.with_sack(0).v(1).sack().next()" => "0";
     "traversal" "with_side_effect":
-        "Starts the traversal with a named side effect holding the given value (optionally with a reducing Operator).",
+        "Starts the traversal with a named side effect holding the given value, never a traversal (optionally with a reducing Operator).",
         "g.with_side_effect(\"x\", [1]).v(1).values(\"age\").aggregate(\"x\").cap(\"x\").next()" => "[1, 29]";
     "P" "eq":
         "Equal to the value.",

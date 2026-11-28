@@ -160,7 +160,7 @@ impl ScriptGraphTraversalSource {
         this: &mut Self,
         arg: Dynamic,
     ) -> Result<Self, Box<rhai::EvalAltResult>> {
-        let value = value_arg(&ctx, arg)?;
+        let value = value_arg(&ctx, "constant", arg)?;
         Ok(this.add_step(Step::Constant(value)))
     }
 
@@ -667,7 +667,7 @@ impl ScriptGraphTraversalSource {
         let max_depth = access::value_depth_of(&ctx);
         // `option(Merge.onCreate|onMatch|outV|inV, map|()|traversal)` belongs to a merge step.
         if let Some(token) = pick.read_lock::<Merge>().map(|token| *token) {
-            let branch = script_merge_arg(branch, max_depth)?;
+            let branch = script_merge_arg("option", branch, max_depth)?;
             return Ok(this.add_step(Step::MergeOption(token, branch, None)));
         }
         let branch = try_dynamic_to_gts(branch)?;
@@ -684,7 +684,7 @@ impl ScriptGraphTraversalSource {
                 Some(Pick::Any) => OptionToken::Any,
                 Some(Pick::None) => OptionToken::None,
                 Some(Pick::Unproductive) => OptionToken::Unproductive,
-                None => OptionToken::Value(dynamic_to_element_property(pick, max_depth)?),
+                None => OptionToken::Value(dynamic_to_element_property("option", pick, max_depth)?),
             }
         };
         Ok(this.add_step(Step::Option(token, branch)))

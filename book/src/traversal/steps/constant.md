@@ -3,7 +3,7 @@
 
 `constant` · category: [Values and properties](../../traversal/step_reference.md#values-and-properties)
 
-Replaces every incoming value with the given constant.
+Replaces every incoming value with the given constant, a value: a traversal is refused (map(traversal) replaces each value with the traversal's first result).
 
 ## Forms
 

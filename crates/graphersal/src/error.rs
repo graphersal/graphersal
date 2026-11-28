@@ -3037,10 +3037,109 @@ pub enum ScriptError {
 /// takes values (issue #9); the `help()` arm recognizes it by this prefix.
 pub(crate) const TRAVERSAL_ARGUMENT: &str = "a traversal";
 
+/// The `expected` text of a [`ScriptError::ArgumentMismatch`] for a step argument that is a
+/// value (a constant, an injected value, a sack or side-effect seed, ...): a traversal there is
+/// not run, and its help says so.
+pub(crate) const VALUE_ARGUMENT: &str =
+    "a value (a string, a number, a boolean, (), a list or a map of values, ...)";
+
+/// The `expected` text of a [`ScriptError::ArgumentMismatch`] for a map argument whose values
+/// are values (`property(map)`, `merge_v(map)`, `merge_e(map)`, `option(Merge.x, map)`).
+pub(crate) const MAP_OF_VALUES: &str = "a map of values";
+
 /// The help of a traversal given to a step that takes values (ids, labels, names, property
-/// keys): the step's own value forms, and the step that runs the traversal instead.
-fn traversal_argument_help(step_name: &str) -> String {
+/// keys, data values): the step's own value forms, and the step that runs the traversal instead.
+/// `expected` tells a data value ([`VALUE_ARGUMENT`], [`MAP_OF_VALUES`]) from a name.
+fn traversal_argument_help(step_name: &str, expected: &str) -> String {
     match step_name {
+        "constant" => "constant() takes a value, not a traversal: its argument is not run, it is \
+             the same value for every traverser, for example g.v().constant(\"x\"). To replace \
+             each traverser by what a traversal yields for it, use map() (its first result) or \
+             flat_map() (every result): g.v(\"1\").map(__.out().count()) or \
+             g.v(\"1\").flat_map(__.out()); to go back to a labelled step, use select(): \
+             g.v().as(\"a\").out().select(\"a\")."
+            .to_string(),
+        "inject" => "inject() takes values, not a traversal: its arguments are not run, for \
+             example g.inject(1, 2) or g.inject([1, 2]) (one list). To add what a traversal \
+             yields to the stream, use union(): g.v(\"1\").union(__.identity(), __.out()); or \
+             run the traversal first and inject its result: \
+             let xs = g.v().values(\"name\").to_list(); g.inject(xs).unfold()."
+            .to_string(),
+        "with_sack" => "with_sack() takes the initial sack value (and optionally the merge \
+             Operator), not a traversal: g.with_sack(1.0).v().sack() or \
+             g.with_sack(1, Operator.sum).v(). To set each sack from what a traversal yields, \
+             start with a value and assign it with sack(Operator).by(..): \
+             g.with_sack(0).v().sack(Operator.assign).by(\"age\").sack() (by() also takes a \
+             traversal: sack(Operator.assign).by(__.out().count()))."
+            .to_string(),
+        "with_side_effect" => "with_side_effect() takes the initial value of the side effect \
+             (a value, Set.of(..), or a graph for subgraph()), not a traversal: \
+             g.with_side_effect(\"a\", [\"marko\"]).v().values(\"name\").where(P.within(\"a\")). \
+             To fill a side effect from a traversal, collect it with aggregate()/store(): \
+             g.v().has_label(\"software\").aggregate(\"a\").cap(\"a\"); or run the traversal \
+             first and pass its result: let names = \
+             g.v().has_label(\"software\").values(\"name\").to_list(); \
+             g.with_side_effect(\"a\", names).v().values(\"name\").where(P.within(\"a\"))."
+            .to_string(),
+        "fold" => "fold(seed, Operator) takes a value as the seed, not a traversal: \
+             g.v().values(\"age\").fold(0, Operator.sum). To start from what a traversal \
+             yields, run it first and pass its result: \
+             let base = g.v(\"1\").values(\"age\").next(); \
+             g.v().values(\"age\").fold(base, Operator.sum)."
+            .to_string(),
+        "with" => "with(key, value) sets an option of the traversal to a value, not a \
+             traversal: g.with(\"evaluationTimeout\", 500).v().count(). A value a traversal \
+             computes is passed after running it: let n = g.v().count().next(); \
+             g.with(\"evaluationTimeout\", n * 100).v().count()."
+            .to_string(),
+        "property" => "property(map) writes the values of the map, and a traversal is not a \
+             value: g.v(\"1\").property(#{nick: \"m\", rank: 1}). To write what a traversal \
+             yields, use property(key, traversal), one property per call: \
+             g.v(\"1\").property(\"friends\", __.out(\"knows\").count())."
+            .to_string(),
+        "merge_v" | "merge_e" | "option" if expected == MAP_OF_VALUES => format!(
+            "The map of {step_name}() holds values, and a traversal in it is not run: \
+             g.merge_v(#{{name: \"vadas\"}}). To compute the map per traverser, pass one \
+             traversal for the whole map: g.v(\"2\").merge_v(__.project(\"name\").by(\"name\")) \
+             or g.inject(#{{name: \"vadas\"}}).merge_v(__.identity())."
+        ),
+        "property_json" => "property_json() takes a map (or JSON object) of plain values, not \
+             traversals: g.v(\"1\").property_json(#{a: 1}). To write what a traversal yields, \
+             use property(key, traversal): \
+             g.v(\"1\").property(\"friends\", __.out(\"knows\").count())."
+            .to_string(),
+        "CastPolicy.Default" => "CastPolicy.Default(v) takes the fallback value, not a \
+             traversal: g.inject(\"x\").as_number(GType.LONG, CastPolicy.Default(0)). To fall \
+             back to what a traversal yields, skip the value and use coalesce(): \
+             g.inject(\"x\").coalesce(__.as_number(GType.LONG, CastPolicy.Skip), __.constant(0))."
+            .to_string(),
+        "map[key]" | "contains" => "A map key is a value, not a traversal: \
+             let m = g.v().group_count().by(\"age\").next(); m[29] or m.contains(29). To look \
+             up the key a traversal yields, run it first: \
+             let k = g.v(\"1\").values(\"age\").next(); m[k]."
+            .to_string(),
+        "V" | "E" => format!(
+            "{}() takes ids (strings, numbers, UUIDs), elements returned by next()/to_list() or \
+             lists of them, not a traversal: g.v(\"1\") or g.v([\"1\", \"2\"]). To go to the \
+             elements a traversal reaches, continue with its steps, for example \
+             g.v(\"1\").out(\"knows\"), or filter with where(): \
+             g.v().where(__.in_(\"knows\").has_id(\"1\")).",
+            step_name.to_lowercase()
+        ),
+        "define_job" => "define_job() takes the args of its saved query as data (a string, \
+             a number, a boolean, (), a list or a map), never a traversal: a job runs later, \
+             without the script, for example g.define_job(#{name: \"nightly\", schedule: \
+             \"0 3 * * *\", action: \"query\", query: \"top\", args: #{limit: 5}}). Compute a \
+             value inside the saved query instead, or run the traversal first and pass its \
+             result: let n = g.v().count().next(); args: #{limit: n}."
+            .to_string(),
+        "define_query" | "query" => format!(
+            "{step_name}() takes parameter values (and defaults) that are data: a string, a \
+             number, a boolean, (), a list or a map, never a traversal, for example \
+             g.query(\"top\", #{{limit: 5}}) or params: #{{limit: #{{schema: \
+             #{{type: \"integer\"}}, default: 20}}}}. Run a traversal first and pass its result: \
+             let n = g.v().count().next(); g.query(\"top\", #{{limit: n}})."
+        ),
         "has_value" => "has_value() compares property values with a value or a predicate, not \
              a traversal: g.v().has_value(\"marko\") or g.v().has_value(P.within(\"marko\", \
              \"josh\")). To test the values with a traversal, use filter(): \
@@ -3079,6 +3178,13 @@ fn traversal_argument_help(step_name: &str) -> String {
              g.v().out(\"knows\") or g.v().out(\"knows\", \"created\"). To follow only the \
              edges a traversal picks, filter them: \
              g.v().out_e().where(__.in_v().has(\"name\", \"josh\")).in_v()."
+        ),
+        _ if expected == VALUE_ARGUMENT || expected == MAP_OF_VALUES => format!(
+            "{step_name}() takes a value here, not a traversal: a traversal given where a value \
+             is expected is not run. Run the traversal first and pass its result, for example \
+             let n = g.v().count().next(); g.inject(n), or use a step that runs a child \
+             traversal on each traverser: map(), flat_map(), union() or project().by(..), for \
+             example g.v(\"1\").map(__.out().count())."
         ),
         _ => format!(
             "{step_name}() takes names (strings) here, not a traversal, for example \
@@ -3208,10 +3314,11 @@ impl DiagnosticError for ScriptError {
                     .to_string(),
             ),
             ScriptError::ArgumentMismatch {
-                step_name, actual, ..
-            } if actual.starts_with(TRAVERSAL_ARGUMENT) =>
-            {
-                Some(traversal_argument_help(step_name))
+                step_name,
+                expected,
+                actual,
+            } if actual.starts_with(TRAVERSAL_ARGUMENT) => {
+                Some(traversal_argument_help(step_name, expected))
             }
             ScriptError::ArgumentMismatch { step_name, .. }
                 if matches!(step_name.as_str(), "property" | "has" | "values" | "has_not" | "has_property") =>

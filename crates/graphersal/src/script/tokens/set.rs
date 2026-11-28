@@ -37,6 +37,7 @@ pub(crate) fn script_set_from(items: Vec<Dynamic>) -> Result<ScriptSet, Box<rhai
         }
         // A plain value has no nesting: the depth bound cannot be reached.
         out.push(dynamic_to_element_property(
+            "Set.of",
             item,
             crate::value::depth::DEFAULT_MAX_VALUE_DEPTH,
         )?);
