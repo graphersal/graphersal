@@ -640,7 +640,7 @@ pub(crate) const DOCS: &[FnDoc] = docs! {
         "Yields the property elements of vertices/edges (all, or the given keys; a property named id or label is one of them, never the element's id or label).",
         "g.v(1).properties(\"age\").value().next()" => "29";
     "traversal" "property":
-        "Sets a property on the incoming element (Cardinality.single only); a null value is stored as null, use remove_property() to remove; a key id or label makes an ordinary property, never the element's id or label (see the book page Properties Named id or label).",
+        "Sets a property on the incoming element (Cardinality.single only); a null value is stored as null, use remove_property() to remove; a key id or label makes an ordinary property, never the element's id or label (see the book page Properties Named id or label); property(T.id, v) / property(T.label, v) right after add_v()/add_e() set the id/label of the new element, v a value or a traversal run on the traverser reaching the add step.",
         "g.v(1).property(\"age\", 30).values(\"age\").next()" => "30";
     "traversal" "property_json":
         "Sets every key of the given map (or JSON object) as a property of the incoming vertex (Graphersal extension); a key id or label makes an ordinary property, never the element's id or label.",

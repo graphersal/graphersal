@@ -477,6 +477,12 @@ impl ScriptGraphTraversalSource {
                 Step::PropertyToken(PropertyTokenKey::Label, val) => {
                     graph.property_label(val.clone())
                 }
+                Step::PropertyTokenTraversal(PropertyTokenKey::Id, gts) => {
+                    graph.property_id_by(gts.ast_convert_to_anonymous())
+                }
+                Step::PropertyTokenTraversal(PropertyTokenKey::Label, gts) => {
+                    graph.property_label_by(gts.ast_convert_to_anonymous())
+                }
                 // At the root, a merge step with no step before it starts the traversal and runs
                 // once, as `GraphTraversalSource::merge_v` decides.
                 Step::MergeV(arg) => {

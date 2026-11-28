@@ -392,7 +392,8 @@ impl ScriptGraphTraversalSource {
         Ok(this.add_step(Step::MergeOption(token, arg, Some(cardinality))))
     }
 
-    /// `property(T.id, v)` / `property(T.label, v)` on the element `addV()`/`addE()` creates.
+    /// `property(T.id, v|traversal)` / `property(T.label, v|traversal)` on the element
+    /// `addV()`/`addE()` creates; a traversal is run on each traverser reaching the add step.
     pub fn property_token(
         ctx: NativeCallContext,
         this: &mut Self,
@@ -412,6 +413,10 @@ impl ScriptGraphTraversalSource {
                     rhai::Position::NONE,
                 ))),
             };
+        if arg.is::<ScriptGraphTraversalSource>() {
+            let gts = try_dynamic_to_gts(arg)?;
+            return Ok(this.add_step(Step::PropertyTokenTraversal(key, gts)));
+        }
         let value = value_arg(&ctx, arg)?;
         Ok(this.add_step(Step::PropertyToken(key, value)))
     }

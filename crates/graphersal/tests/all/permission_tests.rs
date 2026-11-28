@@ -806,6 +806,38 @@ mod access_policy {
     }
 
     #[test]
+    fn the_id_traversal_of_an_add_step_is_checked_like_any_child() {
+        let graph = modern();
+        let write = || {
+            AccessPolicy::deny_all()
+                .allow(ActionKind::Create, ResourceKind::Data)
+                .allow(ActionKind::Update, ResourceKind::Data)
+        };
+        // An id from plain values reads nothing.
+        assert!(
+            run(
+                &graph,
+                r#"g.inject("n1").addV("x").property(T.id, __.identity()).next()"#,
+                write()
+            )
+            .is_ok()
+        );
+        assert_eq!(count(&graph), 7);
+        // An id read from the graph asks Read on its vertices, and is denied before anything
+        // is created.
+        assert_denied(
+            run(
+                &graph,
+                r#"g.inject(1).addV("x").property(T.id, __.V("1").values("name")).next()"#,
+                write(),
+            ),
+            "v",
+            "Read Data(vertex)",
+        );
+        assert_eq!(count(&graph), 7);
+    }
+
+    #[test]
     fn administrative_options_need_update_on_option_and_harmless_ones_do_not() {
         let graph = modern();
         for key in [
